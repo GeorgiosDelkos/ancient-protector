@@ -170,7 +170,7 @@ pub(super) fn fetch(
 
     let mut first_page_time = None;
     let mut start = 0;
-    loop {
+    for pages in 1.. {
         let page = request_page(feeds, product, window, start)?;
         first_page_time.get_or_insert(page.timestamp);
         let count = page.cves.len();
@@ -180,6 +180,14 @@ pub(super) fn fetch(
         // regression there from looping forever.
         if count == 0 || start >= page.total_results {
             break;
+        }
+        // Every page before the end holds at least one CVE, so there can be no more pages than
+        // results. More means the index is not advancing, or the total keeps growing.
+        if pages >= page.total_results {
+            return Err(FeedError::Unexpected {
+                url: cves_url(feeds),
+                what: "more pages than results",
+            });
         }
     }
 
@@ -218,7 +226,7 @@ fn request_page(
     window: Option<(Timestamp, Timestamp)>,
     start: usize,
 ) -> Result<PageData, FeedError> {
-    let url = format!("{}/rest/json/cves/2.0", feeds.endpoints.nvd);
+    let url = cves_url(feeds);
     let matcher = format!("cpe:2.3:*:*:{product}");
     let start_index = start;
     let start = start.to_string();
@@ -271,6 +279,10 @@ fn request_page(
         timestamp: page.timestamp,
         cves,
     })
+}
+
+fn cves_url(feeds: &Feeds) -> String {
+    format!("{}/rest/json/cves/2.0", feeds.endpoints.nvd)
 }
 
 /// Sleeps until the pacing interval since the previous NVD request has passed.
@@ -440,7 +452,9 @@ mod tests {
                         }})],
                     ),
                 ),
-                other => panic!("unexpected request {other:?}"),
+                // Answered, not panicked on: a panic would kill the server thread and leave the
+                // client waiting for its timeout instead of failing the test at once.
+                other => (500, format!("unexpected request {other:?}")),
             }
         });
         let tmp = tempfile::tempdir().unwrap();

@@ -132,6 +132,11 @@ fn advisories(
         }
     }
 
+    incomplete(failures)
+}
+
+/// Fails when any feed request failed, so a script sees that the printed output has gaps.
+fn incomplete(failures: usize) -> anyhow::Result<()> {
     if failures > 0 {
         anyhow::bail!("{failures} feed request(s) failed; the output above is incomplete");
     }
@@ -233,6 +238,16 @@ mod tests {
         let outer = anyhow::Error::new(inner).context("reading cache");
         let outer: &dyn std::error::Error = outer.as_ref();
         assert_eq!(error_chain(outer), "reading cache: disk on fire");
+    }
+
+    #[test]
+    fn any_failure_makes_the_output_incomplete() {
+        assert!(incomplete(0).is_ok());
+        let err = incomplete(3).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "3 feed request(s) failed; the output above is incomplete"
+        );
     }
 
     #[test]
