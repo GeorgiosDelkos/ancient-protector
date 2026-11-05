@@ -27,3 +27,7 @@ updates:
         applies-to: version-updates
         patterns:
           - "*"
+        # Major bumps can break the build, so each comes as its own PR.
+        update-types:
+          - "patch"
+          - "minor"
