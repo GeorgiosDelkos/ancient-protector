@@ -50,7 +50,7 @@ pub(super) fn fetch(
 fn query_ids(
     feeds: &Feeds,
     packages: &[Package],
-) -> Result<BTreeMap<String, Timestamp>, FeedError> {
+) -> Result<BTreeMap<String, Option<Timestamp>>, FeedError> {
     let url = format!("{}/v1/querybatch", feeds.endpoints.osv);
     let unique: BTreeSet<&Package> = packages.iter().collect();
     let mut pending: Vec<(&Package, Option<String>)> =
@@ -106,13 +106,14 @@ fn query_ids(
 fn record(
     feeds: &Feeds,
     id: &str,
-    modified: Timestamp,
+    modified: Option<Timestamp>,
 ) -> Result<(Header, Box<RawValue>), FeedError> {
     let key = cache_key(id)?;
     let cached: Option<Box<RawValue>> = feeds.cache.read("osv", key)?;
     if let Some(record) = cached
         && let Ok(header) = serde_json::from_str::<Header>(record.get())
-        && header.modified >= modified
+        && header.id == id
+        && modified.is_some_and(|m| header.modified >= m)
     {
         return Ok((header, record));
     }
@@ -162,10 +163,11 @@ struct BatchResult {
     next_page_token: Option<String>,
 }
 
+/// OSV documents `modified` on every result; without it the cached record is fetched again.
 #[derive(Debug, Deserialize)]
 struct VulnRef {
     id: String,
-    modified: Timestamp,
+    modified: Option<Timestamp>,
 }
 
 /// The fields of an OSV record this module reads; the rest stays in the raw record.
@@ -406,6 +408,52 @@ mod tests {
 
         let err = feeds.osv(&[pkg("npm:a")], History::All).unwrap_err();
         assert!(matches!(err, FeedError::BadId { .. }), "{err:?}");
+    }
+
+    /// One querybatch result for `A-1`, with or without a `modified` time.
+    fn single_ref_server(modified: Option<&'static str>) -> TestServer {
+        TestServer::start(move |request: &Request| {
+            if request.path() == "/v1/querybatch" {
+                let vuln = match modified {
+                    Some(m) => serde_json::json!({"id": "A-1", "modified": m}),
+                    None => serde_json::json!({"id": "A-1"}),
+                };
+                let body = serde_json::json!({"results": [{"vulns": [vuln]}]});
+                (200, body.to_string())
+            } else {
+                let record = record_json("A-1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+                (200, record)
+            }
+        })
+    }
+
+    #[test]
+    fn cached_file_with_other_id_is_fetched_again() {
+        let server = single_ref_server(Some("2026-01-01T00:00:00Z"));
+        let tmp = tempfile::tempdir().unwrap();
+        let wrong = record_json("Z-9", "2099-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+        std::fs::create_dir_all(tmp.path().join("osv")).unwrap();
+        std::fs::write(tmp.path().join("osv/A-1.json"), wrong).unwrap();
+
+        let advisories = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap();
+        assert_eq!(advisories[0].id, "A-1");
+        assert_eq!(server.requests().len(), 2, "the record was fetched");
+    }
+
+    #[test]
+    fn missing_modified_always_refetches() {
+        let server = single_ref_server(None);
+        let tmp = tempfile::tempdir().unwrap();
+        let feeds = feeds(&server, tmp.path());
+        feeds.osv(&[pkg("npm:a")], History::All).unwrap();
+        feeds.osv(&[pkg("npm:a")], History::All).unwrap();
+        assert_eq!(
+            server.requests().len(),
+            4,
+            "two batches and two record fetches"
+        );
     }
 
     #[test]

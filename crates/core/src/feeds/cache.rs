@@ -34,15 +34,20 @@ impl Cache {
     }
 
     /// Returns the cached value, or `None` when there is none or it does not parse.
+    ///
+    /// Any other read failure (permissions, a failing disk) is an error, so it is not mistaken
+    /// for an empty cache.
     pub(crate) fn read<T: DeserializeOwned>(
         &self,
         kind: &str,
         key: &str,
     ) -> Result<Option<T>, FeedError> {
         let path = self.path(kind, key)?;
-        Ok(fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok()))
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(serde_json::from_str(&text).ok()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(FeedError::Cache { path, source }),
+        }
     }
 
     pub(crate) fn write(
@@ -99,6 +104,21 @@ mod tests {
             Err(FeedError::BadId { .. })
         ));
         assert!(!tmp.path().join("escape.json").exists());
+    }
+
+    #[test]
+    fn unreadable_file_is_an_error_not_absent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(tmp.path().to_owned());
+        cache.write("osv", "A-1", &1).unwrap();
+        let file = tmp.path().join("osv/A-1.json");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = cache.read::<u32>("osv", "A-1");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(result, Err(FeedError::Cache { .. })), "{result:?}");
     }
 
     #[test]

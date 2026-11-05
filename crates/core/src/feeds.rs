@@ -250,8 +250,8 @@ pub enum FeedError {
         /// What was wrong.
         what: &'static str,
     },
-    /// A cache file could not be written.
-    #[error("cannot write feed cache {}", path.display())]
+    /// A cache file could not be read or written.
+    #[error("cannot use feed cache {}", path.display())]
     Cache {
         /// The cache file.
         path: PathBuf,
