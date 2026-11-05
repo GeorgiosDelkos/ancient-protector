@@ -33,14 +33,27 @@ pub(super) fn collect(root: &Path, inventory: &mut Inventory) {
                 continue;
             }
         };
-        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        let mut listed = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => listed.push(entry),
+                Err(e) => inventory.problems.push(InventoryError::io(&dir, e)),
+            }
+        }
+        let mut entries = listed;
         entries.sort_by_key(fs::DirEntry::file_name);
 
         for entry in entries {
             // `DirEntry::file_type` does not follow symlinks, so a link is neither a dir nor a
             // file here and is skipped.
-            let Ok(file_type) = entry.file_type() else {
-                continue;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(e) => {
+                    inventory
+                        .problems
+                        .push(InventoryError::io(&entry.path(), e));
+                    continue;
+                }
             };
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -52,21 +65,40 @@ pub(super) fn collect(root: &Path, inventory: &mut Inventory) {
             } else if file_type.is_file()
                 && let Some(parse) = parser(&name)
             {
-                let found = fs::read_to_string(&path)
-                    .map_err(|e| InventoryError::io(&path, e))
-                    .and_then(|text| parse(&path, &text));
+                let mut notes = Vec::new();
+                let found = read_lockfile(&path).and_then(|text| parse(&path, &text, &mut notes));
+                inventory.problems.extend(notes);
                 inventory.absorb(found);
             }
         }
     }
 }
 
-type Parser = fn(&Path, &str) -> Result<Vec<Component>, InventoryError>;
+/// The largest lockfile read, in bytes. Arbitrary: the biggest real lockfiles are a few MB, and
+/// a file far past that is not one, so it is reported instead of read into memory.
+const LOCKFILE_LIMIT: u64 = 64 * 1024 * 1024;
+
+fn read_lockfile(path: &Path) -> Result<String, InventoryError> {
+    let len = fs::metadata(path)
+        .map_err(|e| InventoryError::io(path, e))?
+        .len();
+    if len > LOCKFILE_LIMIT {
+        return Err(parse_error(
+            path,
+            &format!("{len} bytes, over the {LOCKFILE_LIMIT}-byte limit"),
+        ));
+    }
+    fs::read_to_string(path).map_err(|e| InventoryError::io(path, e))
+}
+
+/// Parses one lockfile. Facts worth reporting that do not stop the parse go in the notes.
+type Parser = fn(&Path, &str, &mut Vec<InventoryError>) -> Result<Vec<Component>, InventoryError>;
 
 fn parser(file_name: &str) -> Option<Parser> {
     match file_name {
         "Cargo.lock" => Some(parse_cargo_lock),
-        "package-lock.json" => Some(parse_package_lock),
+        // npm-shrinkwrap.json is a package-lock.json that a package publishes with itself.
+        "package-lock.json" | "npm-shrinkwrap.json" => Some(parse_package_lock),
         "uv.lock" => Some(parse_uv_lock),
         "poetry.lock" => Some(parse_poetry_lock),
         _ => None,
@@ -87,8 +119,20 @@ fn parse_error(path: &Path, detail: &impl ToString) -> InventoryError {
     InventoryError::parse(path.display().to_string(), detail)
 }
 
-/// Packages with a `registry+` source; workspace members have no source, git ones `git+`.
-fn parse_cargo_lock(path: &Path, text: &str) -> Result<Vec<Component>, InventoryError> {
+/// Packages from crates.io, by either index protocol. Cargo records the original source even
+/// when the index is mirrored, so these two URLs mean crates.io. Workspace members have no
+/// source and git ones `git+`; crates from another registry are left out and noted once, since
+/// OSV's crates.io advisories are about other crates that happen to share their names.
+const CRATES_IO_SOURCES: &[&str] = &[
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+];
+
+fn parse_cargo_lock(
+    path: &Path,
+    text: &str,
+    notes: &mut Vec<InventoryError>,
+) -> Result<Vec<Component>, InventoryError> {
     #[derive(Debug, Deserialize)]
     struct Lock {
         #[serde(default)]
@@ -102,22 +146,38 @@ fn parse_cargo_lock(path: &Path, text: &str) -> Result<Vec<Component>, Inventory
     }
 
     let lock: Lock = toml::from_str(text).map_err(|e| parse_error(path, &e))?;
-    Ok(lock
-        .package
-        .into_iter()
-        .filter(|p| {
-            p.source
-                .as_deref()
-                .is_some_and(|s| s.starts_with("registry+"))
-        })
-        .map(|p| component(path, Ecosystem::CratesIo, p.name, p.version))
-        .collect())
+    let mut components = Vec::new();
+    let mut other_registries = std::collections::BTreeSet::new();
+    for p in lock.package {
+        match p.source.as_deref() {
+            Some(source) if CRATES_IO_SOURCES.contains(&source) => {
+                components.push(component(path, Ecosystem::CratesIo, p.name, p.version));
+            }
+            Some(source) if source.starts_with("registry+") || source.starts_with("sparse+") => {
+                other_registries.insert(source.to_owned());
+            }
+            _ => {}
+        }
+    }
+    notes.extend(
+        other_registries
+            .into_iter()
+            .map(|registry| InventoryError::OtherRegistry {
+                path: path.to_owned(),
+                registry,
+            }),
+    );
+    Ok(components)
 }
 
 /// `lockfileVersion` 2 and 3 list every installed package under `packages`, keyed by its
 /// `node_modules/...` path. Version 1 (npm 6 and older) has a different shape and is reported
 /// rather than guessed at.
-fn parse_package_lock(path: &Path, text: &str) -> Result<Vec<Component>, InventoryError> {
+fn parse_package_lock(
+    path: &Path,
+    text: &str,
+    _notes: &mut Vec<InventoryError>,
+) -> Result<Vec<Component>, InventoryError> {
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Lock {
@@ -132,6 +192,10 @@ fn parse_package_lock(path: &Path, text: &str) -> Result<Vec<Component>, Invento
         version: Option<String>,
         #[serde(default)]
         link: bool,
+        /// Where it came from: a registry tarball (`https://...`), or a `git+`, `github:`,
+        /// `file:` or `link:` spec for a dependency that is not a registry package. Only
+        /// registry tarballs, or no `resolved` at all (bundled dependencies), are kept.
+        resolved: Option<String>,
     }
 
     let lock: Lock = serde_json::from_str(text).map_err(|e| parse_error(path, &e))?;
@@ -145,6 +209,12 @@ fn parse_package_lock(path: &Path, text: &str) -> Result<Vec<Component>, Invento
         .packages
         .into_iter()
         .filter(|(_, entry)| !entry.link)
+        .filter(|(_, entry)| {
+            entry
+                .resolved
+                .as_deref()
+                .is_none_or(|r| r.starts_with("https://") || r.starts_with("http://"))
+        })
         .filter_map(|(key, entry)| {
             // The root project is the "" key; nested copies are `node_modules/a/node_modules/b`.
             let folder_name = key.rsplit_once("node_modules/").map(|(_, name)| name)?;
@@ -155,7 +225,11 @@ fn parse_package_lock(path: &Path, text: &str) -> Result<Vec<Component>, Invento
 }
 
 /// Packages whose `source` is a `registry`; editable, virtual, path and git ones are local.
-fn parse_uv_lock(path: &Path, text: &str) -> Result<Vec<Component>, InventoryError> {
+fn parse_uv_lock(
+    path: &Path,
+    text: &str,
+    _notes: &mut Vec<InventoryError>,
+) -> Result<Vec<Component>, InventoryError> {
     #[derive(Debug, Deserialize)]
     struct Lock {
         #[serde(default)]
@@ -180,7 +254,11 @@ fn parse_uv_lock(path: &Path, text: &str) -> Result<Vec<Component>, InventoryErr
 
 /// Packages from PyPI (no `source`) or a private index (`source.type = "legacy"`); `git`,
 /// `directory`, `file` and `url` sources are not registry packages.
-fn parse_poetry_lock(path: &Path, text: &str) -> Result<Vec<Component>, InventoryError> {
+fn parse_poetry_lock(
+    path: &Path,
+    text: &str,
+    _notes: &mut Vec<InventoryError>,
+) -> Result<Vec<Component>, InventoryError> {
     #[derive(Debug, Deserialize)]
     struct Lock {
         #[serde(default)]
@@ -238,14 +316,44 @@ mod tests {
             name = "forked"
             version = "0.2.0"
             source = "git+https://github.com/x/forked#abc"
+            [[package]]
+            name = "mirrored"
+            version = "0.3.0"
+            source = "sparse+https://index.crates.io/"
+            [[package]]
+            name = "internal"
+            version = "1.0.0"
+            source = "sparse+https://cargo.example.com/index/"
+            [[package]]
+            name = "internal-two"
+            version = "1.0.0"
+            source = "sparse+https://cargo.example.com/index/"
         "#;
-        let found = parse_cargo_lock(Path::new("/p/Cargo.lock"), text).unwrap();
-        assert_eq!(names(&found), ["crates.io:serde 1.0.229"]);
+        let mut notes = Vec::new();
+        let found = parse_cargo_lock(Path::new("/p/Cargo.lock"), text, &mut notes).unwrap();
+        let registries: Vec<_> = notes
+            .iter()
+            .map(|n| match n {
+                InventoryError::OtherRegistry { registry, .. } => registry.as_str(),
+                other => panic!("unexpected note {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            registries,
+            ["sparse+https://cargo.example.com/index/"],
+            "noted once"
+        );
+        assert_eq!(
+            names(&found),
+            ["crates.io:serde 1.0.229", "crates.io:mirrored 0.3.0"]
+        );
         assert!(matches!(
             &found[0].found_in,
             FoundIn::Lockfile { path } if path == Path::new("/p/Cargo.lock")
         ));
-        assert!(parse_cargo_lock(Path::new("x"), "[[package]]\nname = 1").is_err());
+        assert!(
+            parse_cargo_lock(Path::new("x"), "[[package]]\nname = 1", &mut Vec::new()).is_err()
+        );
     }
 
     #[test]
@@ -257,9 +365,14 @@ mod tests {
             "node_modules/a/node_modules/lodash": {"version": "3.10.1"},
             "node_modules/my-alias": {"name": "real-name", "version": "1.2.3"},
             "node_modules/local": {"resolved": "../local", "link": true},
+            "node_modules/from-git": {"version": "1", "resolved": "git+ssh://git@x.com/y.git"},
+            "node_modules/tarball": {"version": "1.0.0", "resolved": "file:../tarball.tgz"},
+            "node_modules/shorthand": {"version": "1.0.0", "resolved": "github:x/y#abc"},
+            "node_modules/registry": {"version": "2.0.0", "resolved": "https://r.example/r.tgz"},
             "packages/local": {"version": "0.0.1"}
         }}"#;
-        let found = parse_package_lock(Path::new("/p/package-lock.json"), text).unwrap();
+        let found =
+            parse_package_lock(Path::new("/p/package-lock.json"), text, &mut Vec::new()).unwrap();
         assert_eq!(
             names(&found),
             [
@@ -267,6 +380,7 @@ mod tests {
                 "npm:lodash 3.10.1",
                 "npm:lodash 4.17.21",
                 "npm:real-name 1.2.3",
+                "npm:registry 2.0.0",
             ]
         );
     }
@@ -274,11 +388,13 @@ mod tests {
     #[test]
     fn package_lock_v1_is_reported() {
         let text = r#"{"lockfileVersion": 1, "dependencies": {"lodash": {"version": "4.0.0"}}}"#;
-        let err = parse_package_lock(Path::new("/p/package-lock.json"), text).unwrap_err();
+        let err = parse_package_lock(Path::new("/p/package-lock.json"), text, &mut Vec::new())
+            .unwrap_err();
         assert!(err.to_string().contains("lockfileVersion 1"), "{err}");
 
         let v2 = r#"{"lockfileVersion": 2, "packages": {"node_modules/a": {"version": "1.0.0"}}}"#;
-        let found = parse_package_lock(Path::new("/p/package-lock.json"), v2).unwrap();
+        let found =
+            parse_package_lock(Path::new("/p/package-lock.json"), v2, &mut Vec::new()).unwrap();
         assert_eq!(names(&found), ["npm:a 1.0.0"]);
     }
 
@@ -299,7 +415,7 @@ mod tests {
             version = "0.1.0"
             source = { virtual = "packages/member" }
         "#;
-        let found = parse_uv_lock(Path::new("/p/uv.lock"), text).unwrap();
+        let found = parse_uv_lock(Path::new("/p/uv.lock"), text, &mut Vec::new()).unwrap();
         assert_eq!(names(&found), ["PyPI:requests 2.32.3"]);
     }
 
@@ -322,7 +438,7 @@ mod tests {
             type = "git"
             url = "https://github.com/x/y"
         "#;
-        let found = parse_poetry_lock(Path::new("/p/poetry.lock"), text).unwrap();
+        let found = parse_poetry_lock(Path::new("/p/poetry.lock"), text, &mut Vec::new()).unwrap();
         assert_eq!(names(&found), ["PyPI:django 5.1.2", "PyPI:internal 1.0.0"]);
     }
 
@@ -351,6 +467,10 @@ mod tests {
             "poetry/poetry.lock",
             "[[package]]\nname = \"a\"\nversion = \"1\"\n",
         );
+        write(
+            "published/npm-shrinkwrap.json",
+            r#"{"lockfileVersion": 3, "packages": {"node_modules/b": {"version": "1"}}}"#,
+        );
         write("app/target/Cargo.lock", cargo);
         write("app/node_modules/x/Cargo.lock", cargo);
         write(".hidden/Cargo.lock", cargo);
@@ -377,12 +497,67 @@ mod tests {
                 Path::new("app/Cargo.lock"),
                 Path::new("app/nested/deep/Cargo.lock"),
                 Path::new("poetry/poetry.lock"),
+                Path::new("published/npm-shrinkwrap.json"),
                 Path::new("py/uv.lock"),
                 Path::new("web/package-lock.json"),
             ]
         );
         assert!(
             matches!(inventory.problems[..], [InventoryError::Parse { .. }]),
+            "{:?}",
+            inventory.problems
+        );
+    }
+
+    #[test]
+    fn oversized_lockfile_is_reported_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Cargo.lock");
+        // A sparse file: the length is set without writing 64 MiB.
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(LOCKFILE_LIMIT + 1)
+            .unwrap();
+        let err = read_lockfile(&path).unwrap_err();
+        assert!(err.to_string().contains("over the"), "{err}");
+
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(LOCKFILE_LIMIT)
+            .unwrap();
+        assert!(read_lockfile(&path).is_ok());
+
+        // A real lockfile of a few MiB is well under the limit.
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(2 * 1024 * 1024)
+            .unwrap();
+        assert!(read_lockfile(&path).is_ok());
+    }
+
+    #[test]
+    fn unreadable_folder_is_reported_and_the_walk_goes_on() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(
+            tmp.path().join("Cargo.lock"),
+            concat!(
+                "[[package]]\nname = \"a\"\nversion = \"1\"\n",
+                "source = \"sparse+https://index.crates.io/\"\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let mut inventory = Inventory::default();
+        collect(tmp.path(), &mut inventory);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(inventory.components.len(), 1);
+        assert!(
+            matches!(inventory.problems[..], [InventoryError::Io { .. }]),
             "{:?}",
             inventory.problems
         );

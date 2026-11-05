@@ -70,7 +70,7 @@ fn collects_every_source() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
-    assert_eq!(stderr, "");
+    assert_eq!(stderr, "warning: not installed, so not checked: pipx\n");
     let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -138,7 +138,15 @@ fn failing_tool_is_reported_and_the_rest_still_count() {
         .expect("the test binary was built by cargo");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{stderr}");
+    assert!(
+        !out.status.success(),
+        "a failed source makes the list incomplete: {stderr}"
+    );
+    assert!(stderr.contains("1 inventory source(s) failed"), "{stderr}");
+    assert!(
+        stderr.contains("not installed, so not checked: rustup, cargo"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("warning: `brew info --json=v2 --installed` failed"),
         "{stderr}"

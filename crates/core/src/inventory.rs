@@ -2,7 +2,9 @@
 //!
 //! Each source (macOS, Homebrew, toolchains, project lockfiles) is collected on its own. A
 //! source that fails is reported in [`Inventory::problems`] and the others still count, so one
-//! broken tool never hides the rest. A tool that is not installed is skipped silently.
+//! broken tool never hides the rest. A tool that is not installed is listed in
+//! [`Inventory::not_installed`], so an inventory taken with a bare `PATH` (an app started by
+//! launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`) shows what it did not check.
 //!
 //! Collecting only reads: it runs listing commands and parses lockfiles, never project code.
 
@@ -25,8 +27,10 @@ pub struct Inventory {
     /// Installed components, in collection order. The same component appears once per place it
     /// was found.
     pub components: Vec<Component>,
-    /// Sources or files that could not be read.
+    /// Sources or files that could not be read, and names that cannot be looked up.
     pub problems: Vec<InventoryError>,
+    /// Listing tools that are not on `PATH`, so their part was not checked.
+    pub not_installed: Vec<&'static str>,
 }
 
 impl Inventory {
@@ -34,8 +38,9 @@ impl Inventory {
     /// `project_dirs`.
     ///
     /// Runs read-only listing commands (`sw_vers`, `brew`, `rustup`, `cargo`, `npm`, `node`,
-    /// `python3`, `uv`, `pipx`) found on `PATH`, and walks `project_dirs`. Blocks until all
-    /// of them finish; `brew info` alone can take several seconds.
+    /// `python3`, `uv`, `pipx`) found on `PATH`, each from `/` with a one-minute limit, and
+    /// walks `project_dirs`. Blocks until all of them finish; `brew info` alone can take
+    /// several seconds.
     pub fn collect_mac(project_dirs: &[PathBuf]) -> Self {
         let mut inventory = Self::default();
         toolchains::macos(&mut inventory);
@@ -63,34 +68,22 @@ impl Inventory {
         }
     }
 
-    /// Returns each OSV package once, for [`Feeds::osv`](crate::Feeds::osv).
-    pub fn packages(&self) -> Vec<Package> {
-        let mut packages: Vec<Package> = self
-            .components
-            .iter()
-            .filter_map(|c| match &c.lookup {
-                Lookup::Package(p) => Some(p.clone()),
-                Lookup::Product(_) => None,
-            })
-            .collect();
-        packages.sort();
-        packages.dedup();
-        packages
-    }
-
-    /// Returns each NVD product once, for [`Feeds::nvd`](crate::Feeds::nvd).
-    pub fn products(&self) -> Vec<Product> {
-        let mut products: Vec<Product> = self
-            .components
-            .iter()
-            .filter_map(|c| match &c.lookup {
-                Lookup::Product(p) => Some(p.clone()),
-                Lookup::Package(_) => None,
-            })
-            .collect();
-        products.sort();
-        products.dedup();
-        products
+    /// Runs a listing command, recording a failure as a problem and a missing tool in
+    /// `not_installed`. Returns stdout only when the command succeeded.
+    fn run(&mut self, program: &'static str, args: &[&str]) -> Option<String> {
+        match command::run(program, args) {
+            Ok(Some(output)) => Some(output),
+            Ok(None) => {
+                if !self.not_installed.contains(&program) {
+                    self.not_installed.push(program);
+                }
+                None
+            }
+            Err(e) => {
+                self.problems.push(e);
+                None
+            }
+        }
     }
 }
 
@@ -111,7 +104,7 @@ pub struct Component {
 pub enum Lookup {
     /// An OSV package (ecosystem and name).
     Package(Package),
-    /// An NVD CPE product name.
+    /// An NVD CPE product, `name` or `vendor:name`.
     Product(Product),
 }
 
@@ -155,10 +148,19 @@ pub enum FoundIn {
     },
 }
 
-/// A source or file that could not be collected.
+/// A source or file that could not be collected, or a name that cannot be looked up.
 #[derive(Debug, thiserror::Error)]
 pub enum InventoryError {
-    /// A listing command failed.
+    /// A listing command exists but could not be started or waited for.
+    #[error("cannot run `{command}`")]
+    Spawn {
+        /// The command line.
+        command: String,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A listing command exited with an error or ran too long.
     #[error("`{command}` failed: {detail}")]
     Command {
         /// The command line.
@@ -183,6 +185,17 @@ pub enum InventoryError {
         #[source]
         source: std::io::Error,
     },
+    /// A `Cargo.lock` uses crates from a registry other than crates.io; they are not checked.
+    #[error(
+        "{} uses crates from {registry}, which are not checked: OSV covers crates.io only",
+        path.display()
+    )]
+    OtherRegistry {
+        /// The lockfile.
+        path: PathBuf,
+        /// The registry source, as Cargo.lock names it.
+        registry: String,
+    },
     /// A Homebrew formula or cask name cannot be an NVD product name, so it is not checked.
     #[error("no NVD product name for Homebrew {name:?}; it is not checked")]
     NoProduct {
@@ -192,6 +205,17 @@ pub enum InventoryError {
 }
 
 impl InventoryError {
+    /// Returns whether a source failed, as opposed to a lasting fact about one item (a
+    /// Homebrew name with no NVD product) that the next sweep would report again.
+    pub fn is_failure(&self) -> bool {
+        match self {
+            Self::Spawn { .. } | Self::Command { .. } | Self::Parse { .. } | Self::Io { .. } => {
+                true
+            }
+            Self::NoProduct { .. } | Self::OtherRegistry { .. } => false,
+        }
+    }
+
     fn parse(what: impl Into<String>, detail: &impl ToString) -> Self {
         Self::Parse {
             what: what.into(),
@@ -212,25 +236,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packages_and_products_are_unique_and_sorted() {
+    fn missing_tools_are_listed_once() {
         let mut inventory = Inventory::default();
-        let pkg = |s: &str| Lookup::Package(s.parse().unwrap());
-        let product = |s: &str| Lookup::Product(s.parse().unwrap());
-        inventory.add(pkg("npm:b"), "1", FoundIn::NpmGlobal);
-        inventory.add(pkg("npm:a"), "1", FoundIn::NpmGlobal);
-        inventory.add(pkg("npm:b"), "2", FoundIn::CargoInstall);
-        inventory.add(product("zlib"), "1", FoundIn::MacOs);
-        inventory.add(product("curl"), "1", FoundIn::MacOs);
-        inventory.add(product("zlib"), "2", FoundIn::MacOs);
+        assert_eq!(inventory.run("ancient-protector-no-such-tool", &[]), None);
+        assert_eq!(
+            inventory.run("ancient-protector-no-such-tool", &["x"]),
+            None
+        );
+        assert_eq!(inventory.not_installed, ["ancient-protector-no-such-tool"]);
+        assert_eq!(inventory.run("echo", &["hi"]).as_deref(), Some("hi\n"));
+        assert_eq!(inventory.run("false", &[]), None);
+        assert!(matches!(
+            inventory.problems[..],
+            [InventoryError::Command { .. }]
+        ));
+    }
 
-        let names: Vec<_> = inventory.packages().into_iter().map(|p| p.name).collect();
-        assert_eq!(names, ["a", "b"]);
-        let products: Vec<_> = inventory
-            .products()
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(products, ["curl", "zlib"]);
+    #[test]
+    fn only_source_errors_are_failures() {
+        assert!(InventoryError::parse("x", &"y").is_failure());
+        assert!(!InventoryError::NoProduct { name: "x".into() }.is_failure());
+        let other = InventoryError::OtherRegistry {
+            path: PathBuf::from("/p/Cargo.lock"),
+            registry: "sparse+https://x/".into(),
+        };
+        assert!(!other.is_failure());
+        assert!(other.to_string().contains("OSV covers crates.io only"));
     }
 
     #[test]

@@ -54,7 +54,7 @@ enum Command {
         packages: Vec<Package>,
         /// An NVD product, `name` (any vendor) or `vendor:name`, such as openssl or github:cli.
         /// Repeatable.
-        #[arg(long = "product", value_name = "NAME")]
+        #[arg(long = "product", value_name = "[VENDOR:]NAME")]
         products: Vec<Product>,
     },
     /// List what is installed on this Mac, one JSON object per line.
@@ -85,17 +85,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Inventory => {
             let config = load_config(&data_dir, &home()?)?;
-            let inventory = Inventory::collect_mac(&config.project_dirs);
-            for component in &inventory.components {
-                let line = serde_json::to_string(component)
-                    .expect("components are strings and paths, which always serialize");
-                print(&line);
-            }
-            // Problems are listed but do not fail the command: a formula with no NVD name is
-            // a lasting fact about this Mac, not a transient error a retry would fix.
-            for problem in &inventory.problems {
-                warn(&error_chain(problem));
-            }
+            inventory(&Inventory::collect_mac(&config.project_dirs))?;
         }
     }
     Ok(())
@@ -154,6 +144,44 @@ fn advisories(
     }
 
     incomplete(failures)
+}
+
+/// Prints each component as a JSON line and reports problems and missing tools on stderr.
+///
+/// Exits non-zero when a source failed, so a script sees the list is incomplete. A Homebrew
+/// name with no NVD product does not count: it is a lasting fact about this Mac that the next
+/// run would report again, not a failure a retry could fix.
+fn inventory(inventory: &Inventory) -> anyhow::Result<()> {
+    let mut failures = 0;
+    for component in &inventory.components {
+        // A path that is not UTF-8 (possible on network or FAT volumes) cannot be JSON.
+        match serde_json::to_string(component) {
+            Ok(line) => print(&line),
+            Err(e) => {
+                failures += 1;
+                warn(&format!(
+                    "cannot print a component found in {:?}: {e}",
+                    component.found_in
+                ));
+            }
+        }
+    }
+    for problem in &inventory.problems {
+        if problem.is_failure() {
+            failures += 1;
+        }
+        warn(&error_chain(problem));
+    }
+    if !inventory.not_installed.is_empty() {
+        warn(&format!(
+            "not installed, so not checked: {}",
+            inventory.not_installed.join(", ")
+        ));
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures} inventory source(s) failed; the list above is incomplete");
+    }
+    Ok(())
 }
 
 /// Fails when any feed request failed, so a script sees that the printed output has gaps.
@@ -269,6 +297,28 @@ mod tests {
             err.to_string(),
             "3 feed request(s) failed; the output above is incomplete"
         );
+    }
+
+    /// A path that is not UTF-8 cannot be JSON: it is reported and fails the command.
+    #[test]
+    fn unprintable_component_is_a_failure() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/p/\xff/Cargo.lock".to_vec()));
+        let inventory = Inventory {
+            components: vec![ancient_protector_core::Component {
+                lookup: ancient_protector_core::Lookup::Package("npm:a".parse().unwrap()),
+                version: "1".into(),
+                found_in: ancient_protector_core::FoundIn::Lockfile { path },
+            }],
+            ..Inventory::default()
+        };
+        let err = super::inventory(&inventory).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "1 inventory source(s) failed; the list above is incomplete"
+        );
+        assert!(super::inventory(&Inventory::default()).is_ok());
     }
 
     #[test]

@@ -15,5 +15,4 @@ serde_json = { version = "1.0.154", default-features = false, features = ["std"]
 workspace = true
 
 [dev-dependencies]
-serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
