@@ -21,5 +21,6 @@ pub use crate::config::RepoSlug;
 pub use crate::config::Schedule;
 pub use crate::config::Server;
 pub use crate::config::SshConn;
+pub use crate::config::SshWord;
 pub use crate::paths::DataDir;
 pub use crate::paths::InitError;

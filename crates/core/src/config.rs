@@ -51,7 +51,11 @@ impl Config {
     pub fn load(path: &Path, home: &Path) -> Result<Self, LoadConfigError> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // A dangling symlink also reads as NotFound, but `init` cannot replace it, so only
+            // a path with nothing at it counts as missing.
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound && fs::symlink_metadata(path).is_err() =>
+            {
                 return Err(LoadConfigError::Missing {
                     path: path.to_owned(),
                 });
@@ -169,18 +173,46 @@ pub struct Server {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SshConn {
     /// A `Host` alias from `~/.ssh/config`.
-    Alias(String),
+    Alias(SshWord),
     /// Connection fields; anything left out falls back to ssh's own defaults.
     Direct {
         /// Hostname or address.
-        host: String,
+        host: SshWord,
         /// Login user.
-        user: Option<String>,
+        user: Option<SshWord>,
         /// TCP port.
         port: Option<NonZeroU16>,
         /// Private key file, `~/` expanded.
         identity_file: Option<PathBuf>,
     },
+}
+
+/// A host alias, hostname, address or user that is safe to pass to ssh as one argument.
+///
+/// It is 1 to 255 bytes of ASCII letters, digits, `.`, `-`, `_` and `:` (for IPv6), and does
+/// not start with `-`. That rules out what ssh would read as something else: a leading `-` is
+/// an option, `@` splits user from host (ssh takes the host after the last `@`, overriding the
+/// configured one), `ssh://` is a URI, and whitespace or shell characters could split the
+/// value into several words wherever it is pasted into a command or an agent prompt. Only
+/// [`Config::load`] constructs one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SshWord(String);
+
+impl SshWord {
+    fn parse(value: &str) -> Option<Self> {
+        let ok = (1..=255).contains(&value.len())
+            && !value.starts_with('-')
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'));
+        ok.then(|| Self(value.to_owned()))
+    }
+}
+
+impl fmt::Display for SshWord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Error from [`Config::load`].
@@ -263,10 +295,10 @@ pub enum ConfigProblem {
         /// The repeated repository.
         repo: RepoSlug,
     },
-    /// A server name is empty, `.` or `..`, or has characters other than letters, digits,
-    /// `.`, `-` and `_`.
+    /// A server name is empty, `.` or `..`, longer than 64 bytes, or has characters other than
+    /// letters, digits, `.`, `-` and `_`.
     #[error(
-        "servers[{index}].name = {value:?}: use letters, digits, '.', '-' or '_' (not . or ..)"
+        "servers[{index}].name = {value:?}: use 1-64 letters, digits, '.', '-' or '_' (not . or ..)"
     )]
     ServerName {
         /// Position in the list.
@@ -290,8 +322,11 @@ pub enum ConfigProblem {
         /// Position in the list.
         index: usize,
     },
-    /// `ssh`, `host` or `user` is empty or starts with `-`.
-    #[error("servers[{index}].{key} = {value:?}: must be non-empty and not start with '-'")]
+    /// `ssh`, `host` or `user` is not an [`SshWord`].
+    #[error(
+        "servers[{index}].{key} = {value:?}: use 1-255 letters, digits, '.', '-', '_' or ':', \
+         not starting with '-'"
+    )]
     SshValue {
         /// Position in the list.
         index: usize,
@@ -300,11 +335,12 @@ pub enum ConfigProblem {
         /// The value found.
         value: String,
     },
-    /// `identity_file` is relative after `~/` expansion.
+    /// `identity_file` is relative after `~/` expansion, or has control characters.
     #[error(
-        "servers[{index}].identity_file = {value:?}: use an absolute path or one starting with ~/"
+        "servers[{index}].identity_file = {value:?}: use an absolute path or one starting with \
+         ~/, without control characters"
     )]
-    RelativeIdentityFile {
+    IdentityFile {
         /// Position in the list.
         index: usize,
         /// The value found.
@@ -394,11 +430,17 @@ impl RawConfig {
 }
 
 /// A missing `since` means the full history, matching the default config.
+///
+/// Only `YYYY-MM-DD` is accepted. jiff's `Date` parser also takes a datetime with an offset
+/// and keeps only its civil date, which can be a day later than the instant in UTC, and the
+/// compact `YYYYMMDD` form. Requiring the value to print back unchanged rules both out.
 fn resolve_history(since: Option<&str>, problems: &mut Vec<ConfigProblem>) -> History {
     let Some(value) = since.filter(|v| *v != "all") else {
         return History::All;
     };
-    if let Ok(date) = value.parse() {
+    if let Ok(date) = value.parse::<Date>()
+        && date.to_string() == value
+    {
         return History::Since(date);
     }
     problems.push(ConfigProblem::Since {
@@ -457,7 +499,10 @@ fn resolve_servers(
     let mut seen = HashSet::new();
     let mut servers = Vec::with_capacity(raw.len());
     for (index, server) in raw.into_iter().enumerate() {
-        let name_ok = !matches!(server.name.as_str(), "" | "." | "..")
+        // 64 is arbitrary: well under macOS's 255-byte file name limit, so the name still fits
+        // in a folder name with a prefix or suffix added.
+        let name_ok = (1..=64).contains(&server.name.len())
+            && !matches!(server.name.as_str(), "." | "..")
             && server
                 .name
                 .bytes()
@@ -474,69 +519,78 @@ fn resolve_servers(
             });
         }
 
-        match resolve_conn(index, &server, home) {
-            Ok(conn) => servers.push(Server {
+        if let Some(conn) = resolve_conn(index, &server, home, problems) {
+            servers.push(Server {
                 name: server.name,
                 conn,
-            }),
-            Err(problem) => problems.push(problem),
+            });
         }
     }
     servers
 }
 
-/// Accepts exactly one of `ssh` and the connection fields.
-fn resolve_conn(index: usize, server: &RawServer, home: &Path) -> Result<SshConn, ConfigProblem> {
+/// Accepts exactly one of `ssh` and the connection fields, and reports every bad value of the
+/// server, not only the first.
+fn resolve_conn(
+    index: usize,
+    server: &RawServer,
+    home: &Path,
+    problems: &mut Vec<ConfigProblem>,
+) -> Option<SshConn> {
+    let before = problems.len();
+
     let has_fields = server.host.is_some()
         || server.user.is_some()
         || server.port.is_some()
         || server.identity_file.is_some();
-    let conn = match (&server.ssh, &server.host) {
-        (Some(alias), None) if !has_fields => {
-            check_ssh_word(index, "ssh", alias)?;
-            SshConn::Alias(alias.clone())
-        }
-        (None, Some(host)) => {
-            check_ssh_word(index, "host", host)?;
-            if let Some(user) = &server.user {
-                check_ssh_word(index, "user", user)?;
-            }
-            let identity_file = match server.identity_file.as_deref() {
-                None => None,
-                Some(value) => {
-                    let path = expand_home(value, home);
-                    if !path.is_absolute() {
-                        return Err(ConfigProblem::RelativeIdentityFile {
-                            index,
-                            value: value.to_owned(),
-                        });
-                    }
-                    Some(path)
-                }
-            };
-            SshConn::Direct {
-                host: host.clone(),
-                user: server.user.clone(),
-                port: server.port,
-                identity_file,
-            }
-        }
-        _ => return Err(ConfigProblem::ServerConn { index }),
+    let shape_ok = match &server.ssh {
+        Some(_) => !has_fields,
+        None => server.host.is_some(),
     };
-    Ok(conn)
-}
+    if !shape_ok {
+        problems.push(ConfigProblem::ServerConn { index });
+    }
 
-/// These values become ssh arguments: an empty one is meaningless and one starting with `-`
-/// would be read as an ssh option.
-fn check_ssh_word(index: usize, key: &'static str, value: &str) -> Result<(), ConfigProblem> {
-    if value.is_empty() || value.starts_with('-') {
-        return Err(ConfigProblem::SshValue {
+    let mut word = |key, value: &Option<String>| {
+        let value = value.as_deref()?;
+        let parsed = SshWord::parse(value);
+        if parsed.is_none() {
+            problems.push(ConfigProblem::SshValue {
+                index,
+                key,
+                value: value.to_owned(),
+            });
+        }
+        parsed
+    };
+    let alias = word("ssh", &server.ssh);
+    let host = word("host", &server.host);
+    let user = word("user", &server.user);
+    let identity_file = server.identity_file.as_deref().and_then(|value| {
+        let path = expand_home(value, home);
+        if path.is_absolute() && !value.chars().any(char::is_control) {
+            return Some(path);
+        }
+        problems.push(ConfigProblem::IdentityFile {
             index,
-            key,
             value: value.to_owned(),
         });
+        None
+    });
+
+    if problems.len() > before {
+        return None;
     }
-    Ok(())
+    match (alias, host) {
+        (Some(alias), None) => Some(SshConn::Alias(alias)),
+        (None, Some(host)) => Some(SshConn::Direct {
+            host,
+            user,
+            port: server.port,
+            identity_file,
+        }),
+        _ => unreachable!("a server with both or neither of ssh and host failed shape_ok"),
+    }
 }
 
 /// Expands a leading `~/` (or a lone `~`) to `home`. Other paths are returned unchanged.
@@ -561,6 +615,10 @@ mod tests {
     fn resolve(text: &str) -> Result<Config, Vec<ConfigProblem>> {
         let raw: RawConfig = toml::from_str(text).unwrap();
         raw.resolve(Path::new(HOME))
+    }
+
+    fn word(value: &str) -> SshWord {
+        SshWord::parse(value).unwrap()
     }
 
     #[test]
@@ -626,13 +684,13 @@ mod tests {
             [
                 Server {
                     name: "prod".into(),
-                    conn: SshConn::Alias("prod-alias".into()),
+                    conn: SshConn::Alias(word("prod-alias")),
                 },
                 Server {
                     name: "db-1".into(),
                     conn: SshConn::Direct {
-                        host: "10.0.0.5".into(),
-                        user: Some("admin".into()),
+                        host: word("10.0.0.5"),
+                        user: Some(word("admin")),
                         port: NonZeroU16::new(2222),
                         identity_file: Some("/Users/me/.ssh/id_ed25519".into()),
                     },
@@ -733,7 +791,7 @@ mod tests {
                     key: "user",
                     value: String::new()
                 },
-                ConfigProblem::RelativeIdentityFile {
+                ConfigProblem::IdentityFile {
                     index: 5,
                     value: "keys/id".into()
                 },
@@ -747,7 +805,7 @@ mod tests {
             "host = \"h\"",
             "user = \"u\"",
             "port = 22",
-            "identity_file = \"k\"",
+            "identity_file = \"/k\"",
         ] {
             let text = format!("[[servers]]\nname = \"s\"\nssh = \"a\"\n{field}\n");
             assert_eq!(
@@ -756,6 +814,134 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    /// Values ssh would read as a different destination, an option, or several words.
+    #[test]
+    fn ssh_words_reject_what_ssh_would_reinterpret() {
+        for bad in [
+            "",
+            "-oProxyCommand=x",
+            "db.internal@attacker.example",
+            "ssh://attacker.example",
+            "good.com -oProxyCommand=id",
+            "a\nb",
+            "a;b",
+            "$(id)",
+            "a`b`",
+            "a%h",
+            "a#b",
+            "a/b",
+            &"a".repeat(256),
+        ] {
+            assert_eq!(SshWord::parse(bad), None, "{bad:?}");
+        }
+        for good in [
+            "prod",
+            "db-1.internal",
+            "10.0.0.5",
+            "::1",
+            "fe80::1",
+            "deploy_user",
+        ] {
+            assert_eq!(SshWord::parse(good).unwrap().to_string(), good);
+        }
+        assert!(SshWord::parse(&"a".repeat(255)).is_some());
+    }
+
+    #[test]
+    fn every_problem_of_one_server_is_reported() {
+        let problems = resolve(
+            "[[servers]]\nname = \"s\"\nssh = \"a b\"\nhost = \"-h\"\nuser = \"\"\n\
+             identity_file = \"keys/id\"\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            problems,
+            [
+                ConfigProblem::ServerConn { index: 0 },
+                ConfigProblem::SshValue {
+                    index: 0,
+                    key: "ssh",
+                    value: "a b".into()
+                },
+                ConfigProblem::SshValue {
+                    index: 0,
+                    key: "host",
+                    value: "-h".into()
+                },
+                ConfigProblem::SshValue {
+                    index: 0,
+                    key: "user",
+                    value: String::new()
+                },
+                ConfigProblem::IdentityFile {
+                    index: 0,
+                    value: "keys/id".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_file_rejects_control_characters() {
+        let text = "[[servers]]\nname = \"s\"\nhost = \"h\"\n\
+                    identity_file = \"/tmp/id\\n-oProxyCommand=x\"\n";
+        assert_eq!(
+            resolve(text).unwrap_err(),
+            [ConfigProblem::IdentityFile {
+                index: 0,
+                value: "/tmp/id\n-oProxyCommand=x".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn since_accepts_only_plain_dates() {
+        for bad in [
+            "2025-02-01T01:00:00+14:00",
+            "2025-01-31T00:00:00Z",
+            "20250131",
+            "2025-02-29",
+            "2025-1-31",
+        ] {
+            let text = format!("history.since = {bad:?}");
+            assert_eq!(
+                resolve(&text).unwrap_err(),
+                [ConfigProblem::Since { value: bad.into() }],
+                "{bad}"
+            );
+        }
+        let config = resolve("history.since = \"2024-02-29\"").unwrap();
+        assert_eq!(
+            config.history,
+            History::Since(jiff::civil::date(2024, 2, 29))
+        );
+    }
+
+    #[test]
+    fn server_name_length_limit() {
+        let ok = format!("[[servers]]\nname = \"{}\"\nssh = \"a\"\n", "n".repeat(64));
+        assert!(resolve(&ok).is_ok());
+        let long = "n".repeat(65);
+        let text = format!("[[servers]]\nname = \"{long}\"\nssh = \"a\"\n");
+        assert_eq!(
+            resolve(&text).unwrap_err(),
+            [ConfigProblem::ServerName {
+                index: 0,
+                value: long
+            }]
+        );
+    }
+
+    #[test]
+    fn dangling_symlink_is_not_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::os::unix::fs::symlink(tmp.path().join("gone"), &path).unwrap();
+
+        let err = Config::load(&path, Path::new(HOME)).unwrap_err();
+        assert!(matches!(err, LoadConfigError::Read { .. }), "{err:?}");
     }
 
     #[test]
