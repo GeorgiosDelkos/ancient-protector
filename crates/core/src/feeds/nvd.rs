@@ -323,6 +323,8 @@ fn request_page(
         .into_iter()
         .map(|item| {
             let header: CveHeader = decode(&url, item.cve.get())?;
+            // The id names cache and bundle files, so it gets the same check as OSV ids.
+            cache_key(&header.id)?;
             Ok((header.id, item.cve))
         })
         .collect::<Result<_, FeedError>>()?;
@@ -335,6 +337,63 @@ fn request_page(
 
 fn cves_url(feeds: &Feeds) -> String {
     format!("{}/rest/json/cves/2.0", feeds.endpoints.nvd)
+}
+
+/// How long "NVD does not know this product" is trusted before asking again, since NVD adds
+/// products over time. Arbitrary. A known product is trusted for good: NVD does not remove
+/// CPE names, it deprecates them.
+const UNKNOWN_PRODUCT_RECHECK: SignedDuration = SignedDuration::from_hours(24 * 30);
+
+/// Returns whether NVD's CPE dictionary has `product`, from the cache when it can.
+pub(super) fn product_known(feeds: &Feeds, product: &Product) -> Result<bool, FeedError> {
+    let name = product.cache_name();
+    let key = cache_key(&name)?;
+    let cached: Option<ProductCheck> = feeds.cache.read("nvd-cpe", key)?;
+    if let Some(check) = cached
+        && check.trusted_at(Timestamp::now())
+    {
+        return Ok(check.known);
+    }
+
+    let url = format!("{}/rest/json/cpes/2.0", feeds.endpoints.nvd);
+    let matcher = product.matcher();
+    let query = [
+        ("cpeMatchString", matcher.as_str()),
+        ("resultsPerPage", "1"),
+    ];
+    let headers: Vec<(&str, &str)> = match &feeds.nvd {
+        NvdAccess::Anonymous => vec![],
+        NvdAccess::ApiKey(key) => vec![("apiKey", key.as_str())],
+    };
+    pace(feeds);
+    let text = feeds.http.get(&url, &query, &headers)?;
+    let page: CpePage = decode(&url, &text)?;
+    let check = ProductCheck {
+        known: page.total_results > 0,
+        checked_at: Timestamp::now(),
+    };
+    feeds.cache.write("nvd-cpe", key, &check)?;
+    Ok(check.known)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProductCheck {
+    known: bool,
+    checked_at: Timestamp,
+}
+
+impl ProductCheck {
+    /// Whether the cached answer still holds at `now`: a known product always, an unknown one
+    /// for less than [`UNKNOWN_PRODUCT_RECHECK`].
+    fn trusted_at(&self, now: Timestamp) -> bool {
+        self.known || now.duration_since(self.checked_at) < UNKNOWN_PRODUCT_RECHECK
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpePage {
+    total_results: usize,
 }
 
 /// Sleeps until the pacing interval since the previous NVD request has passed.
@@ -642,6 +701,101 @@ mod tests {
             .unwrap();
         let after: ProductCache = cache.read("nvd", "curl").unwrap().unwrap();
         assert!(after.fetched_at >= before && after.fetched_at <= Timestamp::now());
+    }
+
+    /// A CPE dictionary that knows only `github:cli`, counting requests.
+    fn cpe_server() -> TestServer {
+        TestServer::start(|request: &Request| {
+            assert_eq!(request.path(), "/rest/json/cpes/2.0");
+            assert_eq!(request.query("resultsPerPage").as_deref(), Some("1"));
+            let total = usize::from(
+                request.query("cpeMatchString").as_deref() == Some("cpe:2.3:*:github:cli"),
+            );
+            (
+                200,
+                serde_json::json!({ "totalResults": total }).to_string(),
+            )
+        })
+    }
+
+    #[test]
+    fn known_products_are_asked_once() {
+        let server = cpe_server();
+        let tmp = tempfile::tempdir().unwrap();
+        let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+
+        assert!(feeds.nvd_product_known(&product("github:cli")).unwrap());
+        assert!(feeds.nvd_product_known(&product("github:cli")).unwrap());
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "a known product is cached for good"
+        );
+
+        let old = ProductCheck {
+            known: true,
+            checked_at: Timestamp::now() - UNKNOWN_PRODUCT_RECHECK * 2,
+        };
+        Cache::new(tmp.path().to_owned())
+            .write("nvd-cpe", "github..cli", &old)
+            .unwrap();
+        assert!(feeds.nvd_product_known(&product("github:cli")).unwrap());
+        assert_eq!(server.requests().len(), 1, "however old the answer");
+    }
+
+    #[test]
+    fn unknown_products_are_asked_again_after_a_month() {
+        let server = cpe_server();
+        let tmp = tempfile::tempdir().unwrap();
+        let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+        let cache = Cache::new(tmp.path().to_owned());
+        let unknown = product("nope");
+
+        assert!(!feeds.nvd_product_known(&unknown).unwrap());
+        assert!(!feeds.nvd_product_known(&unknown).unwrap());
+        assert_eq!(server.requests().len(), 1, "a recent unknown is trusted");
+
+        let at = |age: SignedDuration| ProductCheck {
+            known: false,
+            checked_at: Timestamp::now() - age,
+        };
+        let almost = UNKNOWN_PRODUCT_RECHECK - SignedDuration::from_hours(1);
+        cache.write("nvd-cpe", "nope", &at(almost)).unwrap();
+        assert!(!feeds.nvd_product_known(&unknown).unwrap());
+        assert_eq!(server.requests().len(), 1, "under a month old");
+
+        let expired = UNKNOWN_PRODUCT_RECHECK + SignedDuration::from_hours(1);
+        cache.write("nvd-cpe", "nope", &at(expired)).unwrap();
+        assert!(!feeds.nvd_product_known(&unknown).unwrap());
+        assert_eq!(
+            server.requests().len(),
+            2,
+            "over a month old is asked again"
+        );
+    }
+
+    #[test]
+    fn recheck_is_thirty_days() {
+        assert_eq!(UNKNOWN_PRODUCT_RECHECK, SignedDuration::from_hours(720));
+        let checked_at: Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
+        let unknown = ProductCheck {
+            known: false,
+            checked_at,
+        };
+        let edge = checked_at + UNKNOWN_PRODUCT_RECHECK;
+        assert!(unknown.trusted_at(edge - SignedDuration::from_secs(1)));
+        assert!(
+            !unknown.trusted_at(edge),
+            "exactly thirty days is asked again"
+        );
+        let known = ProductCheck {
+            known: true,
+            checked_at,
+        };
+        assert!(
+            known.trusted_at(edge + UNKNOWN_PRODUCT_RECHECK),
+            "a known product for good"
+        );
     }
 
     #[test]

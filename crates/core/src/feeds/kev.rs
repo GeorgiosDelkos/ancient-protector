@@ -18,6 +18,14 @@ pub struct Kev {
 }
 
 impl Kev {
+    /// A catalog of exactly `ids`, for tests elsewhere in the crate.
+    #[cfg(test)]
+    pub(crate) fn from_ids(ids: &[&str]) -> Self {
+        Self {
+            cves: ids.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
     /// Returns whether `id` is a CVE in the catalog.
     pub(crate) fn contains(&self, id: &str) -> bool {
         self.cves.contains(id)

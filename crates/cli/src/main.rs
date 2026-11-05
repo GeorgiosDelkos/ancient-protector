@@ -12,8 +12,11 @@ use ancient_protector_core::LoadConfigError;
 use ancient_protector_core::NvdAccess;
 use ancient_protector_core::Package;
 use ancient_protector_core::Product;
+use ancient_protector_core::Progress;
 use ancient_protector_core::Schedule;
 use ancient_protector_core::SshConn;
+use ancient_protector_core::report_markdown;
+use ancient_protector_core::sweep_mac;
 use anyhow::Context as _;
 use clap::ArgGroup;
 use clap::Parser;
@@ -62,6 +65,12 @@ enum Command {
     /// Reads macOS, Homebrew, global toolchains, and lockfiles under `mac.project_dirs` from
     /// config.toml. Anything that could not be read is reported on stderr.
     Inventory,
+    /// Sweep this Mac: inventory, advisories, the chosen agent's verdict, and a report.
+    ///
+    /// Prints the report on stdout and progress on stderr. The report and the agent's bundle
+    /// are kept under the data directory's `sweeps` folder. Exits non-zero when the agent
+    /// gave no valid verdict.
+    Sweep,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -87,6 +96,17 @@ fn main() -> anyhow::Result<()> {
             let config = load_config(&data_dir, &home()?)?;
             inventory(&Inventory::collect_mac(&config.project_dirs))?;
         }
+        Command::Sweep => sweep(&data_dir, &load_config(&data_dir, &home()?)?)?,
+    }
+    Ok(())
+}
+
+/// Sweeps this Mac and prints the report; fails when the agent gave no valid verdict.
+fn sweep(data_dir: &DataDir, config: &Config) -> anyhow::Result<()> {
+    let report = sweep_mac(data_dir, config, &mut |p| show_progress(&p))?;
+    print(&report_markdown(&report));
+    if let Some(failure) = &report.failure {
+        anyhow::bail!("sweep incomplete: {failure}");
     }
     Ok(())
 }
@@ -122,8 +142,8 @@ fn advisories(
     if !packages.is_empty() {
         match feeds.osv(packages, history) {
             Ok(osv) => {
-                for advisory in &osv.advisories {
-                    print(&advisory.to_json_line(kev));
+                for found in &osv.advisories {
+                    print(&found.advisory.to_json_line(kev));
                 }
                 for e in &osv.failures {
                     fail("OSV record", e);
@@ -268,6 +288,32 @@ fn summary(config: &Config) -> String {
 )]
 fn print(text: &str) {
     println!("{}", text.trim_end());
+}
+
+/// Prints one progress line of a sweep on stderr.
+fn show_progress(progress: &Progress<'_>) {
+    let line = match progress {
+        Progress::Inventory => "listing what is installed".to_owned(),
+        Progress::Advisories { packages, products } => {
+            format!("fetching advisories for {packages} packages and {products} NVD products")
+        }
+        Progress::Product {
+            done,
+            total,
+            product,
+        } => format!("NVD {done}/{total}: {product}"),
+        Progress::Agent { agent, attempt: 1 } => format!("{agent} is judging the advisories"),
+        Progress::Agent { agent, .. } => format!("{agent} is fixing its rejected findings"),
+    };
+    status(&line);
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI's one output function for progress"
+)]
+fn status(text: &str) {
+    eprintln!("{text}");
 }
 
 #[expect(

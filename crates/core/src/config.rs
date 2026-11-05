@@ -41,6 +41,19 @@ pub struct Config {
 }
 
 impl Config {
+    /// A config with nothing in it, for tests elsewhere in the crate.
+    #[cfg(test)]
+    pub(crate) fn default_for_tests() -> Self {
+        Self {
+            agent: None,
+            schedule: Schedule::Manual,
+            history: History::All,
+            project_dirs: Vec::new(),
+            repos: Vec::new(),
+            servers: Vec::new(),
+        }
+    }
+
     /// Reads and validates the config at `path`, expanding `~/` against `home`.
     ///
     /// # Errors

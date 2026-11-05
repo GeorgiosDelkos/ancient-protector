@@ -16,6 +16,7 @@ use crate::feeds::Advisory;
 use crate::feeds::FeedError;
 use crate::feeds::Feeds;
 use crate::feeds::OsvAdvisories;
+use crate::feeds::OsvAdvisory;
 use crate::feeds::Source;
 use crate::feeds::cache_key;
 use crate::feeds::http::decode;
@@ -33,9 +34,9 @@ pub(super) fn fetch(
     let ids = query_ids(feeds, packages)?;
     let mut advisories = Vec::with_capacity(ids.len());
     let mut failures = Vec::new();
-    for (id, modified) in ids {
+    for (id, queried) in ids {
         // One bad record must not hide the others: keep going and report it.
-        let (header, record) = match record(feeds, &id, modified) {
+        let (header, record) = match record(feeds, &id, queried.modified) {
             Ok(fetched) => fetched,
             Err(e) => {
                 failures.push(e);
@@ -43,11 +44,15 @@ pub(super) fn fetch(
             }
         };
         if in_window(header.published, Some(header.modified), history) {
-            advisories.push(Advisory {
+            let advisory = Advisory {
                 source: Source::Osv,
                 id: header.id,
                 aliases: header.aliases,
                 record,
+            };
+            advisories.push(OsvAdvisory {
+                advisory,
+                packages: queried.packages.into_iter().collect(),
             });
         }
     }
@@ -57,11 +62,18 @@ pub(super) fn fetch(
     })
 }
 
-/// Returns the id and latest `modified` time of every advisory for `packages`.
-fn query_ids(
-    feeds: &Feeds,
-    packages: &[Package],
-) -> Result<BTreeMap<String, Option<Timestamp>>, FeedError> {
+/// What querybatch said about one advisory: its latest `modified` time and the packages whose
+/// query returned it.
+#[derive(Debug, Default)]
+struct Queried {
+    modified: Option<Timestamp>,
+    packages: BTreeSet<Package>,
+}
+
+/// Returns every advisory id for `packages`, with the packages each was returned for. That
+/// link is what OSV matched, so it holds even when a record spells a name differently from
+/// the lockfile (`Django` and `django`).
+fn query_ids(feeds: &Feeds, packages: &[Package]) -> Result<BTreeMap<String, Queried>, FeedError> {
     let url = format!("{}/v1/querybatch", feeds.endpoints.osv);
     let unique: BTreeSet<&Package> = packages.iter().collect();
     let mut pending: Vec<(&Package, Option<String>)> =
@@ -93,8 +105,9 @@ fn query_ids(
 
         for ((package, _), result) in batch.into_iter().zip(response.results) {
             for vuln in result.vulns {
-                let modified = ids.entry(vuln.id).or_insert(vuln.modified);
-                *modified = (*modified).max(vuln.modified);
+                let queried: &mut Queried = ids.entry(vuln.id).or_default();
+                queried.modified = queried.modified.max(vuln.modified);
+                queried.packages.insert(package.clone());
             }
             // A repeated token would loop forever.
             match result.next_page_token {
@@ -267,11 +280,20 @@ mod tests {
         let packages = [pkg("npm:lodash"), pkg("crates.io:serde"), pkg("npm:lodash")];
 
         let advisories = feeds.osv(&packages, History::All).unwrap().advisories;
-        let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
+        let ids: Vec<_> = advisories.iter().map(|a| a.advisory.id.as_str()).collect();
         assert_eq!(ids, ["A-1", "B-2"]);
-        assert_eq!(advisories[0].aliases, ["CVE-A-1"]);
-        assert!(matches!(advisories[0].source, Source::Osv));
-        assert!(advisories[0].record.get().contains(r#""summary":"s""#));
+        assert_eq!(advisories[0].advisory.aliases, ["CVE-A-1"]);
+        assert!(matches!(advisories[0].advisory.source, Source::Osv));
+        assert!(
+            advisories[0]
+                .advisory
+                .record
+                .get()
+                .contains(r#""summary":"s""#)
+        );
+        let matched = &advisories[0].packages;
+        assert_eq!(matched.len(), 2, "each queried package once: {matched:?}");
+        assert!(matched.contains(&pkg("npm:lodash")) && matched.contains(&pkg("crates.io:serde")));
 
         let requests = server.requests();
         let batch: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
@@ -301,7 +323,7 @@ mod tests {
         let ids = |year, month| -> Vec<String> {
             let since = History::Since(Since::new(jiff::civil::date(year, month, 1)).unwrap());
             let advisories = feeds.osv(&[pkg("npm:lodash")], since).unwrap().advisories;
-            advisories.into_iter().map(|a| a.id).collect()
+            advisories.into_iter().map(|a| a.advisory.id).collect()
         };
 
         assert_eq!(
@@ -381,7 +403,7 @@ mod tests {
             .osv(&packages, History::All)
             .unwrap()
             .advisories;
-        let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
+        let ids: Vec<_> = advisories.iter().map(|a| a.advisory.id.as_str()).collect();
         assert_eq!(ids, ["P-1", "P-2"]);
 
         let batch_sizes: Vec<_> = server
@@ -457,7 +479,7 @@ mod tests {
             .osv(&[pkg("npm:a")], History::All)
             .unwrap()
             .advisories;
-        assert_eq!(advisories[0].id, "A-1");
+        assert_eq!(advisories[0].advisory.id, "A-1");
         assert_eq!(server.requests().len(), 2, "the record was fetched");
     }
 
@@ -522,7 +544,11 @@ mod tests {
         let osv = feeds(&server, tmp.path())
             .osv(&[pkg("npm:a")], History::All)
             .unwrap();
-        let ids: Vec<_> = osv.advisories.iter().map(|a| a.id.as_str()).collect();
+        let ids: Vec<_> = osv
+            .advisories
+            .iter()
+            .map(|a| a.advisory.id.as_str())
+            .collect();
         assert_eq!(ids, ["B-2"]);
         assert!(
             matches!(osv.failures[..], [FeedError::Status { status: 404, .. }]),

@@ -9,13 +9,18 @@
 //! State lives in plain files under a [`DataDir`], configured by [`Config`].
 
 mod agent;
+mod bundle;
 mod config;
 mod feeds;
+mod findings;
 mod inventory;
 mod package;
 mod paths;
+mod sweep;
 
+pub use crate::agent::AgentError;
 pub use crate::agent::AgentKind;
+pub use crate::bundle::BundleError;
 pub use crate::config::Config;
 pub use crate::config::ConfigProblem;
 pub use crate::config::History;
@@ -34,9 +39,14 @@ pub use crate::feeds::Kev;
 pub use crate::feeds::KeychainError;
 pub use crate::feeds::NvdAccess;
 pub use crate::feeds::OsvAdvisories;
+pub use crate::feeds::OsvAdvisory;
 pub use crate::feeds::ParseProductError;
 pub use crate::feeds::Product;
 pub use crate::feeds::Source;
+pub use crate::findings::Confidence;
+pub use crate::findings::Finding;
+pub use crate::findings::Fix;
+pub use crate::findings::Severity;
 pub use crate::inventory::Component;
 pub use crate::inventory::FoundIn;
 pub use crate::inventory::Inventory;
@@ -47,3 +57,9 @@ pub use crate::package::Package;
 pub use crate::package::ParsePackageError;
 pub use crate::paths::DataDir;
 pub use crate::paths::InitError;
+pub use crate::sweep::Progress;
+pub use crate::sweep::Report;
+pub use crate::sweep::ReportFinding;
+pub use crate::sweep::SweepError;
+pub use crate::sweep::report_markdown;
+pub use crate::sweep::sweep_mac;

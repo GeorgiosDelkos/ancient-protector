@@ -16,7 +16,7 @@ mod kev;
 mod nvd;
 mod osv;
 #[cfg(test)]
-mod test_server;
+pub(crate) mod test_server;
 
 use std::cell::Cell;
 use std::io;
@@ -41,10 +41,10 @@ pub use crate::feeds::nvd::Product;
 
 /// Where each source is served. Tests point these at a local server.
 #[derive(Debug)]
-struct Endpoints {
-    osv: String,
-    nvd: String,
-    kev: String,
+pub(crate) struct Endpoints {
+    pub(crate) osv: String,
+    pub(crate) nvd: String,
+    pub(crate) kev: String,
 }
 
 impl Endpoints {
@@ -83,7 +83,14 @@ impl Feeds {
         Self::with_endpoints(data_dir.feeds_dir(), nvd, Endpoints::public())
     }
 
-    fn with_endpoints(dir: PathBuf, nvd: NvdAccess, endpoints: Endpoints) -> Self {
+    /// Turns NVD pacing off, so tests against a local server do not sleep.
+    #[cfg(test)]
+    pub(crate) fn without_pacing(mut self) -> Self {
+        self.nvd_interval = Duration::ZERO;
+        self
+    }
+
+    pub(crate) fn with_endpoints(dir: PathBuf, nvd: NvdAccess, endpoints: Endpoints) -> Self {
         Self {
             http: Http::new(),
             endpoints,
@@ -124,6 +131,19 @@ impl Feeds {
         nvd::fetch(self, product, history)
     }
 
+    /// Returns whether NVD's CPE dictionary lists `product`, so a product with no CVEs can be
+    /// told apart from a name NVD does not know.
+    ///
+    /// Asks NVD at most once per product, then every 30 days while the answer is "unknown".
+    /// Paced like every NVD request.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a network, decoding or cache error.
+    pub(crate) fn nvd_product_known(&self, product: &Product) -> Result<bool, FeedError> {
+        nvd::product_known(self, product)
+    }
+
     /// Downloads the current CISA Known Exploited Vulnerabilities catalog.
     ///
     /// # Errors
@@ -138,9 +158,18 @@ impl Feeds {
 #[derive(Debug)]
 pub struct OsvAdvisories {
     /// Advisories in the history window, in id order.
-    pub advisories: Vec<Advisory>,
+    pub advisories: Vec<OsvAdvisory>,
     /// One error per record that could not be fetched or cached.
     pub failures: Vec<FeedError>,
+}
+
+/// An OSV advisory and the packages whose query returned it.
+#[derive(Debug)]
+pub struct OsvAdvisory {
+    /// The advisory.
+    pub advisory: Advisory,
+    /// The queried packages OSV matched it to, in order.
+    pub packages: Vec<Package>,
 }
 
 /// Which database an [`Advisory`] came from.
@@ -165,6 +194,16 @@ pub struct Advisory {
     pub record: Box<RawValue>,
 }
 
+impl Source {
+    /// The lowercase name used in bundle and output files: `osv` or `nvd`.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Osv => "osv",
+            Self::Nvd => "nvd",
+        }
+    }
+}
+
 impl Advisory {
     /// Returns whether the advisory or one of its aliases is in `kev`.
     pub(crate) fn is_known_exploited(&self, kev: &Kev) -> bool {
@@ -175,12 +214,8 @@ impl Advisory {
     /// `known_exploited` (whether it is in `kev`, or `null` when the catalog could not be read),
     /// and the source's full `record`.
     pub fn to_json_line(&self, kev: Option<&Kev>) -> String {
-        let source = match self.source {
-            Source::Osv => "osv",
-            Source::Nvd => "nvd",
-        };
         serde_json::json!({
-            "source": source,
+            "source": self.source.name(),
             "id": self.id,
             "known_exploited": kev.map(|kev| self.is_known_exploited(kev)),
             "record": self.record,
@@ -289,7 +324,7 @@ fn colon_detail(detail: &str) -> String {
 /// Returns `key` when it is safe as a cache file name: 1 to 128 ASCII letters, digits, `.`,
 /// `-` and `_`, not starting with `.`. Advisory ids from every source fit; anything else
 /// (a `/`, `..`) could escape the cache folder.
-fn cache_key(key: &str) -> Result<&str, FeedError> {
+pub(crate) fn cache_key(key: &str) -> Result<&str, FeedError> {
     let ok = (1..=128).contains(&key.len())
         && !key.starts_with('.')
         && key

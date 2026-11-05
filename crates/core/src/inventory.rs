@@ -8,7 +8,7 @@
 //!
 //! Collecting only reads: it runs listing commands and parses lockfiles, never project code.
 
-mod command;
+pub(crate) mod command;
 mod homebrew;
 mod lockfiles;
 mod toolchains;
@@ -94,7 +94,7 @@ impl Inventory {
 }
 
 /// One installed thing at one version, and where it was found.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Component {
     /// How advisories are looked up for it.
     pub lookup: Lookup,
@@ -105,7 +105,7 @@ pub struct Component {
 }
 
 /// How a component's advisories are found.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lookup {
     /// An OSV package (ecosystem and name).
@@ -115,7 +115,7 @@ pub enum Lookup {
 }
 
 /// Where a component was found, so the agent knows what to check and what to fix.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum FoundIn {
     /// The operating system.
@@ -152,6 +152,25 @@ pub enum FoundIn {
         /// The lockfile's path.
         path: PathBuf,
     },
+}
+
+/// How a person reads it: "Homebrew formula openssl@3", "lockfile /path/Cargo.lock".
+impl std::fmt::Display for FoundIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MacOs => f.write_str("macOS"),
+            Self::HomebrewFormula { name } => write!(f, "Homebrew formula {name}"),
+            Self::HomebrewCask { token } => write!(f, "Homebrew cask {token}"),
+            Self::Rustup { toolchain } => write!(f, "rustup toolchain {toolchain}"),
+            Self::CargoInstall => f.write_str("cargo install"),
+            Self::Node => f.write_str("the node on PATH"),
+            Self::NpmGlobal => f.write_str("npm global packages"),
+            Self::Python => f.write_str("the python3 on PATH"),
+            Self::UvTool => f.write_str("uv tools"),
+            Self::Pipx => f.write_str("pipx"),
+            Self::Lockfile { path } => write!(f, "lockfile {}", path.display()),
+        }
+    }
 }
 
 /// A source or file that could not be collected, or a name that cannot be looked up.
@@ -265,6 +284,46 @@ mod tests {
             inventory.problems[..],
             [InventoryError::Command { .. }]
         ));
+    }
+
+    #[test]
+    fn found_in_reads_like_a_place() {
+        let cases = [
+            (FoundIn::MacOs, "macOS"),
+            (
+                FoundIn::HomebrewFormula {
+                    name: "openssl@3".into(),
+                },
+                "Homebrew formula openssl@3",
+            ),
+            (
+                FoundIn::HomebrewCask {
+                    token: "codex".into(),
+                },
+                "Homebrew cask codex",
+            ),
+            (
+                FoundIn::Rustup {
+                    toolchain: "stable".into(),
+                },
+                "rustup toolchain stable",
+            ),
+            (FoundIn::CargoInstall, "cargo install"),
+            (FoundIn::Node, "the node on PATH"),
+            (FoundIn::NpmGlobal, "npm global packages"),
+            (FoundIn::Python, "the python3 on PATH"),
+            (FoundIn::UvTool, "uv tools"),
+            (FoundIn::Pipx, "pipx"),
+            (
+                FoundIn::Lockfile {
+                    path: "/p/Cargo.lock".into(),
+                },
+                "lockfile /p/Cargo.lock",
+            ),
+        ];
+        for (found_in, text) in cases {
+            assert_eq!(found_in.to_string(), text);
+        }
     }
 
     #[test]

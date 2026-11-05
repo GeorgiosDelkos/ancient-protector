@@ -33,6 +33,16 @@ impl DataDir {
         self.root.join("config.toml")
     }
 
+    /// Returns the folder holding one subfolder per sweep.
+    pub(crate) fn sweeps_dir(&self) -> PathBuf {
+        self.root.join("sweeps")
+    }
+
+    /// Returns the folder of user-editable prompt templates.
+    pub(crate) fn prompts_dir(&self) -> PathBuf {
+        self.root.join("prompts")
+    }
+
     /// Returns the feed cache folder. Deleting it is always safe; it is refilled on demand.
     pub(crate) fn feeds_dir(&self) -> PathBuf {
         self.root.join("feeds")
