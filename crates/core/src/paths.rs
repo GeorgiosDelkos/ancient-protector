@@ -48,7 +48,10 @@ impl DataDir {
             source,
         };
 
-        fs::create_dir_all(&self.root).map_err(io_err)?;
+        fs::create_dir_all(&self.root).map_err(|source| InitError::Io {
+            path: self.root.clone(),
+            source,
+        })?;
         let mut file = match fs::File::create_new(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -114,8 +117,12 @@ mod tests {
         let blocker = tmp.path().join("file");
         fs::write(&blocker, "").unwrap();
 
-        let err = DataDir::new(blocker.join("data")).init().unwrap_err();
-        assert!(matches!(err, InitError::Io { .. }), "{err:?}");
+        let root = blocker.join("data");
+        let err = DataDir::new(&root).init().unwrap_err();
+        assert!(
+            matches!(&err, InitError::Io { path, .. } if *path == root),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -127,9 +134,13 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
 
-        let err = DataDir::new(&root).init().unwrap_err();
+        let dir = DataDir::new(&root);
+        let err = dir.init().unwrap_err();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(matches!(err, InitError::Io { .. }), "{err:?}");
+        assert!(
+            matches!(&err, InitError::Io { path, .. } if *path == dir.config_file()),
+            "{err:?}"
+        );
     }
 
     #[test]
