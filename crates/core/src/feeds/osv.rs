@@ -47,7 +47,6 @@ pub(super) fn fetch(
                 source: Source::Osv,
                 id: header.id,
                 aliases: header.aliases,
-                published: header.published,
                 record,
             });
         }
@@ -97,7 +96,7 @@ fn query_ids(
                 let modified = ids.entry(vuln.id).or_insert(vuln.modified);
                 *modified = (*modified).max(vuln.modified);
             }
-            // A repeated token would loop forever; OSV documents tokens as moving forward.
+            // A repeated token would loop forever.
             match result.next_page_token {
                 Some(token) if token.is_empty() => {}
                 Some(token) if !seen_tokens.insert((package, token.clone())) => {

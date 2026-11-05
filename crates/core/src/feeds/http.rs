@@ -208,6 +208,10 @@ mod tests {
             "{detail}"
         );
         assert_eq!(detail.len() as u64, DETAIL_LIMIT);
+        assert!(
+            err.to_string().contains("answered 403: Request forbidden"),
+            "{err}"
+        );
         assert!(!err.to_string().contains("secret"));
     }
 
@@ -230,7 +234,29 @@ mod tests {
             matches!(err, FeedError::Status { status: 302, .. }),
             "{err:?}"
         );
+        assert_eq!(err.to_string(), format!("{} answered 302", server.url));
         assert!(elsewhere.requests().is_empty());
+    }
+
+    /// A server that promises 100 bytes, sends 10 and hangs up.
+    #[test]
+    fn truncated_body_is_a_body_error() {
+        use std::io::Read as _;
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let head = "HTTP/1.1 200 OK\r\ncontent-length: 100\r\nconnection: close\r\n\r\n";
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(b"0123456789").unwrap();
+        });
+
+        let err = Http::new().get(&url, &[], &[]).unwrap_err();
+        assert!(matches!(err, FeedError::Body { .. }), "{err:?}");
     }
 
     /// A gzip body of `len` spaces: tiny on the wire, `len` bytes once decoded.

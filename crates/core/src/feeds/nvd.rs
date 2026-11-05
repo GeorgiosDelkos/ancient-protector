@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::PoisonError;
 use std::thread;
 use std::time::Instant;
 
@@ -34,6 +33,9 @@ use crate::feeds::in_window;
 
 /// NVD's maximum `lastModStartDate`..`lastModEndDate` range, in days.
 const WINDOW_DAYS: i64 = 120;
+
+/// The same limit as a duration.
+const MAX_DELTA: SignedDuration = SignedDuration::from_hours(24 * WINDOW_DAYS);
 
 /// CVEs per page. NVD allows up to 2000; 500 keeps each response a few MB. Arbitrary.
 const PAGE: usize = 500;
@@ -174,7 +176,9 @@ pub(super) fn fetch(
         let count = page.cves.len();
         cves.extend(page.cves);
         start += count;
-        if start >= page.total_results {
+        // `request_page` already rejects an empty page before the end; this also stops a
+        // regression there from looping forever.
+        if count == 0 || start >= page.total_results {
             break;
         }
     }
@@ -191,17 +195,13 @@ pub(super) fn fetch(
     Ok(advisories(entry.cves, history))
 }
 
-fn window() -> SignedDuration {
-    SignedDuration::from_hours(24 * WINDOW_DAYS)
-}
-
 /// Returns the `lastModStartDate`..`lastModEndDate` range for a cache fetched at
 /// `fetched_at`, or `None` when it is too old for NVD's 120-day limit and must be fetched in
 /// full. The range ends at `now`, or at `fetched_at` if the local clock is behind it, since
 /// NVD rejects an end before the start. The minute of slack keeps the range under the limit
 /// after NVD's millisecond rounding; its size is arbitrary.
 fn delta_window(fetched_at: Timestamp, now: Timestamp) -> Option<(Timestamp, Timestamp)> {
-    let limit = window() - SignedDuration::from_mins(1);
+    let limit = MAX_DELTA - SignedDuration::from_mins(1);
     (now.duration_since(fetched_at) < limit).then(|| (fetched_at, now.max(fetched_at)))
 }
 
@@ -273,17 +273,12 @@ fn request_page(
     })
 }
 
-/// Sleeps until the pacing interval since the previous NVD request has passed. The lock is
-/// held while sleeping on purpose: it serializes NVD requests from every thread.
+/// Sleeps until the pacing interval since the previous NVD request has passed.
 fn pace(feeds: &Feeds) {
-    let mut last = feeds
-        .nvd_last
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    if let Some(previous) = *last {
+    if let Some(previous) = feeds.nvd_last.get() {
         thread::sleep(feeds.nvd_interval.saturating_sub(previous.elapsed()));
     }
-    *last = Some(Instant::now());
+    feeds.nvd_last.set(Some(Instant::now()));
 }
 
 /// NVD's timestamp format, `2026-11-04T20:18:52.330Z`.
@@ -301,7 +296,6 @@ fn advisories(cves: BTreeMap<String, Box<RawValue>>, history: History) -> Vec<Ad
                 source: Source::Nvd,
                 id,
                 aliases: Vec::new(),
-                published,
                 record,
             })
         })
@@ -514,7 +508,7 @@ mod tests {
         });
         let tmp = tempfile::tempdir().unwrap();
         let old = ProductCache {
-            fetched_at: Timestamp::now() - window(),
+            fetched_at: Timestamp::now() - MAX_DELTA,
             cves: BTreeMap::from([(
                 "CVE-OLD".to_owned(),
                 RawValue::from_string(r#"{"id":"CVE-OLD"}"#.to_owned()).unwrap(),
@@ -587,12 +581,12 @@ mod tests {
     #[test]
     fn delta_window_respects_the_limit() {
         let now: Timestamp = "2026-11-05T12:00:00Z".parse().unwrap();
-        let limit = window() - SignedDuration::from_mins(1);
+        let limit = MAX_DELTA - SignedDuration::from_mins(1);
 
         let fresh = now - limit + SignedDuration::from_secs(1);
         assert_eq!(delta_window(fresh, now), Some((fresh, now)));
         assert_eq!(delta_window(now - limit, now), None);
-        assert_eq!(delta_window(now - window(), now), None);
+        assert_eq!(delta_window(now - MAX_DELTA, now), None);
 
         let ahead = now + SignedDuration::from_hours(1);
         assert_eq!(delta_window(ahead, now), Some((ahead, ahead)));

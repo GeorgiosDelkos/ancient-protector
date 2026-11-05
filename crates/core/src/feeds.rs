@@ -18,9 +18,9 @@ mod osv;
 #[cfg(test)]
 mod test_server;
 
+use std::cell::Cell;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -74,7 +74,7 @@ pub struct Feeds {
 
     // NVD pacing: the minimum gap between requests, and when the last one was sent.
     nvd_interval: Duration,
-    nvd_last: Mutex<Option<Instant>>,
+    nvd_last: Cell<Option<Instant>>,
 }
 
 impl Feeds {
@@ -90,7 +90,7 @@ impl Feeds {
             cache: Cache::new(dir),
             nvd_interval: nvd_interval(&nvd),
             nvd,
-            nvd_last: Mutex::new(None),
+            nvd_last: Cell::new(None),
         }
     }
 
@@ -118,7 +118,7 @@ impl Feeds {
     ///
     /// # Errors
     ///
-    /// Fails on the first network, decoding or cache-write error. NVD answers 403 when its
+    /// Fails on the first network, decoding, or cache read or write error. NVD answers 403 when its
     /// rate limit is exceeded; an API key raises the limit.
     pub fn nvd(&self, product: &Product, history: History) -> Result<Vec<Advisory>, FeedError> {
         nvd::fetch(self, product, history)
@@ -161,8 +161,6 @@ pub struct Advisory {
     pub id: String,
     /// Other ids for the same issue; for OSV this usually includes the CVE.
     pub aliases: Vec<String>,
-    /// When the record was first published, if the source says.
-    pub published: Option<Timestamp>,
     /// The full record as JSON.
     pub record: Box<RawValue>,
 }
@@ -219,7 +217,7 @@ pub enum FeedError {
     },
     /// The server answered with a status other than 2xx. Redirects count: they are not
     /// followed, so a 3xx means the endpoint moved.
-    #[error("{url} answered {status}: {detail}")]
+    #[error("{url} answered {status}{}", colon_detail(detail))]
     Status {
         /// The URL requested.
         url: String,
@@ -263,7 +261,7 @@ pub enum FeedError {
         what: &'static str,
     },
     /// A cache file could not be read or written.
-    #[error("cannot use feed cache {}", path.display())]
+    #[error("cannot use feed cache {}; delete it to fetch it again", path.display())]
     Cache {
         /// The cache file.
         path: PathBuf,
@@ -277,6 +275,15 @@ pub enum FeedError {
         /// The id, as returned.
         id: String,
     },
+}
+
+/// Formats a status error's detail as `: <detail>`, or nothing when the body was empty.
+fn colon_detail(detail: &str) -> String {
+    if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    }
 }
 
 /// Returns `key` when it is safe as a cache file name: 1 to 128 ASCII letters, digits, `.`,
