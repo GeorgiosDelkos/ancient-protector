@@ -8,17 +8,25 @@ publish = false
 # Every new dependency needs a strong reason: this crate holds all the app's logic, and each
 # dependency it adds ships in the tray app, the CLI and every agent-run sweep.
 [dependencies]
-# std: `civil::Date` parsing for `history.since`.
-jiff = { version = "0.2.39", default-features = false, features = ["std"] }
-# derive: the `Raw*` config types. std: `PathBuf` and `String` impls.
+# std: date and timestamp parsing. serde: `Timestamp` fields in feed records and caches.
+jiff = { version = "0.2.39", default-features = false, features = ["serde", "std"] }
+# derive: config, feed and cache types. std: `PathBuf` and `String` impls.
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
+# raw_value: advisory records kept byte-for-byte as served, for the agent.
+serde_json = { version = "1.0.154", default-features = false, features = ["std", "raw_value"] }
 thiserror = "2.0.21"
 # parse + serde: `toml::from_str` into the `Raw*` config types.
 toml = { version = "1.2.0", default-features = false, features = ["parse", "serde"] }
+# Blocking HTTP: sweeps are sequential, so no async runtime. native-tls-no-default: HTTPS through
+# macOS Security.framework and the system trust store (Keychain and corporate CAs included),
+# with no bundled CA list (webpki-roots is CDLA-Permissive-2.0, not on the deny.toml list).
+# gzip: NVD and OSV responses compress well.
+ureq = { version = "3.5.0", default-features = false, features = ["native-tls-no-default", "gzip"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+flate2 = "1.1.10"
 proptest = "1.12.0"
 tempfile = "3.27.0"

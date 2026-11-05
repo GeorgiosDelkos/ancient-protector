@@ -33,6 +33,11 @@ impl DataDir {
         self.root.join("config.toml")
     }
 
+    /// Returns the feed cache folder. Deleting it is always safe; it is refilled on demand.
+    pub(crate) fn feeds_dir(&self) -> PathBuf {
+        self.root.join("feeds")
+    }
+
     /// Creates the data directory and writes the default `config.toml`.
     ///
     /// Returns the config path. Never overwrites an existing config.
@@ -149,6 +154,10 @@ mod tests {
         assert_eq!(
             dir.config_file(),
             Path::new("/Users/me/Library/Application Support/ancient-protector/config.toml")
+        );
+        assert_eq!(
+            dir.feeds_dir(),
+            Path::new("/Users/me/Library/Application Support/ancient-protector/feeds")
         );
     }
 }

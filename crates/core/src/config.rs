@@ -14,6 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use jiff::Timestamp;
 use jiff::civil::Date;
 use serde::Deserialize;
 
@@ -90,12 +91,38 @@ pub enum Schedule {
 
 /// How far back the first download of each advisory feed goes. Later sweeps fetch only
 /// records modified since the previous sweep.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum History {
     /// The full history of every feed.
     All,
-    /// Advisories published or modified on or after this date.
-    Since(Date),
+    /// Advisories published on or after this date.
+    Since(Since),
+}
+
+/// The first day of the history window, with its start instant (midnight UTC) resolved once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Since {
+    date: Date,
+    start: Timestamp,
+}
+
+impl Since {
+    /// Returns `None` when midnight UTC of `date` is outside the range of a [`Timestamp`],
+    /// which is narrower than that of a [`Date`] (around the years -9999 and 9999).
+    pub(crate) fn new(date: Date) -> Option<Self> {
+        let start = date.to_zoned(jiff::tz::TimeZone::UTC).ok()?.timestamp();
+        Some(Self { date, start })
+    }
+
+    /// Returns the date as written in `history.since`.
+    pub fn date(self) -> Date {
+        self.date
+    }
+
+    /// Returns midnight UTC of the date.
+    pub fn start(self) -> Timestamp {
+        self.start
+    }
 }
 
 /// A GitHub repository as `owner/name`.
@@ -442,8 +469,9 @@ fn resolve_history(since: Option<&str>, problems: &mut Vec<ConfigProblem>) -> Hi
     };
     if let Ok(date) = value.parse::<Date>()
         && date.to_string() == value
+        && let Some(since) = Since::new(date)
     {
-        return History::Since(date);
+        return History::Since(since);
     }
     problems.push(ConfigProblem::Since {
         value: value.to_owned(),
@@ -678,10 +706,11 @@ mod tests {
             config.schedule,
             Schedule::EveryHours(NonZeroU32::new(24).unwrap())
         );
-        assert_eq!(
-            config.history,
-            History::Since(jiff::civil::date(2025, 1, 31))
-        );
+        let History::Since(since) = config.history else {
+            panic!("expected a history window, got {:?}", config.history);
+        };
+        assert_eq!(since.date(), jiff::civil::date(2025, 1, 31));
+        assert_eq!(since.start(), "2025-01-31T00:00:00Z".parse().unwrap());
         assert_eq!(
             config.project_dirs,
             [
@@ -924,6 +953,8 @@ mod tests {
             "20250131",
             "2025-02-29",
             "2025-1-31",
+            "9999-12-31",
+            "-009999-01-01",
         ] {
             let text = format!("history.since = {bad:?}");
             assert_eq!(
@@ -935,7 +966,7 @@ mod tests {
         let config = resolve("history.since = \"2024-02-29\"").unwrap();
         assert_eq!(
             config.history,
-            History::Since(jiff::civil::date(2024, 2, 29))
+            History::Since(Since::new(jiff::civil::date(2024, 2, 29)).unwrap())
         );
     }
 

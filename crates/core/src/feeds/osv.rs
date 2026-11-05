@@ -1,0 +1,547 @@
+//! OSV.dev: `POST /v1/querybatch` for ids by package name, `GET /v1/vulns/{id}` for records.
+//!
+//! API: <https://google.github.io/osv.dev/api/>. A batch holds at most 1000 queries, and a
+//! query whose result set is large comes back with a `next_page_token` to send again.
+
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+
+use jiff::Timestamp;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::value::RawValue;
+
+use crate::config::History;
+use crate::feeds::Advisory;
+use crate::feeds::FeedError;
+use crate::feeds::Feeds;
+use crate::feeds::OsvAdvisories;
+use crate::feeds::Source;
+use crate::feeds::cache_key;
+use crate::feeds::http::decode;
+use crate::feeds::in_window;
+use crate::package::Package;
+
+/// OSV's documented maximum number of queries in one `querybatch` request.
+const BATCH: usize = 1000;
+
+pub(super) fn fetch(
+    feeds: &Feeds,
+    packages: &[Package],
+    history: History,
+) -> Result<OsvAdvisories, FeedError> {
+    let ids = query_ids(feeds, packages)?;
+    let mut advisories = Vec::with_capacity(ids.len());
+    let mut failures = Vec::new();
+    for (id, modified) in ids {
+        // One bad record must not hide the others: keep going and report it.
+        let (header, record) = match record(feeds, &id, modified) {
+            Ok(fetched) => fetched,
+            Err(e) => {
+                failures.push(e);
+                continue;
+            }
+        };
+        if in_window(header.published, Some(header.modified), history) {
+            advisories.push(Advisory {
+                source: Source::Osv,
+                id: header.id,
+                aliases: header.aliases,
+                record,
+            });
+        }
+    }
+    Ok(OsvAdvisories {
+        advisories,
+        failures,
+    })
+}
+
+/// Returns the id and latest `modified` time of every advisory for `packages`.
+fn query_ids(
+    feeds: &Feeds,
+    packages: &[Package],
+) -> Result<BTreeMap<String, Option<Timestamp>>, FeedError> {
+    let url = format!("{}/v1/querybatch", feeds.endpoints.osv);
+    let unique: BTreeSet<&Package> = packages.iter().collect();
+    let mut pending: Vec<(&Package, Option<String>)> =
+        unique.into_iter().map(|p| (p, None)).collect();
+    let mut ids = BTreeMap::new();
+    let mut seen_tokens = BTreeSet::new();
+
+    while !pending.is_empty() {
+        let batch: Vec<_> = pending.drain(..pending.len().min(BATCH)).collect();
+        let request = BatchRequest {
+            queries: batch
+                .iter()
+                .map(|(package, page_token)| Query {
+                    package: QueryPackage {
+                        name: &package.name,
+                        ecosystem: package.ecosystem.osv_name(),
+                    },
+                    page_token: page_token.as_deref(),
+                })
+                .collect(),
+        };
+        let response: BatchResponse = decode(&url, &feeds.http.post_json(&url, &request)?)?;
+        if response.results.len() != batch.len() {
+            return Err(FeedError::Unexpected {
+                url,
+                what: "querybatch returned a different number of results than queries",
+            });
+        }
+
+        for ((package, _), result) in batch.into_iter().zip(response.results) {
+            for vuln in result.vulns {
+                let modified = ids.entry(vuln.id).or_insert(vuln.modified);
+                *modified = (*modified).max(vuln.modified);
+            }
+            // A repeated token would loop forever.
+            match result.next_page_token {
+                Some(token) if token.is_empty() => {}
+                Some(token) if !seen_tokens.insert((package, token.clone())) => {
+                    return Err(FeedError::Unexpected {
+                        url,
+                        what: "querybatch repeated a page token",
+                    });
+                }
+                Some(token) => pending.push((package, Some(token))),
+                None => {}
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// Returns the record for `id`, from the cache unless OSV says it changed since.
+fn record(
+    feeds: &Feeds,
+    id: &str,
+    modified: Option<Timestamp>,
+) -> Result<(Header, Box<RawValue>), FeedError> {
+    let key = cache_key(id)?;
+    let cached: Option<Box<RawValue>> = feeds.cache.read("osv", key)?;
+    if let Some(record) = cached
+        && let Ok(header) = serde_json::from_str::<Header>(record.get())
+        && header.id == id
+        && modified.is_some_and(|m| header.modified >= m)
+    {
+        return Ok((header, record));
+    }
+
+    let url = format!("{}/v1/vulns/{key}", feeds.endpoints.osv);
+    let text = feeds.http.get(&url, &[], &[])?;
+    let record: Box<RawValue> = decode(&url, &text)?;
+    let header: Header = decode(&url, record.get())?;
+    if header.id != id {
+        return Err(FeedError::Unexpected {
+            url,
+            what: "the record's id differs from the id requested",
+        });
+    }
+    feeds.cache.write("osv", key, &record)?;
+    Ok((header, record))
+}
+
+#[derive(Debug, Serialize)]
+struct BatchRequest<'a> {
+    queries: Vec<Query<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct Query<'a> {
+    package: QueryPackage<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_token: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct QueryPackage<'a> {
+    name: &'a str,
+    ecosystem: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchResponse {
+    results: Vec<BatchResult>,
+}
+
+/// OSV omits `vulns` for a package with no advisories.
+#[derive(Debug, Deserialize)]
+struct BatchResult {
+    #[serde(default)]
+    vulns: Vec<VulnRef>,
+    next_page_token: Option<String>,
+}
+
+/// OSV documents `modified` on every result; without it the cached record is fetched again.
+#[derive(Debug, Deserialize)]
+struct VulnRef {
+    id: String,
+    modified: Option<Timestamp>,
+}
+
+/// The fields of an OSV record this module reads; the rest stays in the raw record.
+#[derive(Debug, Deserialize)]
+struct Header {
+    id: String,
+    modified: Timestamp,
+    published: Option<Timestamp>,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Since;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::feeds::Endpoints;
+    use crate::feeds::NvdAccess;
+    use crate::feeds::test_server::Request;
+    use crate::feeds::test_server::TestServer;
+
+    fn feeds(server: &TestServer, dir: &std::path::Path) -> Feeds {
+        Feeds::with_endpoints(
+            dir.to_owned(),
+            NvdAccess::Anonymous,
+            Endpoints {
+                osv: server.url.clone(),
+                nvd: String::new(),
+                kev: String::new(),
+            },
+        )
+    }
+
+    fn record_json(id: &str, modified: &str, published: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "modified": modified,
+            "published": published,
+            "aliases": [format!("CVE-{id}")],
+            "summary": "s",
+        })
+        .to_string()
+    }
+
+    fn pkg(text: &str) -> Package {
+        text.parse().unwrap()
+    }
+
+    /// Answers querybatch with `ids` for every query, and each record with `modified`.
+    fn osv_server(modified: Arc<Mutex<String>>) -> TestServer {
+        TestServer::start(move |request: &Request| match request.path() {
+            "/v1/querybatch" => {
+                let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+                let count = body["queries"].as_array().unwrap().len();
+                let m = modified.lock().unwrap().clone();
+                let result = serde_json::json!({"vulns": [
+                    {"id": "A-1", "modified": m},
+                    {"id": "B-2", "modified": m},
+                ]})
+                .to_string();
+                let results = vec![result; count].join(",");
+                (200, format!(r#"{{"results":[{results}]}}"#))
+            }
+            path => {
+                let id = path.trim_start_matches("/v1/vulns/");
+                let m = modified.lock().unwrap().clone();
+                let published = if id == "A-1" {
+                    "2020-01-01T00:00:00Z"
+                } else {
+                    "2025-06-01T00:00:00Z"
+                };
+                (200, record_json(id, &m, published))
+            }
+        })
+    }
+
+    #[test]
+    fn fetches_records_once_until_modified() {
+        let modified = Arc::new(Mutex::new("2026-01-01T00:00:00Z".to_owned()));
+        let server = osv_server(Arc::clone(&modified));
+        let tmp = tempfile::tempdir().unwrap();
+        let feeds = feeds(&server, tmp.path());
+        let packages = [pkg("npm:lodash"), pkg("crates.io:serde"), pkg("npm:lodash")];
+
+        let advisories = feeds.osv(&packages, History::All).unwrap().advisories;
+        let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["A-1", "B-2"]);
+        assert_eq!(advisories[0].aliases, ["CVE-A-1"]);
+        assert!(matches!(advisories[0].source, Source::Osv));
+        assert!(advisories[0].record.get().contains(r#""summary":"s""#));
+
+        let requests = server.requests();
+        let batch: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(
+            batch,
+            serde_json::json!({"queries": [
+                {"package": {"name": "serde", "ecosystem": "crates.io"}},
+                {"package": {"name": "lodash", "ecosystem": "npm"}},
+            ]})
+        );
+        assert_eq!(requests.len(), 3, "one batch and two records");
+
+        feeds.osv(&packages, History::All).unwrap();
+        assert_eq!(server.requests().len(), 4, "records came from the cache");
+
+        *modified.lock().unwrap() = "2026-02-01T00:00:00Z".to_owned();
+        feeds.osv(&packages, History::All).unwrap();
+        assert_eq!(server.requests().len(), 7, "both records changed upstream");
+    }
+
+    /// A-1 was published in 2020 and B-2 in 2025; both were modified 2026-01-01.
+    #[test]
+    fn history_window_uses_published_or_modified() {
+        let server = osv_server(Arc::new(Mutex::new("2026-01-01T00:00:00Z".to_owned())));
+        let tmp = tempfile::tempdir().unwrap();
+        let feeds = feeds(&server, tmp.path());
+        let ids = |year, month| -> Vec<String> {
+            let since = History::Since(Since::new(jiff::civil::date(year, month, 1)).unwrap());
+            let advisories = feeds.osv(&[pkg("npm:lodash")], since).unwrap().advisories;
+            advisories.into_iter().map(|a| a.id).collect()
+        };
+
+        assert_eq!(
+            ids(2024, 1),
+            ["A-1", "B-2"],
+            "an old advisory modified recently stays"
+        );
+        assert!(ids(2026, 6).is_empty(), "neither date is in the window");
+    }
+
+    #[test]
+    fn repeated_page_token_is_an_error_not_a_loop() {
+        let server = TestServer::start(|_: &Request| {
+            let result = serde_json::json!({"vulns": [], "next_page_token": "same"});
+            (200, serde_json::json!({ "results": [result] }).to_string())
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let err = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap_err();
+        assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
+    fn empty_page_token_ends_paging() {
+        let server = TestServer::start(|_: &Request| {
+            let result = serde_json::json!({"vulns": [], "next_page_token": ""});
+            (200, serde_json::json!({ "results": [result] }).to_string())
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let advisories = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap()
+            .advisories;
+        assert!(advisories.is_empty());
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn follows_page_tokens_and_splits_batches() {
+        let server = TestServer::start(|request: &Request| {
+            if request.path() != "/v1/querybatch" {
+                let id = request.path().trim_start_matches("/v1/vulns/");
+                return (
+                    200,
+                    record_json(id, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+                );
+            }
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            let results: Vec<_> = body["queries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(
+                    |q| match (q["package"]["name"].as_str(), q.get("page_token")) {
+                        (Some("p0"), None) => serde_json::json!({
+                            "vulns": [{"id": "P-1", "modified": "2026-01-01T00:00:00Z"}],
+                            "next_page_token": "t1",
+                        }),
+                        (Some("p0"), Some(token)) => {
+                            assert_eq!(token, "t1");
+                            serde_json::json!({
+                                "vulns": [{"id": "P-2", "modified": "2026-01-01T00:00:00Z"}]
+                            })
+                        }
+                        _ => serde_json::json!({}),
+                    },
+                )
+                .collect();
+            (200, serde_json::json!({ "results": results }).to_string())
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let packages: Vec<_> = (0..=BATCH).map(|i| pkg(&format!("npm:p{i}"))).collect();
+
+        let advisories = feeds(&server, tmp.path())
+            .osv(&packages, History::All)
+            .unwrap()
+            .advisories;
+        let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["P-1", "P-2"]);
+
+        let batch_sizes: Vec<_> = server
+            .requests()
+            .iter()
+            .filter(|r| r.path() == "/v1/querybatch")
+            .map(|r| {
+                let body: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+                body["queries"].as_array().unwrap().len()
+            })
+            .collect();
+        // The leftover query and the page-token retry share the second batch.
+        assert_eq!(batch_sizes, [BATCH, 2]);
+    }
+
+    #[test]
+    fn rejects_short_batch_responses_and_unsafe_ids() {
+        let server = TestServer::start(|request: &Request| {
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            if body["queries"].as_array().unwrap().len() == 2 {
+                (200, r#"{"results":[{}]}"#.to_owned())
+            } else {
+                let unsafe_ref = r#"{"id":"../x","modified":"2026-01-01T00:00:00Z"}"#;
+                (
+                    200,
+                    format!(r#"{{"results":[{{"vulns":[{unsafe_ref}]}}]}}"#),
+                )
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let feeds = feeds(&server, tmp.path());
+
+        let err = feeds
+            .osv(&[pkg("npm:a"), pkg("npm:b")], History::All)
+            .unwrap_err();
+        assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
+
+        let osv = feeds.osv(&[pkg("npm:a")], History::All).unwrap();
+        assert!(osv.advisories.is_empty());
+        assert!(
+            matches!(osv.failures[..], [FeedError::BadId { .. }]),
+            "{:?}",
+            osv.failures
+        );
+    }
+
+    /// One querybatch result for `A-1`, with or without a `modified` time.
+    fn single_ref_server(modified: Option<&'static str>) -> TestServer {
+        TestServer::start(move |request: &Request| {
+            if request.path() == "/v1/querybatch" {
+                let vuln = match modified {
+                    Some(m) => serde_json::json!({"id": "A-1", "modified": m}),
+                    None => serde_json::json!({"id": "A-1"}),
+                };
+                let body = serde_json::json!({"results": [{"vulns": [vuln]}]});
+                (200, body.to_string())
+            } else {
+                let record = record_json("A-1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+                (200, record)
+            }
+        })
+    }
+
+    #[test]
+    fn cached_file_with_other_id_is_fetched_again() {
+        let server = single_ref_server(Some("2026-01-01T00:00:00Z"));
+        let tmp = tempfile::tempdir().unwrap();
+        let wrong = record_json("Z-9", "2099-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+        std::fs::create_dir_all(tmp.path().join("osv")).unwrap();
+        std::fs::write(tmp.path().join("osv/A-1.json"), wrong).unwrap();
+
+        let advisories = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap()
+            .advisories;
+        assert_eq!(advisories[0].id, "A-1");
+        assert_eq!(server.requests().len(), 2, "the record was fetched");
+    }
+
+    #[test]
+    fn missing_modified_always_refetches() {
+        let server = single_ref_server(None);
+        let tmp = tempfile::tempdir().unwrap();
+        let feeds = feeds(&server, tmp.path());
+        feeds.osv(&[pkg("npm:a")], History::All).unwrap();
+        feeds.osv(&[pkg("npm:a")], History::All).unwrap();
+        assert_eq!(
+            server.requests().len(),
+            4,
+            "two batches and two record fetches"
+        );
+    }
+
+    #[test]
+    fn rejects_record_with_other_id() {
+        let server = TestServer::start(|request: &Request| {
+            if request.path() == "/v1/querybatch" {
+                let r = r#"{"vulns":[{"id":"A-1","modified":"2026-01-01T00:00:00Z"}]}"#;
+                (200, format!(r#"{{"results":[{r}]}}"#))
+            } else {
+                (
+                    200,
+                    record_json("Z-9", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+                )
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let osv = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap();
+        assert!(osv.advisories.is_empty());
+        assert!(
+            matches!(osv.failures[..], [FeedError::Unexpected { .. }]),
+            "{:?}",
+            osv.failures
+        );
+        assert!(!tmp.path().join("osv/A-1.json").exists());
+    }
+
+    #[test]
+    fn one_failing_record_does_not_hide_the_others() {
+        let server = TestServer::start(|request: &Request| match request.path() {
+            "/v1/querybatch" => {
+                let vulns = serde_json::json!([
+                    {"id": "A-1", "modified": "2026-01-01T00:00:00Z"},
+                    {"id": "B-2", "modified": "2026-01-01T00:00:00Z"},
+                ]);
+                let body = serde_json::json!({"results": [{"vulns": vulns}]});
+                (200, body.to_string())
+            }
+            "/v1/vulns/A-1" => (404, "not found".to_owned()),
+            _ => (
+                200,
+                record_json("B-2", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+            ),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let osv = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap();
+        let ids: Vec<_> = osv.advisories.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["B-2"]);
+        assert!(
+            matches!(osv.failures[..], [FeedError::Status { status: 404, .. }]),
+            "{:?}",
+            osv.failures
+        );
+    }
+
+    #[test]
+    fn no_packages_makes_no_requests() {
+        let server = TestServer::start(|_| (500, String::new()));
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            feeds(&server, tmp.path())
+                .osv(&[], History::All)
+                .unwrap()
+                .advisories
+                .is_empty()
+        );
+        assert!(server.requests().is_empty());
+    }
+}
