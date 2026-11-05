@@ -157,7 +157,7 @@ pub enum FoundIn {
 /// A source or file that could not be collected, or a name that cannot be looked up.
 #[derive(Debug, thiserror::Error)]
 pub enum InventoryError {
-    /// A listing command exists but could not be started or waited for.
+    /// A listing command exists but could not be started, waited for, or its output read.
     #[error("cannot run `{command}`")]
     Spawn {
         /// The command line.

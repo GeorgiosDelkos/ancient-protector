@@ -169,9 +169,15 @@ fn wait(
 ///
 /// The group is killed with `kill`, because sending a signal to a group needs `libc` and an
 /// `unsafe` call, and this crate has neither. Every step is best effort: the command is
-/// abandoned either way, and a failed kill means the process already exited. If the leader has
-/// exited and the group emptied, its id could in principle be reused by a new group before the
-/// kill; the window is the few milliseconds since the deadline, and accepted.
+/// abandoned either way, and a failed kill means the process already exited.
+///
+/// Process ids can be reused, which bounds what the kill can hit. On a timeout the leader is not
+/// yet reaped, so the group id stays reserved and only the group is killed. When the leader has
+/// exited and been reaped (the "kept its output open" case), the id is free once the rest of
+/// the group also exits, which can happen at any point before the deadline if something outside
+/// the group holds the output; a new group could take the id in that time and be killed.
+/// Accepted: it takes a tool that escapes its own group, and an id reused within a minute is
+/// rare.
 fn stop(child: &mut Child, command: &str, detail: String) -> InventoryError {
     let group = format!("-{}", child.id());
     let kill = Command::new("/bin/kill")
@@ -284,7 +290,8 @@ mod tests {
             .unwrap();
         let stat = String::from_utf8_lossy(&ps.stdout);
         assert!(
-            stat.trim().is_empty() || stat.starts_with('Z'),
+            // Gone, a zombie (Z), or still being torn down after SIGKILL (E).
+            stat.trim().is_empty() || stat.starts_with(['Z', 'E']),
             "helper survived: {stat}"
         );
     }

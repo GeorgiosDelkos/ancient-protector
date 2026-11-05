@@ -83,22 +83,26 @@ fn list(dir: &Path, problems: &mut Vec<InventoryError>) -> Vec<(PathBuf, Entry)>
         };
         if file_type.is_file() {
             listed.push((entry.path(), Entry::File));
-        } else if file_type.is_dir() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_ref()) {
-                listed.push((entry.path(), Entry::Dir));
-            }
+        } else if file_type.is_dir() && entered(&entry.file_name()) {
+            listed.push((entry.path(), Entry::Dir));
         }
     }
     listed.sort_by(|a, b| a.0.cmp(&b.0));
     listed
 }
 
+/// Returns whether the walk enters a folder named `name`: not hidden, not vendored or built.
+fn entered(name: &OsStr) -> bool {
+    let name = name.to_string_lossy();
+    !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_ref())
+}
+
 /// Adds the packages of `path` if it is a lockfile this module reads.
 fn read(path: &Path, inventory: &mut Inventory) {
-    let name = path.file_name().and_then(OsStr::to_str);
-    let found = match name.unwrap_or_default() {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return;
+    };
+    let found = match name {
         "Cargo.lock" => read_lockfile(path)
             .and_then(|text| parse_cargo_lock(path, &text, &mut inventory.problems)),
         // npm-shrinkwrap.json is a package-lock.json that a package publishes with itself.

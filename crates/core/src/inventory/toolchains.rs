@@ -232,12 +232,11 @@ fn python_is_real(inventory: &mut Inventory) -> bool {
     let mut problem = None;
     // A non-zero exit from `xcode-select -p` means no tools; any other failure (it cannot run,
     // hangs, prints something unreadable) is reported, and python3 is then not run.
-    let has_tools = || match command::run_any_status("xcode-select", &["-p"]) {
-        Ok(found) => found.is_some_and(|output| output.success),
-        Err(e) => {
-            problem = Some(e);
-            false
-        }
+    let has_tools = || {
+        tools_found(
+            command::run_any_status("xcode-select", &["-p"]),
+            &mut problem,
+        )
     };
     let real = python_is_real_at(command::which("python3").as_deref(), has_tools);
     inventory.problems.extend(problem);
@@ -245,6 +244,21 @@ fn python_is_real(inventory: &mut Inventory) -> bool {
         inventory.missing("python3");
     }
     real
+}
+
+/// Reads `xcode-select -p`: the tools are there when it exits 0; a non-zero exit means they are
+/// not; any other failure is put in `problem` and counts as not there.
+fn tools_found(
+    run: Result<Option<command::Output>, InventoryError>,
+    problem: &mut Option<InventoryError>,
+) -> bool {
+    match run {
+        Ok(found) => found.is_some_and(|output| output.success),
+        Err(e) => {
+            *problem = Some(e);
+            false
+        }
+    }
 }
 
 fn python_is_real_at(python3: Option<&Path>, has_tools: impl FnOnce() -> bool) -> bool {
@@ -433,6 +447,25 @@ mod tests {
         assert!(python_is_real_at(None, || panic!(
             "a missing python3 is found later"
         )));
+    }
+
+    #[test]
+    fn xcode_select_verdicts() {
+        let output = |success| command::Output {
+            success,
+            stdout: String::new(),
+            detail: String::new(),
+            command: "xcode-select -p".to_owned(),
+        };
+        let mut problem = None;
+        assert!(tools_found(Ok(Some(output(true))), &mut problem));
+        assert!(!tools_found(Ok(Some(output(false))), &mut problem));
+        assert!(!tools_found(Ok(None), &mut problem));
+        assert!(problem.is_none(), "a plain answer is not a problem");
+
+        let failed = InventoryError::parse("xcode-select -p", &"hung");
+        assert!(!tools_found(Err(failed), &mut problem));
+        assert!(matches!(problem, Some(InventoryError::Parse { .. })));
     }
 
     #[test]
