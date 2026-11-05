@@ -282,7 +282,7 @@ mod tests {
         let err = run_within("sh", &["-c", &script], Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("kept its output open"), "{err}");
 
-        // The helper was in the tool's process group, so it is gone (or a zombie) now.
+        // The helper was in the tool's process group, so the group kill reached it.
         let pid = std::fs::read_to_string(&pidfile).unwrap();
         let ps = Command::new("ps")
             .args(["-o", "stat=", "-p", pid.trim()])
