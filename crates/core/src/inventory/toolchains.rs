@@ -37,11 +37,7 @@ pub(super) fn collect(inventory: &mut Inventory) {
         inventory.absorb(parse_node_version(&output));
     }
     npm_global(inventory);
-    if python_is_real(inventory)
-        && let Some(output) = inventory.run("python3", &["--version"])
-    {
-        inventory.absorb(parse_python_version(&output));
-    }
+    python(inventory);
     if let Some(output) = inventory.run("uv", &["tool", "list"]) {
         inventory.absorb(parse_uv_tools(&output));
     }
@@ -225,10 +221,10 @@ fn parse_npm_global(json: &str) -> Parsed {
         .collect())
 }
 
-/// `/usr/bin/python3` is a stub until the Command Line Tools are installed, and running it then
-/// opens an install dialog on every sweep, so it counts as not installed unless
-/// `xcode-select -p` finds the tools.
-fn python_is_real(inventory: &mut Inventory) -> bool {
+/// Reads the `python3` on `PATH`. `/usr/bin/python3` is a stub until the Command Line Tools are
+/// installed, and running it then opens an install dialog on every sweep, so it counts as not
+/// installed unless `xcode-select -p` finds the tools.
+fn python(inventory: &mut Inventory) {
     let mut problem = None;
     // A non-zero exit from `xcode-select -p` means no tools; any other failure (it cannot be
     // started, hangs, prints something unreadable) is reported, and python3 is then not run.
@@ -242,8 +238,9 @@ fn python_is_real(inventory: &mut Inventory) -> bool {
     inventory.problems.extend(problem);
     if !real {
         inventory.missing("python3");
+    } else if let Some(output) = inventory.run("python3", &["--version"]) {
+        inventory.absorb(parse_python_version(&output));
     }
-    real
 }
 
 /// Reads `xcode-select -p`: the tools are there when it exits 0. A non-zero exit, or no
