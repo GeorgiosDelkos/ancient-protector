@@ -1,5 +1,3 @@
-# clippy.toml: copy to the repo root next to Cargo.toml (REPO-1). The Stop hook reads the
-# repo's own copy; it never substitutes this one.
 
 # Tests unwrap instead of using `?` so a failure reports its exact location.
 allow-unwrap-in-tests = true

