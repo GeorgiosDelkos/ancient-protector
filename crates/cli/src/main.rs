@@ -148,9 +148,10 @@ fn advisories(
 
 /// Prints each component as a JSON line and reports problems and missing tools on stderr.
 ///
-/// Exits non-zero when a source failed, so a script sees the list is incomplete. A Homebrew
-/// name with no NVD product does not count: it is a lasting fact about this Mac that the next
-/// run would report again, not a failure a retry could fix.
+/// Exits non-zero when anything could not be collected or printed, so a script sees the list is
+/// incomplete. Lasting facts about this Mac that the next run would report again do not count:
+/// a Homebrew name with no NVD product, crates from a registry other than crates.io, and a
+/// problem npm reports in a global tree it still lists.
 fn inventory(inventory: &Inventory) -> anyhow::Result<()> {
     let mut failures = 0;
     for component in &inventory.components {
@@ -179,7 +180,7 @@ fn inventory(inventory: &Inventory) -> anyhow::Result<()> {
         ));
     }
     if failures > 0 {
-        anyhow::bail!("{failures} inventory source(s) failed; the list above is incomplete");
+        anyhow::bail!("{failures} inventory problem(s); the list above is incomplete");
     }
     Ok(())
 }
@@ -316,7 +317,7 @@ mod tests {
         let err = super::inventory(&inventory).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "1 inventory source(s) failed; the list above is incomplete"
+            "1 inventory problem(s); the list above is incomplete"
         );
         assert!(super::inventory(&Inventory::default()).is_ok());
     }

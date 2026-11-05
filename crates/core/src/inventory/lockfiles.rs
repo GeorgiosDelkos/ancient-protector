@@ -1,13 +1,22 @@
-//! Lockfiles in project folders: `Cargo.lock`, `package-lock.json`, `uv.lock`, `poetry.lock`.
+//! Lockfiles in project folders: `Cargo.lock`, `package-lock.json`, `npm-shrinkwrap.json`,
+//! `uv.lock` and `poetry.lock`.
 //!
 //! The walk never follows symlinks and skips vendored, build and hidden folders, so it reads
 //! each project's own lockfile and not the copies dependencies ship. Only packages from a
 //! registry are kept: workspace members, local paths and git checkouts have no registry
 //! advisories under their name.
+//!
+//! Registries other than the public one are treated differently per ecosystem, on purpose.
+//! `Cargo.lock` records crates.io even when the index is mirrored, so any other Cargo registry
+//! holds different crates, which are noted and left out. npm and Python lockfiles record the
+//! mirror's own URL, and corporate mirrors of npmjs and PyPI are common, so their packages are
+//! kept and looked up under the public name.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -26,52 +35,76 @@ const SKIPPED_DIRS: &[&str] = &["node_modules", "target", "vendor", "dist", "bui
 pub(super) fn collect(root: &Path, inventory: &mut Inventory) {
     let mut pending = vec![root.to_owned()];
     while let Some(dir) = pending.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                inventory.problems.push(InventoryError::io(&dir, e));
-                continue;
-            }
-        };
-        let mut listed = Vec::new();
-        for entry in entries {
-            match entry {
-                Ok(entry) => listed.push(entry),
-                Err(e) => inventory.problems.push(InventoryError::io(&dir, e)),
-            }
-        }
-        let mut entries = listed;
-        entries.sort_by_key(fs::DirEntry::file_name);
-
-        for entry in entries {
-            // `DirEntry::file_type` does not follow symlinks, so a link is neither a dir nor a
-            // file here and is skipped.
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(e) => {
-                    inventory
-                        .problems
-                        .push(InventoryError::io(&entry.path(), e));
-                    continue;
-                }
-            };
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let path = entry.path();
-            if file_type.is_dir() {
-                if !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_ref()) {
-                    pending.push(path);
-                }
-            } else if file_type.is_file()
-                && let Some(parse) = parser(&name)
-            {
-                let mut notes = Vec::new();
-                let found = read_lockfile(&path).and_then(|text| parse(&path, &text, &mut notes));
-                inventory.problems.extend(notes);
-                inventory.absorb(found);
+        for (path, kind) in list(&dir, &mut inventory.problems) {
+            match kind {
+                Entry::Dir => pending.push(path),
+                Entry::File(name) => read(&path, &name, inventory),
             }
         }
     }
+}
+
+/// What a folder entry is to the walk.
+enum Entry {
+    /// A folder to enter.
+    Dir,
+    /// A regular file, with its name.
+    File(String),
+}
+
+/// Returns `dir`'s entries the walk cares about, sorted by name: folders it enters and regular
+/// files. Symlinks, skipped folders and unreadable entries are left out, the last reported.
+fn list(dir: &Path, problems: &mut Vec<InventoryError>) -> Vec<(PathBuf, Entry)> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            problems.push(InventoryError::io(dir, e));
+            return Vec::new();
+        }
+    };
+    let mut listed = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                problems.push(InventoryError::io(dir, e));
+                continue;
+            }
+        };
+        // `DirEntry::file_type` does not follow symlinks, so a link is neither a dir nor a
+        // file here and is skipped.
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(e) => {
+                problems.push(InventoryError::io(&entry.path(), e));
+                continue;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if file_type.is_dir() && !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_str()) {
+            listed.push((entry.path(), Entry::Dir));
+        } else if file_type.is_file() {
+            listed.push((entry.path(), Entry::File(name)));
+        }
+    }
+    listed.sort_by(|a, b| a.0.cmp(&b.0));
+    listed
+}
+
+/// Adds the packages of `path` if `name` is a lockfile this module reads.
+fn read(path: &Path, name: &str, inventory: &mut Inventory) {
+    let found = match name {
+        "Cargo.lock" => read_lockfile(path)
+            .and_then(|text| parse_cargo_lock(path, &text, &mut inventory.problems)),
+        // npm-shrinkwrap.json is a package-lock.json that a package publishes with itself.
+        "package-lock.json" | "npm-shrinkwrap.json" => {
+            read_lockfile(path).and_then(|text| parse_package_lock(path, &text))
+        }
+        "uv.lock" => read_lockfile(path).and_then(|text| parse_uv_lock(path, &text)),
+        "poetry.lock" => read_lockfile(path).and_then(|text| parse_poetry_lock(path, &text)),
+        _ => return,
+    };
+    inventory.absorb(found);
 }
 
 /// The largest lockfile read, in bytes. Arbitrary: the biggest real lockfiles are a few MB, and
@@ -91,20 +124,6 @@ fn read_lockfile(path: &Path) -> Result<String, InventoryError> {
     fs::read_to_string(path).map_err(|e| InventoryError::io(path, e))
 }
 
-/// Parses one lockfile. Facts worth reporting that do not stop the parse go in the notes.
-type Parser = fn(&Path, &str, &mut Vec<InventoryError>) -> Result<Vec<Component>, InventoryError>;
-
-fn parser(file_name: &str) -> Option<Parser> {
-    match file_name {
-        "Cargo.lock" => Some(parse_cargo_lock),
-        // npm-shrinkwrap.json is a package-lock.json that a package publishes with itself.
-        "package-lock.json" | "npm-shrinkwrap.json" => Some(parse_package_lock),
-        "uv.lock" => Some(parse_uv_lock),
-        "poetry.lock" => Some(parse_poetry_lock),
-        _ => None,
-    }
-}
-
 fn component(path: &Path, ecosystem: Ecosystem, name: String, version: String) -> Component {
     Component {
         lookup: Lookup::Package(Package { ecosystem, name }),
@@ -119,10 +138,8 @@ fn parse_error(path: &Path, detail: &impl ToString) -> InventoryError {
     InventoryError::parse(path.display().to_string(), detail)
 }
 
-/// Packages from crates.io, by either index protocol. Cargo records the original source even
-/// when the index is mirrored, so these two URLs mean crates.io. Workspace members have no
-/// source and git ones `git+`; crates from another registry are left out and noted once, since
-/// OSV's crates.io advisories are about other crates that happen to share their names.
+/// Packages from crates.io, by either index protocol; see the module docs for why another
+/// Cargo registry is noted and left out. Workspace members have no source and git ones `git+`.
 const CRATES_IO_SOURCES: &[&str] = &[
     "registry+https://github.com/rust-lang/crates.io-index",
     "sparse+https://index.crates.io/",
@@ -147,7 +164,7 @@ fn parse_cargo_lock(
 
     let lock: Lock = toml::from_str(text).map_err(|e| parse_error(path, &e))?;
     let mut components = Vec::new();
-    let mut other_registries = std::collections::BTreeSet::new();
+    let mut other_registries = BTreeSet::new();
     for p in lock.package {
         match p.source.as_deref() {
             Some(source) if CRATES_IO_SOURCES.contains(&source) => {
@@ -173,11 +190,7 @@ fn parse_cargo_lock(
 /// `lockfileVersion` 2 and 3 list every installed package under `packages`, keyed by its
 /// `node_modules/...` path. Version 1 (npm 6 and older) has a different shape and is reported
 /// rather than guessed at.
-fn parse_package_lock(
-    path: &Path,
-    text: &str,
-    _notes: &mut Vec<InventoryError>,
-) -> Result<Vec<Component>, InventoryError> {
+fn parse_package_lock(path: &Path, text: &str) -> Result<Vec<Component>, InventoryError> {
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Lock {
@@ -225,11 +238,7 @@ fn parse_package_lock(
 }
 
 /// Packages whose `source` is a `registry`; editable, virtual, path and git ones are local.
-fn parse_uv_lock(
-    path: &Path,
-    text: &str,
-    _notes: &mut Vec<InventoryError>,
-) -> Result<Vec<Component>, InventoryError> {
+fn parse_uv_lock(path: &Path, text: &str) -> Result<Vec<Component>, InventoryError> {
     #[derive(Debug, Deserialize)]
     struct Lock {
         #[serde(default)]
@@ -254,11 +263,7 @@ fn parse_uv_lock(
 
 /// Packages from PyPI (no `source`) or a private index (`source.type = "legacy"`); `git`,
 /// `directory`, `file` and `url` sources are not registry packages.
-fn parse_poetry_lock(
-    path: &Path,
-    text: &str,
-    _notes: &mut Vec<InventoryError>,
-) -> Result<Vec<Component>, InventoryError> {
+fn parse_poetry_lock(path: &Path, text: &str) -> Result<Vec<Component>, InventoryError> {
     #[derive(Debug, Deserialize)]
     struct Lock {
         #[serde(default)]
@@ -371,8 +376,7 @@ mod tests {
             "node_modules/registry": {"version": "2.0.0", "resolved": "https://r.example/r.tgz"},
             "packages/local": {"version": "0.0.1"}
         }}"#;
-        let found =
-            parse_package_lock(Path::new("/p/package-lock.json"), text, &mut Vec::new()).unwrap();
+        let found = parse_package_lock(Path::new("/p/package-lock.json"), text).unwrap();
         assert_eq!(
             names(&found),
             [
@@ -388,13 +392,11 @@ mod tests {
     #[test]
     fn package_lock_v1_is_reported() {
         let text = r#"{"lockfileVersion": 1, "dependencies": {"lodash": {"version": "4.0.0"}}}"#;
-        let err = parse_package_lock(Path::new("/p/package-lock.json"), text, &mut Vec::new())
-            .unwrap_err();
+        let err = parse_package_lock(Path::new("/p/package-lock.json"), text).unwrap_err();
         assert!(err.to_string().contains("lockfileVersion 1"), "{err}");
 
         let v2 = r#"{"lockfileVersion": 2, "packages": {"node_modules/a": {"version": "1.0.0"}}}"#;
-        let found =
-            parse_package_lock(Path::new("/p/package-lock.json"), v2, &mut Vec::new()).unwrap();
+        let found = parse_package_lock(Path::new("/p/package-lock.json"), v2).unwrap();
         assert_eq!(names(&found), ["npm:a 1.0.0"]);
     }
 
@@ -415,7 +417,7 @@ mod tests {
             version = "0.1.0"
             source = { virtual = "packages/member" }
         "#;
-        let found = parse_uv_lock(Path::new("/p/uv.lock"), text, &mut Vec::new()).unwrap();
+        let found = parse_uv_lock(Path::new("/p/uv.lock"), text).unwrap();
         assert_eq!(names(&found), ["PyPI:requests 2.32.3"]);
     }
 
@@ -438,7 +440,7 @@ mod tests {
             type = "git"
             url = "https://github.com/x/y"
         "#;
-        let found = parse_poetry_lock(Path::new("/p/poetry.lock"), text, &mut Vec::new()).unwrap();
+        let found = parse_poetry_lock(Path::new("/p/poetry.lock"), text).unwrap();
         assert_eq!(names(&found), ["PyPI:django 5.1.2", "PyPI:internal 1.0.0"]);
     }
 

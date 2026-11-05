@@ -149,7 +149,7 @@ impl FromStr for Product {
     type Err = ParseProductError;
 
     /// Accepts `product` or `vendor:product`, each 1 to 64 lowercase ASCII letters, digits,
-    /// `.`, `-` and `_` (together at most 126, so the cache name fits), starting with a letter or
+    /// `.`, `-` and `_` (short enough together that the cache name fits), starting with a letter or
     /// digit and without `..`: the characters CPE names use without escaping.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let part_ok = |p: &str| {
@@ -164,16 +164,19 @@ impl FromStr for Product {
             Some((vendor, name)) => (Some(vendor), name),
             None => (None, s),
         };
-        // The cache name is `vendor..name`, which must fit `cache_key`'s 128 bytes.
-        let cache_len = vendor.map_or(0, |v| v.len() + 2) + name.len();
-        if part_ok(name) && vendor.is_none_or(part_ok) && cache_len <= 128 {
-            Ok(Self {
-                vendor: vendor.map(str::to_owned),
-                name: name.to_owned(),
-            })
-        } else {
-            Err(ParseProductError)
+        if !part_ok(name) || !vendor.is_none_or(part_ok) {
+            return Err(ParseProductError);
         }
+        let product = Self {
+            vendor: vendor.map(str::to_owned),
+            name: name.to_owned(),
+        };
+        // Only a product whose cache file name is valid is a product: fetching it must not fail
+        // later over a name the parser accepted.
+        if cache_key(&product.cache_name()).is_err() {
+            return Err(ParseProductError);
+        }
+        Ok(product)
     }
 }
 

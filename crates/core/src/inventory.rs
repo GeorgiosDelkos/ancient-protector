@@ -68,15 +68,20 @@ impl Inventory {
         }
     }
 
+    /// Records that `program` is not installed, once.
+    fn missing(&mut self, program: &'static str) {
+        if !self.not_installed.contains(&program) {
+            self.not_installed.push(program);
+        }
+    }
+
     /// Runs a listing command, recording a failure as a problem and a missing tool in
     /// `not_installed`. Returns stdout only when the command succeeded.
     fn run(&mut self, program: &'static str, args: &[&str]) -> Option<String> {
         match command::run(program, args) {
             Ok(Some(output)) => Some(output),
             Ok(None) => {
-                if !self.not_installed.contains(&program) {
-                    self.not_installed.push(program);
-                }
+                self.missing(program);
                 None
             }
             Err(e) => {
@@ -196,6 +201,15 @@ pub enum InventoryError {
         /// The registry source, as Cargo.lock names it.
         registry: String,
     },
+    /// `npm ls -g` reported a problem in the global tree but still listed it, so its packages
+    /// are in the inventory.
+    #[error(
+        "`npm ls -g` reports a problem in the global packages (they are still listed): {detail}"
+    )]
+    NpmTree {
+        /// The exit status and the start of npm's stderr.
+        detail: String,
+    },
     /// A Homebrew formula or cask name cannot be an NVD product name, so it is not checked.
     #[error("no NVD product name for Homebrew {name:?}; it is not checked")]
     NoProduct {
@@ -212,7 +226,7 @@ impl InventoryError {
             Self::Spawn { .. } | Self::Command { .. } | Self::Parse { .. } | Self::Io { .. } => {
                 true
             }
-            Self::NoProduct { .. } | Self::OtherRegistry { .. } => false,
+            Self::NoProduct { .. } | Self::OtherRegistry { .. } | Self::NpmTree { .. } => false,
         }
     }
 

@@ -142,7 +142,7 @@ fn failing_tool_is_reported_and_the_rest_still_count() {
         !out.status.success(),
         "a failed source makes the list incomplete: {stderr}"
     );
-    assert!(stderr.contains("1 inventory source(s) failed"), "{stderr}");
+    assert!(stderr.contains("1 inventory problem(s)"), "{stderr}");
     assert!(
         stderr.contains("not installed, so not checked: rustup, cargo"),
         "{stderr}"
@@ -155,4 +155,76 @@ fn failing_tool_is_reported_and_the_rest_still_count() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(stdout.contains("apple:macos"), "{stdout}");
+}
+
+/// npm lists the whole global tree even when it exits 1 over a problem in it; the packages
+/// count, the problem is noted, and it does not fail the command.
+#[test]
+fn npm_tree_problem_keeps_its_packages() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    tool(
+        &bin,
+        "npm",
+        r#"echo '{"dependencies": {"npm": {"version": "10.9.7"}}}'
+           echo 'npm error code ELSPROBLEMS' >&2; exit 1"#,
+    );
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("config.toml"), "").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+        .arg("--data-dir")
+        .arg(&data)
+        .arg("inventory")
+        .env("HOME", tmp.path())
+        .env("PATH", &bin)
+        .output()
+        .expect("the test binary was built by cargo");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("reports a problem in the global packages"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ELSPROBLEMS"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(r#""name":"npm""#), "{stdout}");
+}
+
+/// Output npm cannot have meant as a tree is a parse error when npm succeeded, and npm's own
+/// failure (with its stderr) when it did not.
+#[test]
+fn unreadable_npm_output_names_the_right_cause() {
+    for (exit, expected) in [
+        ("exit 0", "cannot parse npm ls -g --json"),
+        ("exit 1", "`npm ls -g --json --depth=0` failed"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        tool(
+            &bin,
+            "npm",
+            &format!("echo 'not json'; echo 'npm broke' >&2; {exit}"),
+        );
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("config.toml"), "").unwrap();
+
+        let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+            .arg("--data-dir")
+            .arg(&data)
+            .arg("inventory")
+            .env("HOME", tmp.path())
+            .env("PATH", &bin)
+            .output()
+            .expect("the test binary was built by cargo");
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{exit}: {stderr}");
+        assert!(stderr.contains(expected), "{exit}: {stderr}");
+    }
 }

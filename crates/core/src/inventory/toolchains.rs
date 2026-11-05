@@ -7,6 +7,7 @@
 //! recorded in the spec.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::Deserialize;
 
@@ -169,7 +170,7 @@ fn npm_global(inventory: &mut Inventory) {
     let output = match command::run_any_status("npm", &args) {
         Ok(Some(output)) => output,
         Ok(None) => {
-            inventory.not_installed.push("npm");
+            inventory.missing("npm");
             return;
         }
         Err(e) => {
@@ -177,13 +178,23 @@ fn npm_global(inventory: &mut Inventory) {
             return;
         }
     };
-    if !output.success {
-        inventory.problems.push(InventoryError::Command {
-            command: "npm ls -g --json --depth=0".to_owned(),
+    match parse_npm_global(&output.stdout) {
+        Ok(found) => {
+            // A tree problem npm reports while still listing the tree is a lasting fact about
+            // this Mac, not a failed source: every package is in `found`.
+            if !output.success {
+                inventory.problems.push(InventoryError::NpmTree {
+                    detail: output.detail,
+                });
+            }
+            inventory.components.extend(found);
+        }
+        Err(e) if output.success => inventory.problems.push(e),
+        Err(_) => inventory.problems.push(InventoryError::Command {
+            command: output.command,
             detail: output.detail,
-        });
+        }),
     }
-    inventory.absorb(parse_npm_global(&output.stdout));
 }
 
 fn parse_npm_global(json: &str) -> Parsed {
@@ -202,7 +213,7 @@ fn parse_npm_global(json: &str) -> Parsed {
     let tree: Tree = serde_json::Deserializer::from_str(json)
         .into_iter()
         .next()
-        .unwrap_or_else(|| serde_json::from_str("{}"))
+        .ok_or_else(|| InventoryError::parse("npm ls -g --json", &"empty output"))?
         .map_err(|e| InventoryError::parse("npm ls -g --json", &e))?;
     Ok(tree
         .dependencies
@@ -218,16 +229,27 @@ fn parse_npm_global(json: &str) -> Parsed {
 /// opens an install dialog on every sweep, so it counts as not installed unless
 /// `xcode-select -p` finds the tools.
 fn python_is_real(inventory: &mut Inventory) -> bool {
-    let has_tools = || matches!(command::run("xcode-select", &["-p"]), Ok(Some(_)));
+    let mut problem = None;
+    let has_tools = || match command::run("xcode-select", &["-p"]) {
+        Ok(found) => found.is_some(),
+        Err(e) => {
+            // A failing `xcode-select -p` means no tools; one that cannot run is reported.
+            if matches!(e, InventoryError::Spawn { .. }) {
+                problem = Some(e);
+            }
+            false
+        }
+    };
     let real = python_is_real_at(command::which("python3").as_deref(), has_tools);
+    inventory.problems.extend(problem);
     if !real {
-        inventory.not_installed.push("python3");
+        inventory.missing("python3");
     }
     real
 }
 
-fn python_is_real_at(python3: Option<&std::path::Path>, has_tools: impl FnOnce() -> bool) -> bool {
-    python3 != Some(std::path::Path::new("/usr/bin/python3")) || has_tools()
+fn python_is_real_at(python3: Option<&Path>, has_tools: impl FnOnce() -> bool) -> bool {
+    python3 != Some(Path::new("/usr/bin/python3")) || has_tools()
 }
 
 /// `Python 3.13.1` -> `3.13.1`.
@@ -394,15 +416,18 @@ mod tests {
             names(&parse_npm_global(with_report).unwrap()),
             ["npm:npm 10.9.7"]
         );
-        assert!(parse_npm_global("").unwrap().is_empty());
+        assert!(
+            parse_npm_global("").is_err(),
+            "empty output is not \"no packages\""
+        );
     }
 
     #[test]
     fn system_python_stub_needs_the_command_line_tools() {
-        let stub = Some(std::path::Path::new("/usr/bin/python3"));
+        let stub = Some(Path::new("/usr/bin/python3"));
         assert!(!python_is_real_at(stub, || false));
         assert!(python_is_real_at(stub, || true));
-        let brew = Some(std::path::Path::new("/opt/homebrew/bin/python3"));
+        let brew = Some(Path::new("/opt/homebrew/bin/python3"));
         assert!(python_is_real_at(brew, || panic!(
             "only the stub needs checking"
         )));
