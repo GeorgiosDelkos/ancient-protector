@@ -1,0 +1,16 @@
+# clippy.toml: copy to the repo root next to Cargo.toml (REPO-1). The Stop hook reads the
+# repo's own copy; it never substitutes this one.
+
+# Tests unwrap instead of using `?` so a failure reports its exact location.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+
+# House limits (AGENTS.md): at most 5 parameters, 100 lines per function. too_many_lines is
+# a pedantic lint (on via the lints template); too_many_arguments is on by default.
+too-many-arguments-threshold = 5
+too-many-lines-threshold = 100
+
+# Product and protocol names that doc_markdown should not ask to backtick. ".." keeps
+# clippy's defaults (GitHub, WebAssembly, ...). Add the project's own names.
+doc-valid-idents = ["..", "OpenAI", "macOS"]

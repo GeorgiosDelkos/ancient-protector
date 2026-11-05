@@ -1,0 +1,143 @@
+//! Where Ancient Protector keeps its files.
+
+use std::fs;
+use std::io;
+use std::io::Write as _;
+use std::path::Path;
+use std::path::PathBuf;
+
+use crate::config::DEFAULT_CONFIG;
+
+/// The data directory: config, feed cache, state and sweep reports.
+///
+/// Everything is a plain file so the user and agents can read and edit it.
+#[derive(Debug)]
+pub struct DataDir {
+    root: PathBuf,
+}
+
+impl DataDir {
+    /// Uses `root` as the data directory.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Returns the standard macOS location for the user whose home is `home`:
+    /// `~/Library/Application Support/ancient-protector`.
+    pub fn for_home(home: &Path) -> Self {
+        Self::new(home.join("Library/Application Support/ancient-protector"))
+    }
+
+    /// Returns the path of `config.toml`.
+    pub fn config_file(&self) -> PathBuf {
+        self.root.join("config.toml")
+    }
+
+    /// Creates the data directory and writes the default `config.toml`.
+    ///
+    /// Returns the config path. Never overwrites an existing config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InitError::ConfigExists`] if `config.toml` is already there, and
+    /// [`InitError::Io`] if the directory or file cannot be created.
+    pub fn init(&self) -> Result<PathBuf, InitError> {
+        let path = self.config_file();
+        let io_err = |source| InitError::Io {
+            path: path.clone(),
+            source,
+        };
+
+        fs::create_dir_all(&self.root).map_err(io_err)?;
+        let mut file = match fs::File::create_new(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(InitError::ConfigExists { path });
+            }
+            Err(e) => return Err(io_err(e)),
+        };
+        if let Err(e) = file
+            .write_all(DEFAULT_CONFIG.as_bytes())
+            .and_then(|()| file.sync_all())
+        {
+            // Best effort: a partial file would make every later `init` report ConfigExists, and
+            // the write error returned below is the one the user needs to see.
+            drop(fs::remove_file(&path));
+            return Err(io_err(e));
+        }
+        Ok(path)
+    }
+}
+
+/// Error from [`DataDir::init`].
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {
+    /// A config file already exists and was left untouched.
+    #[error("config {} already exists", path.display())]
+    ConfigExists {
+        /// The existing config file.
+        path: PathBuf,
+    },
+    /// The data directory or config file could not be created.
+    #[error("cannot create {}", path.display())]
+    Io {
+        /// The path being created.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_writes_default_config_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::new(tmp.path().join("nested/data"));
+
+        let path = dir.init().unwrap();
+        assert_eq!(path, dir.config_file());
+        assert_eq!(fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+
+        fs::write(&path, "edited").unwrap();
+        let err = dir.init().unwrap_err();
+        assert!(matches!(err, InitError::ConfigExists { .. }), "{err:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "edited");
+    }
+
+    #[test]
+    fn init_reports_unwritable_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("file");
+        fs::write(&blocker, "").unwrap();
+
+        let err = DataDir::new(blocker.join("data")).init().unwrap_err();
+        assert!(matches!(err, InitError::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn init_reports_read_only_root_as_io() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = DataDir::new(&root).init().unwrap_err();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(err, InitError::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn for_home_uses_application_support() {
+        let dir = DataDir::for_home(Path::new("/Users/me"));
+        assert_eq!(
+            dir.config_file(),
+            Path::new("/Users/me/Library/Application Support/ancient-protector/config.toml")
+        );
+    }
+}

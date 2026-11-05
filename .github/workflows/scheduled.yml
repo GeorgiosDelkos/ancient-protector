@@ -1,0 +1,64 @@
+# From jonhoo/rust-ci-conf @ de512da1e85b. Keep it in
+# every repo.
+# Run scheduled (rolling) jobs on a nightly basis, as your crate may break independently of any
+# given PR. E.g., updates to rust nightly and updates to this crates dependencies. See check.yml for
+# information about how the concurrency cancellation and workflow triggering works
+permissions:
+  contents: read
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron:  '7 7 * * *'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+name: rolling
+jobs:
+  # https://twitter.com/mycoliza/status/1571295690063753218
+  nightly:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: macos-latest
+    env:
+      # Overrides the stable pin in rust-toolchain.toml.
+      RUSTUP_TOOLCHAIN: nightly
+    name: macos / nightly
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Install nightly
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master
+        with:
+          toolchain: nightly
+      - name: cargo test --locked
+        run: cargo test --locked --all-features --all-targets
+  # https://twitter.com/alcuadrado/status/1571291687837732873
+  update:
+    if: ${{ !github.event.pull_request.draft }}
+    # Checks that the next `cargo update` (what Dependabot will propose) still builds and passes
+    # the tests, within semver-compatible versions.
+    runs-on: macos-latest
+    env:
+      # Overrides the stable pin in rust-toolchain.toml.
+      RUSTUP_TOOLCHAIN: beta
+    name: macos / beta / updated
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Install beta
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master
+        with:
+          toolchain: beta
+      - name: cargo update
+        run: cargo update
+      - name: cargo test
+        run: cargo test --locked --all-features --all-targets
+        env:
+          # surface new deprecations in dependencies before they become removals
+          RUSTFLAGS: -D deprecated

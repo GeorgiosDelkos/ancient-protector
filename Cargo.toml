@@ -1,0 +1,93 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/cli"]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.metadata.house-check]
+baseline = true
+
+[workspace.lints.rust]
+# [ref] The rustc baseline: Tokio sets all five; Jon's crates and Cranelift set subsets
+# (missing_docs in nearly every library of all three).
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+# No crate in this workspace needs unsafe.
+unsafe_code = "forbid"
+# [ref] Tokio denies it at the crate root: an ignored future or guard is always a bug.
+unused_must_use = "deny"
+# [ref] Cranelift's allow-by-default additions.
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_extern_crates = "warn"
+unused_import_braces = "warn"
+# [ref] Edition 2024 default; pinned so 2021 crates get it too.
+static_mut_refs = "deny"
+# [ref] Declare every custom cfg, so a typo in a cfg name warns. Add the crate's own
+# (`<crate>_unstable`, CI-only cfgs) to this list.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(fuzzing)', 'cfg(coverage_nightly)'] }
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "warn"
+
+[workspace.lints.clippy]
+# [house] Stricter than every reference: pedantic catches real defects, and agents do not
+# tire of fixing nits.
+pedantic = { level = "warn", priority = -1 }
+
+# Panics (PAN-*). `expect("<invariant>")` where an invariant guarantees success; tests may
+# unwrap (clippy.toml).
+unwrap_used = "warn"
+
+# Lint suppressions (LNT-1): `#[expect(lint, reason = "...")]`, so a stale suppression fails.
+allow_attributes_without_reason = "deny"
+allow_attributes = "warn"
+
+# Hygiene
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+# Libraries never print. A CLI prints from `main` or its one output function, with
+# `println!`/`eprintln!` under a reasoned #[expect] on that function (LOG-3).
+print_stdout = "deny"
+print_stderr = "deny"
+
+# Structure and style
+use_self = "warn"
+mod_module_files = "warn"
+uninlined_format_args = "warn"
+# [house] Arc::clone(&x) makes reference-count clones visible (API-12).
+clone_on_ref_ptr = "warn"
+# [ref: APIG C-STRUCT-PRIVATE] A struct is all-public passive data or all-private.
+partial_pub_fields = "warn"
+# Ignoring a #[must_use] value needs `drop(..)` or a binding that says why.
+let_underscore_must_use = "warn"
+
+# Unsafe (UNS-*). Every block has a `// SAFETY:` comment; every unsafe fn a `# Safety`
+# section; one unsafe operation per block so each gets its own argument.
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "warn"
+
+# Concurrency and async
+await_holding_lock = "deny"
+large_futures = "deny"
+mem_forget = "deny"
+
+# Pedantic relaxations: noisy without catching bugs.
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+# Pushing a format! onto a String is clear; the lint's rewrite (write! plus an ignored
+# fmt::Result, or iterator gymnastics) is not.
+format_push_string = "allow"
+# Fires on every invariant `expect` (PAN-3), which cannot panic while the invariant holds, so
+# it buys `# Panics: never` boilerplate. Misuse panics get a `# Panics` section by PAN-2,
+# checked in review.
+missing_panics_doc = "allow"

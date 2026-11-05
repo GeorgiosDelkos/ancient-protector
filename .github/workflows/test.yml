@@ -1,0 +1,52 @@
+# Derived from jonhoo/rust-ci-conf @ de512da1e85b with house
+# additions (nextest from Tokio).
+# This is the main CI workflow that runs the test suite on all pushes to main and all pull
+# requests. Keep it in every repo. It runs the following jobs:
+# - required: runs the test suite on macOS (the only platform the app ships on) with stable and
+#   beta. rust-toolchain.toml pins stable, so RUSTUP_TOOLCHAIN selects the matrix toolchain.
+# Every house repo commits Cargo.lock, so every job runs with --locked and there is no
+# generate-lockfile fallback.
+# See check.yml for information about how the concurrency cancellation and workflow triggering works
+permissions:
+  contents: read
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+name: test
+jobs:
+  required:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: macos-latest
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    name: macos / ${{ matrix.toolchain }}
+    strategy:
+      matrix:
+        # run on stable and beta to ensure that tests won't break on the next version of the rust
+        # toolchain
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Install ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: cargo install cargo-nextest
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # tag=v2.87.30
+        with:
+          tool: cargo-nextest
+      # https://twitter.com/jonhoo/status/1571290371124260865
+      - name: cargo nextest run --locked
+        run: cargo nextest run --locked --all-features --all-targets
+      # nextest does not run doctests (https://github.com/nextest-rs/nextest/issues/16), and
+      # --all-targets skips them anyway (https://github.com/rust-lang/cargo/issues/6669)
+      - name: cargo test --doc
+        run: cargo test --locked --all-features --doc

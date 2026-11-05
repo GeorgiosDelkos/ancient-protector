@@ -1,0 +1,46 @@
+# Mutation testing of the code a PR changes: cargo-mutants
+# breaks each changed function in small ways (returns a default, flips a comparison) and fails
+# when the tests still pass, which means the tests do not check that code (TST-19). From the
+# cargo-mutants guide, https://mutants.rs/pr-diff.html (`--in-diff`), with house pinning.
+# Delete for a crate whose test suite takes more than a few minutes: every mutant reruns it.
+# Not required on day one: start it as advisory, make it required once it is green.
+permissions:
+  contents: read
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+name: mutants
+jobs:
+  mutants:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: macos-latest
+    name: cargo mutants (PR diff)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          # The whole history, so the diff against the base branch can be taken.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Diff against the base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git diff "origin/$BASE_REF.." | tee git.diff
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master
+        with:
+          toolchain: stable
+      - name: cargo install cargo-mutants
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # tag=v2.87.30
+        with:
+          tool: cargo-mutants
+      - name: cargo mutants
+        run: cargo mutants --no-shuffle -vV --in-diff git.diff --cargo-arg=--locked
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # tag=v7.0.2
+        with:
+          name: mutants.out
+          path: mutants.out
