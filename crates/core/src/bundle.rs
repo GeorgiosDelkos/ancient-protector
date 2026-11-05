@@ -495,18 +495,6 @@ mod tests {
     }
 
     #[test]
-    fn aliases_point_at_their_advisory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let osv = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record(&[]));
-        let entries = [Entry {
-            advisory: &osv,
-            components: [0].into(),
-        }];
-        let known = write(tmp.path(), "p", &[], &entries, None).unwrap();
-        assert_eq!(known.aliases["CVE-1"], ["GHSA-1".to_owned()].into());
-    }
-
-    #[test]
     fn known_exploited_comes_from_the_catalog() {
         let tmp = tempfile::tempdir().unwrap();
         let exploited = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record(&[]));

@@ -161,8 +161,9 @@ often is) is not found, and the error says to install it. An agent missing or lo
 with a fix hint, never a silent skip.
 
 Sweeps run restricted (decided 2026-11-05): the agent may read anything, write only
-`findings.json`, and run only listing commands (`brew info`, `brew list`, `npm ls`, `npm view`,
-`cargo tree`) where the CLI can allow commands one by one. Fixes (step 7) get full access, and
+`findings.json`, and run only listing commands (`brew info`, `brew list`, `npm ls`, `npm view`)
+where the CLI can allow commands one by one. `cargo tree` is not one: it can write `Cargo.lock`
+and runs the `rustc` a project's `.cargo/config.toml` names. Fixes (step 7) get full access, and
 only after the user confirms the plan. Flags, checked 2026-11-05 against each CLI's `--help` and
 docs; every agent runs with the bundle folder as its working directory:
 

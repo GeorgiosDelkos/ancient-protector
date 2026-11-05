@@ -203,7 +203,7 @@ fn resolve(
     let mut linked: Vec<String> = Vec::new();
     for (i, id) in listed.iter().enumerate() {
         if listed[..i].contains(id) {
-            problems.push(format!("{at}.advisories: {id} is listed twice"));
+            problems.push(format!("{at}.advisories: {id:?} is listed twice"));
             continue;
         }
         let named: Vec<&String> = known
@@ -264,19 +264,26 @@ fn check_text(at: &str, finding: &Finding, problems: &mut Vec<String>) {
             problems.push(format!("{at}.{field} has control or invisible characters"));
         }
     }
-    let lines = finding.fix.steps.iter().chain(&finding.fix.commands);
-    if lines.clone().any(|l| l.chars().any(is_forging)) {
+    if finding.fix.steps.iter().any(|l| l.chars().any(is_forging)) {
         problems.push(format!(
-            "{at}.fix: steps and commands are one line each, without control or invisible \
-             characters"
+            "{at}.fix.steps: each step is one line, without control or invisible characters"
+        ));
+    }
+    // Commands are what the user approves to run, so they are held to the strictest form: a
+    // look-alike or joiner character would make `lo\u{2060}dash` read as `lodash`.
+    let printable = |c: &String| c.bytes().all(|b| (b' '..=b'~').contains(&b));
+    if !finding.fix.commands.iter().all(printable) {
+        problems.push(format!(
+            "{at}.fix.commands: each command is one line of printable ASCII"
         ));
     }
 }
 
-/// Whether `c` can change how text displays without showing itself: a control character, or a
-/// zero-width or bidirectional formatting character (the "Trojan Source" set,
-/// <https://trojansource.codes/trojan-source.pdf>, plus zero-width spaces and the byte-order
-/// mark).
+/// Whether `c` can change how text displays without showing itself: a control character, a
+/// bidirectional formatting character (the "Trojan Source" set,
+/// <https://trojansource.codes/trojan-source.pdf>), or an invisible one: zero-width spaces and
+/// joiners, invisible operators, the soft hyphen, the combining grapheme joiner, the Hangul
+/// fillers, the byte-order mark, and the tag block, which can carry hidden text.
 pub(crate) fn is_forging(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -286,6 +293,14 @@ pub(crate) fn is_forging(c: char) -> bool {
                 | '\u{2066}'..='\u{2069}'
                 | '\u{061c}'
                 | '\u{feff}'
+                | '\u{00ad}'
+                | '\u{034f}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{115f}'
+                | '\u{1160}'
+                | '\u{3164}'
+                | '\u{ffa0}'
+                | '\u{e0000}'..='\u{e007f}'
         )
 }
 
@@ -402,7 +417,7 @@ mod tests {
                  advisories.jsonl)",
                 r#"findings[1].component: "c9" is not in inventory.jsonl"#,
                 r#"findings[1].advisories: "CVE-MADE-UP" is not in advisories.jsonl"#,
-                "findings[2].advisories: GHSA-1 is listed twice",
+                r#"findings[2].advisories: "GHSA-1" is listed twice"#,
                 "findings[3]: GHSA-1 on c1 is already a finding; merge them",
                 r#"findings[4].component: "c01" is not in inventory.jsonl"#,
                 "findings[5].advisories: CVE-2 was not fetched for c1 (see `components` in \
@@ -419,6 +434,7 @@ mod tests {
         bad["evidence"] = json!(" ");
         bad["explanation"] = json!("ok\u{1b}[2J");
         bad["fix"]["commands"] = json!(["npm i\nrm -rf ~"]);
+        bad["fix"]["steps"] = json!(["Upgrade lo\u{2060}dash"]);
         bad["fix"]["summary"] = json!("Upgrade \u{202e}tsal");
         let problems = check(&[bad], &kev).unwrap_err();
         assert_eq!(
@@ -428,12 +444,14 @@ mod tests {
                 "findings[0].evidence is empty",
                 "findings[0].explanation has control or invisible characters",
                 "findings[0].fix.summary has control or invisible characters",
-                "findings[0].fix: steps and commands are one line each, without control or \
-                 invisible characters",
+                "findings[0].fix.steps: each step is one line, without control or invisible \
+                 characters",
+                "findings[0].fix.commands: each command is one line of printable ASCII",
             ]
         );
         let mut fine = finding(&["GHSA-1"], "c1", "low", false);
         fine["explanation"] = json!("Two lines\nare fine in prose.");
+        fine["fix"]["steps"] = json!(["Mettre à jour lodash"]);
         assert!(check(&[fine], &kev).is_ok());
     }
 

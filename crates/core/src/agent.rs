@@ -34,29 +34,33 @@ use crate::inventory::command;
 pub(crate) const PROMPT_LINE: &str =
     "Read PROMPT.md in the current directory and follow its instructions exactly.";
 
-/// What a restricted Claude Code or Grok sweep may do beyond reading anywhere and writing
-/// `findings.json`: a few listing commands that only read. Each rule names its command, never
-/// a leading wildcard, since `Bash(* --version)` would also match `rm -rf ~ --version`.
-const READ_ONLY_COMMANDS: &[&str] = &[
-    "Bash(brew info *)",
-    "Bash(brew list *)",
-    "Bash(npm ls *)",
-    "Bash(npm view *)",
-    "Bash(cargo tree *)",
-];
+/// The shell commands a restricted sweep may run, where the CLI allows commands one by one
+/// (Claude Code and opencode): listing commands that only read. Each names its command, never a
+/// leading wildcard, since `* --version` would also match `rm -rf ~ --version`. `cargo tree` is
+/// left out: it can write `Cargo.lock`, and it runs the `rustc` (or wrapper) a project's
+/// `.cargo/config.toml` names, which in a cloned repository is that repository's code.
+const READ_ONLY_COMMANDS: &[&str] = &["brew info *", "brew list *", "npm ls *", "npm view *"];
 
 /// opencode's permissions for a sweep, passed in `OPENCODE_CONFIG_CONTENT`: everything denied
-/// except reading, searching, editing `findings.json` and the same listing commands. Format:
-/// <https://opencode.ai/docs/permissions/> (checked 2026-11-05); the last matching rule wins.
-const OPENCODE_SWEEP_CONFIG: &str = r#"{"permission": {
-  "*": "deny",
-  "read": "allow", "glob": "allow", "grep": "allow", "list": "allow",
-  "external_directory": "allow",
-  "edit": {"*": "deny", "findings.json": "allow"},
-  "bash": {"*": "deny", "brew info *": "allow", "brew list *": "allow", "npm ls *": "allow",
-           "npm view *": "allow", "cargo tree *": "allow"},
-  "webfetch": "deny", "websearch": "deny"
-}}"#;
+/// except reading, searching, editing `findings.json` and [`READ_ONLY_COMMANDS`]. Format:
+/// <https://opencode.ai/docs/permissions/> (checked 2026-11-05). The last matching rule wins, so
+/// each `"*": "deny"` comes first; the text is built in order rather than with a JSON map, which
+/// would sort the keys.
+fn opencode_sweep_config() -> String {
+    let commands: Vec<String> = READ_ONLY_COMMANDS
+        .iter()
+        .map(|c| format!(r#", "{c}": "allow""#))
+        .collect();
+    format!(
+        concat!(
+            r#"{{"permission": {{"*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "#,
+            r#""list": "allow", "external_directory": "allow", "#,
+            r#""edit": {{"*": "deny", "findings.json": "allow"}}, "bash": {{"*": "deny"{}}}, "#,
+            r#""webfetch": "deny", "websearch": "deny"}}}}"#,
+        ),
+        commands.concat()
+    )
+}
 
 /// Marks the lines of the login shell's answer, so nothing its startup files print is mistaken
 /// for the answer.
@@ -134,7 +138,7 @@ impl AgentKind {
                     "--allowedTools",
                 ]);
                 command.args(["Read(//**)", "Edit(./findings.json)"]);
-                command.args(READ_ONLY_COMMANDS);
+                command.args(READ_ONLY_COMMANDS.iter().map(|c| format!("Bash({c})")));
             }
             Self::Grok => {
                 // Grok's `dontAsk` mode allowed a shell command in a test on 2026-11-05, so
@@ -156,7 +160,7 @@ impl AgentKind {
                 command.args(["-p", prompt, "--approval-mode", "auto_edit", "--skip-trust"]);
             }
             Self::Opencode => {
-                command.env("OPENCODE_CONFIG_CONTENT", OPENCODE_SWEEP_CONFIG);
+                command.env("OPENCODE_CONFIG_CONTENT", opencode_sweep_config());
                 command.args(["run", "--dir"]).arg(bundle).arg(prompt);
             }
         }
@@ -315,7 +319,7 @@ mod tests {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect()
         };
-        let mut claude = vec![
+        let mut claude: Vec<String> = [
             "-p",
             "P",
             "--permission-mode",
@@ -323,8 +327,12 @@ mod tests {
             "--allowedTools",
             "Read(//**)",
             "Edit(./findings.json)",
-        ];
-        claude.extend(READ_ONLY_COMMANDS);
+        ]
+        .map(str::to_owned)
+        .into();
+        claude.extend(
+            ["brew info *", "brew list *", "npm ls *", "npm view *"].map(|c| format!("Bash({c})")),
+        );
         assert_eq!(args(AgentKind::Claude), claude);
         assert_eq!(
             args(AgentKind::Grok),
@@ -387,6 +395,17 @@ mod tests {
         assert_eq!(config["permission"]["*"], "deny");
         assert_eq!(config["permission"]["edit"]["findings.json"], "allow");
         assert_eq!(config["permission"]["bash"]["*"], "deny");
+        assert_eq!(config["permission"]["bash"]["npm ls *"], "allow");
+        let text = config.to_string();
+        assert!(
+            !text.contains("cargo"),
+            "cargo tree can run project code: {text}"
+        );
+        let raw = opencode_sweep_config();
+        assert!(
+            raw.find(r#""*": "deny""#) < raw.find("brew info"),
+            "deny first: {raw}"
+        );
     }
 
     #[test]

@@ -178,7 +178,7 @@ pub fn sweep_mac(
 
     let (valid, failure) = match judge(agent, &located, &dir, &known, progress) {
         Ok(valid) => (valid, None),
-        Err(failure) => (Vec::new(), Some(failure)),
+        Err(failure) => (Vec::new(), Some(plain(&failure))),
     };
     let mut findings: Vec<ReportFinding> = valid
         .into_iter()
@@ -197,7 +197,7 @@ pub fn sweep_mac(
         components: inventory.components.len(),
         advisories: entries.len(),
         findings,
-        problems,
+        problems: problems.iter().map(|p| plain(p)).collect(),
         failure,
         dir: dir.clone(),
     };
@@ -406,7 +406,11 @@ fn judge(
         prompt = format!(
             "{PROMPT_LINE} Your findings.json {previous}; fix these problems and write \
              findings.json again:\n- {}",
-            problems.join("\n- ")
+            problems
+                .iter()
+                .map(|p| plain(p))
+                .collect::<Vec<_>>()
+                .join("\n- ")
         );
         last = problems;
     }
@@ -414,6 +418,13 @@ fn judge(
         "{agent}'s findings were rejected twice: {}",
         last.join("; ")
     ))
+}
+
+/// `text` with every control or invisible character ([`is_forging`]) replaced by U+FFFD, for
+/// messages that quote the agent (a rejected id, a serde error naming its field) and reach the
+/// terminal, `report.json` or the agent's next prompt.
+fn plain(text: &str) -> String {
+    text.replace(is_forging, "\u{fffd}")
 }
 
 /// "this Mac (macOS 27.2)", or "this Mac" when the version is unknown.
@@ -466,9 +477,11 @@ fn write_report(dir: &Path, report: &Report) -> Result<(), SweepError> {
         path: dir.join("report.json"),
         source: io::Error::other(e),
     })?;
+    // Markdown first: if it fails, no `report.json` is left that lacks the failure the returned
+    // report carries.
     for (name, text) in [
-        ("report.json", json),
         ("report.md", report_markdown(report)),
+        ("report.json", json),
     ] {
         let path = dir.join(name);
         let partial = dir.join(format!(".{name}.partial"));
@@ -480,7 +493,7 @@ fn write_report(dir: &Path, report: &Report) -> Result<(), SweepError> {
             .and_then(|()| fs::rename(&partial, &path));
         if let Err(source) = written {
             // Best effort: the error below is what matters, and a leftover partial file is
-            // replaced by the next write.
+            // harmless, since readers open only `report.json` and `report.md`.
             drop(fs::remove_file(&partial));
             return Err(SweepError::Write { path, source });
         }
@@ -581,6 +594,8 @@ fn finding_markdown(finding: &Finding) -> String {
         escape(&finding.evidence),
         escape(&finding.fix.summary),
     );
+    // The steps are left out: the commands are what to run, and the steps belong to the fix
+    // plan (spec, "Fix flow").
     if !finding.fix.commands.is_empty() {
         // Longer than any backtick run in the commands, so none can close the block early.
         let longest = finding
@@ -621,7 +636,7 @@ fn escape(text: &str) -> String {
             }
             if matches!(
                 c,
-                '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '~' | '|' | '#'
+                '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '~' | '|' | '#' | '&'
             ) {
                 out.push('\\');
             }
@@ -665,7 +680,10 @@ impl Lock {
             path: path.clone(),
             source,
         };
-        fs::create_dir_all(sweeps).map_err(write_err)?;
+        fs::create_dir_all(sweeps).map_err(|source| SweepError::Write {
+            path: sweeps.to_owned(),
+            source,
+        })?;
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -966,6 +984,8 @@ mod tests {
         assert_eq!(escape("a\u{1b}[2Jb"), "a\u{fffd}\\[2Jb");
         assert_eq!(escape("  two\n words "), "two words");
         assert_eq!(escape("bidi \u{202e}x"), "bidi \u{fffd}x");
+        assert_eq!(escape("&#x202e;"), "\\&\\#x202e;", "no entity reference");
+        assert_eq!(plain("id \u{1b}[2J\n"), "id \u{fffd}[2J\u{fffd}");
 
         // The explanation follows a label, so it cannot start a list or a rule.
         let mut listy = report_finding("GHSA-1", "low", false, "npm:lodash");
@@ -1115,7 +1135,8 @@ mod markdown_properties {
 
     use super::*;
 
-    const SPECIAL: [char; 11] = ['\\', '`', '*', '_', '[', ']', '<', '>', '~', '|', '#'];
+    // Written out again, not shared with `escape`, so a character dropped from one is caught.
+    const SPECIAL: [char; 12] = ['\\', '`', '*', '_', '[', ']', '<', '>', '~', '|', '#', '&'];
 
     proptest! {
         /// Escaped text is one line with no invisible characters, and every Markdown character
@@ -1141,6 +1162,7 @@ mod markdown_properties {
             explanation in any::<String>(),
             evidence in any::<String>(),
             summary in any::<String>(),
+            commands in prop::collection::vec("[ -~]{0,20}", 0..3),
         ) {
             let finding: Finding = serde_json::from_value(json!({
                 "advisories": ["GHSA-1"],
@@ -1150,15 +1172,36 @@ mod markdown_properties {
                 "confidence": "likely",
                 "evidence": evidence,
                 "explanation": explanation,
-                "fix": {"summary": summary, "steps": [], "commands": []}
+                "fix": {"summary": summary, "steps": [], "commands": commands}
             }))
             .unwrap();
             let text = finding_markdown(&finding);
             let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
-            prop_assert_eq!(lines.len(), 4, "{:?}", text);
             prop_assert!(lines[0].starts_with("### low GHSA-1 (likely)"));
-            for (line, label) in lines[1..].iter().zip(["Why:", "Evidence:", "Fix:"]) {
+            for (line, label) in lines[1..4].iter().zip(["Why:", "Evidence:", "Fix:"]) {
                 prop_assert!(line.starts_with(label), "{:?}", line);
+            }
+
+            // The commands, if any, sit in one block that nothing inside can close: a closing
+            // fence is a line of at least as many backticks as the opening one.
+            let body: Vec<&str> = text
+                .lines()
+                .skip_while(|l| !l.starts_with("Fix:"))
+                .skip(2)
+                .collect();
+            if commands.is_empty() {
+                prop_assert_eq!(lines.len(), 4, "{:?}", text);
+            } else {
+                let fence = body[0].strip_suffix("sh").unwrap();
+                prop_assert!(fence.len() >= 3 && fence.bytes().all(|b| b == b'`'));
+                let listed: Vec<&str> = commands.iter().map(String::as_str).collect();
+                prop_assert_eq!(&body[1..=commands.len()], listed.as_slice());
+                prop_assert_eq!(body[commands.len() + 1], fence);
+                for command in &commands {
+                    let closes = command.trim().len() >= fence.len()
+                        && command.trim().bytes().all(|b| b == b'`');
+                    prop_assert!(!closes, "{:?} closes {:?}", command, fence);
+                }
             }
         }
     }

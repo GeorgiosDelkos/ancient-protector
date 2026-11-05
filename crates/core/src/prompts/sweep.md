@@ -20,9 +20,9 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 For each advisory, decide whether it affects an installed version of one of its components.
 Compare the installed version with the affected ranges, and read the full record when the
 ranges are missing, unclear, or describe a configuration. You may inspect this machine to
-decide (read files, run read-only commands such as `brew info`, `npm ls`, `cargo tree`), but do
-not change anything: no installs, upgrades, edits or deletions. Fixing comes later, and only
-after the user approves it.
+decide (read files, where allowed, run listing commands: `brew info`, `brew list`, `npm ls`,
+`npm view`), but do not change anything: no installs, upgrades, edits or deletions. Fixing
+comes later, and only after the user approves it.
 
 Write `findings.json` in this folder, following `findings.schema.json`:
 
