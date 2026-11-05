@@ -283,7 +283,9 @@ fn check_text(at: &str, finding: &Finding, problems: &mut Vec<String>) {
 /// bidirectional formatting character (the "Trojan Source" set,
 /// <https://trojansource.codes/trojan-source.pdf>), or an invisible one: zero-width spaces and
 /// joiners, invisible operators, the soft hyphen, the combining grapheme joiner, the Hangul
-/// fillers, the byte-order mark, and the tag block, which can carry hidden text.
+/// fillers, the byte-order mark, the line and paragraph separators, and the tag block and the
+/// variation selectors, which can carry hidden text. U+FE0F stays allowed: it follows emoji in
+/// ordinary prose.
 pub(crate) fn is_forging(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -301,6 +303,11 @@ pub(crate) fn is_forging(c: char) -> bool {
                 | '\u{3164}'
                 | '\u{ffa0}'
                 | '\u{e0000}'..='\u{e007f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{180e}'
+                | '\u{fe00}'..='\u{fe0e}'
+                | '\u{e0100}'..='\u{e01ef}'
         )
 }
 

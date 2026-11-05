@@ -36,7 +36,8 @@ Write `findings.json` in this folder, following `findings.schema.json`:
 - `confidence` is `confirmed` when the installed version is in the affected range or you
   verified the issue, `likely` when you believe it is affected but cannot be certain.
 - The `fix` names the safest change that removes the issue, with exact commands. They are
-  shown to the user, never run now.
+  shown to the user, never run now. Each command is one line of printable ASCII; describe a
+  path with other characters in `steps` instead.
 
 If nothing is affected, write `{"findings": []}`.
 

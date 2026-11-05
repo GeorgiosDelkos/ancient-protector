@@ -62,9 +62,9 @@
               "summary": { "type": "string", "minLength": 1 },
               "steps": { "type": "array", "items": { "type": "string" } },
               "commands": {
-                "description": "Exact shell commands, in order. They are shown to the user and never run during a sweep.",
+                "description": "Exact shell commands, in order, each one line of printable ASCII; describe a path with other characters in steps. They are shown to the user and never run during a sweep.",
                 "type": "array",
-                "items": { "type": "string" }
+                "items": { "type": "string", "pattern": "^[ -~]*$" }
               }
             }
           }

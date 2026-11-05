@@ -127,6 +127,10 @@ impl AgentKind {
     fn sweep_command(self, located: &Located, bundle: &Path, prompt: &str) -> Command {
         let mut command = Command::new(&located.binary);
         command.current_dir(bundle).env("PATH", &located.path);
+        // Homebrew refuses `brew info <path to a .rb file>` (checked 2026-11-06), so an allowed
+        // `brew info *` cannot load a formula from a cloned repository; developer mode is
+        // believed to lift that refusal, so it is never passed on.
+        command.env_remove("HOMEBREW_DEVELOPER");
         let bundle = bundle.as_os_str();
         match self {
             Self::Claude => {
@@ -377,6 +381,11 @@ mod tests {
                 .find(|(k, _)| *k == "PATH")
                 .and_then(|(_, v)| v);
             assert_eq!(path, Some(std::ffi::OsStr::new("/usr/bin:/bin")), "{kind}");
+            let developer = command.get_envs().find(|(k, _)| *k == "HOMEBREW_DEVELOPER");
+            assert_eq!(
+                developer,
+                Some((std::ffi::OsStr::new("HOMEBREW_DEVELOPER"), None))
+            );
             for arg in command.get_args() {
                 let arg = arg.to_string_lossy();
                 assert!(
@@ -385,6 +394,11 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn opencode_denies_by_default() {
+        let at = located(Path::new("/bin/x"));
         let opencode = AgentKind::Opencode.sweep_command(&at, Path::new("/b"), "P");
         let config = opencode
             .get_envs()
@@ -402,10 +416,14 @@ mod tests {
             "cargo tree can run project code: {text}"
         );
         let raw = opencode_sweep_config();
-        assert!(
-            raw.find(r#""*": "deny""#) < raw.find("brew info"),
-            "deny first: {raw}"
-        );
+        for (object, allowed) in [("\"bash\"", "brew info"), ("\"edit\"", "findings.json")] {
+            let inner = &raw[raw.find(object).unwrap()..];
+            let deny = inner.find(r#""*": "deny""#).unwrap();
+            assert!(
+                deny < inner.find(allowed).unwrap(),
+                "deny first in {object}: {raw}"
+            );
+        }
     }
 
     #[test]

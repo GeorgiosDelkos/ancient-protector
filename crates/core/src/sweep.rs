@@ -424,7 +424,13 @@ fn judge(
 /// messages that quote the agent (a rejected id, a serde error naming its field) and reach the
 /// terminal, `report.json` or the agent's next prompt.
 fn plain(text: &str) -> String {
-    text.replace(is_forging, "\u{fffd}")
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            c if is_forging(c) => '\u{fffd}',
+            c => c,
+        })
+        .collect()
 }
 
 /// "this Mac (macOS 27.2)", or "this Mac" when the version is unknown.
@@ -504,7 +510,8 @@ fn write_report(dir: &Path, report: &Report) -> Result<(), SweepError> {
 /// The report for a person: findings first, most severe first, then what was not checked.
 ///
 /// Agent text, component names and paths are escaped (see [`escape`]), so none of them can add
-/// headings, links or code blocks, or send terminal escape sequences.
+/// headings, link syntax or code blocks, or send terminal escape sequences. A bare URL stays
+/// visible text, though a renderer that autolinks may make it clickable.
 pub fn report_markdown(report: &Report) -> String {
     let mut out = format!(
         "# Sweep of {} ({})\n\nAgent: {}. {} components, {} advisories checked.\n\n",
@@ -609,7 +616,7 @@ fn finding_markdown(finding: &Finding) -> String {
         let fence = "`".repeat(longest.max(2) + 1);
         out.push_str(&format!("\n{fence}sh\n"));
         for command in &finding.fix.commands {
-            out.push_str(&command.replace(is_forging, "\u{fffd}"));
+            out.push_str(&plain(command));
             out.push('\n');
         }
         out.push_str(&format!("{fence}\n"));
@@ -985,7 +992,7 @@ mod tests {
         assert_eq!(escape("  two\n words "), "two words");
         assert_eq!(escape("bidi \u{202e}x"), "bidi \u{fffd}x");
         assert_eq!(escape("&#x202e;"), "\\&\\#x202e;", "no entity reference");
-        assert_eq!(plain("id \u{1b}[2J\n"), "id \u{fffd}[2J\u{fffd}");
+        assert_eq!(plain("id \u{1b}[2J\n"), "id \u{fffd}[2J ");
 
         // The explanation follows a label, so it cannot start a list or a rule.
         let mut listy = report_finding("GHSA-1", "low", false, "npm:lodash");
@@ -1118,12 +1125,19 @@ mod tests {
     fn unwritable_sweeps_folder_is_a_write_error() {
         let tmp = tempfile::tempdir().unwrap();
         fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o555)).unwrap();
-        let result = Lock::acquire(tmp.path());
+        let in_place = Lock::acquire(tmp.path());
+        let sweeps = tmp.path().join("sweeps");
+        let missing = Lock::acquire(&sweeps);
         fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755)).unwrap();
         let denied = io::ErrorKind::PermissionDenied;
+        let lock = tmp.path().join(".lock");
+        let Err(SweepError::Write { path, source }) = &in_place else {
+            panic!("{in_place:?}");
+        };
+        assert_eq!((path, source.kind()), (&lock, denied));
         assert!(
-            matches!(&result, Err(SweepError::Write { source, .. }) if source.kind() == denied),
-            "{result:?}"
+            matches!(&missing, Err(SweepError::Write { path, .. }) if *path == sweeps),
+            "the folder, not the lock: {missing:?}"
         );
     }
 }
