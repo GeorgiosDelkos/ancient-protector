@@ -1,0 +1,4 @@
+# Applications pin the latest stable so local builds, CI and the stop hook agree.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

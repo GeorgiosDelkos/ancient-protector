@@ -1,0 +1,186 @@
+# Ancient Protector: spec and implementation plan
+
+## Context
+
+New CVEs land daily across every stack. We want a small macOS menu-bar app that, on demand
+or on a schedule, pulls the newest advisories and has a coding agent (Claude Code, Grok,
+Codex, Gemini, opencode) decide whether this Mac, the user's declared GitHub repos, and the
+user's declared servers are affected, then fixes approved findings. The repo is an empty
+`cargo new` skeleton (`Cargo.toml`, `src/main.rs`, `.gitignore`), so everything is new.
+
+Done means: one click (or the schedule) runs a sweep over all declared targets, findings
+appear in the tray with severity and explanation, critical/high ones raise a notification,
+and the user can approve a fix the agent then performs.
+
+## Decisions taken with the user
+
+| Area | Decision |
+|---|---|
+| Outcome | Report, and fix on per-finding approval |
+| Who decides "affected" | The agent. The app only narrows input |
+| Sources | OSV.dev, NVD + CISA KEV, GitHub Advisory DB |
+| Feed flow | App fetches into a local cache; agent reads files |
+| History window | User-chosen (`since` date or `all`); then deltas |
+| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries |
+| Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
+| Agent permissions | Full access (agent CLI's bypass mode) |
+| Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
+| GitHub | Explicit repo list added on demand; deps, Dependabot/code/secret alerts, Actions workflows, account/org settings; auth via `gh` login |
+| Servers | Agent inspects over SSH; declared as `~/.ssh/config` alias or host/user/port/key fields |
+| Fix | Agent performs it per target; plan shown first, user confirms each fix |
+| Schedule | Manual plus optional interval |
+| Surfacing | Tray icon state, macOS notification on new critical/high, JSON + Markdown report per sweep |
+| Lifecycle | Dismiss with reason, diff vs last sweep, fix history |
+| Concurrency | One agent run per target, sequential |
+| UI | Tauri 2 + SolidJS/TS; popover + details/settings window; follows system light/dark |
+| Storage | Files in `~/Library/Application Support/ancient-protector/` |
+| CLI | Yes, thin CLI over the same core |
+| Distribution | Personal build first; signed + notarized DMG later; launch at login |
+| v1 | All three targets |
+
+## Architecture
+
+Cargo workspace (root `Cargo.toml` becomes the workspace manifest; `src/main.rs` is deleted):
+
+```
+crates/core/        ancient-protector-core   all logic, no UI
+crates/cli/         ancient-protector        bin: sweep, findings, dismiss, fix
+app/src-tauri/      tray app (Tauri 2), calls core
+app/ui/             SolidJS + TS frontend (ts-style)
+prompts/            default prompt templates, copied to the data dir on first run
+```
+
+Core modules (one concept each):
+
+- `config`: `config.toml` load/validate (`serde`, `deny_unknown_fields`).
+- `paths`: data dir layout.
+- `feeds::{osv, nvd, kev, ghsa}`: sync with cursor per source; `feeds::index` name index.
+- `inventory::{mac, github}`: collectors producing `Vec<Component>`.
+- `agent`: `AgentKind` enum, detection, command construction, run with output capture.
+- `sweep`: orchestrates targets sequentially, emits progress events.
+- `findings`: schema, validation, store, dismissals, diff.
+- `fix`: plan, confirm, execute, history.
+- `report`: JSON + Markdown writers.
+
+### Data layout
+
+```
+~/Library/Application Support/ancient-protector/
+  config.toml
+  prompts/{sweep,server-inventory,fix-plan,fix-exec}.md
+  feeds/<source>/cursor.json, records/*.json, index.json
+  state/dismissals.json, fixes.jsonl
+  sweeps/<utc-timestamp>/<target>/{bundle/, findings.json, agent.log}
+  sweeps/<utc-timestamp>/report.{json,md}, diff.json
+```
+
+### Key types (sketch, final shapes decided at the call site)
+
+```rust
+enum Target { Mac, GitHub { repo: RepoSlug }, Server { name: String, conn: SshConn } }
+enum SshConn { Alias(String), Fields { host: String, user: String, port: u16, identity: Option<PathBuf> } }
+enum AgentKind { Claude, Grok, Codex, Gemini, Opencode }
+struct Component { ecosystem: Ecosystem, name: String, version: String, origin: PathBuf }
+enum Severity { Critical, High, Medium, Low, Unknown }
+struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, component: Component,
+                 severity: Severity, kev: bool, evidence: String, explanation: String,
+                 fix: Option<FixPlan> }
+```
+
+`FindingKey` = hash of target + primary advisory id + component name, stable across sweeps
+(drives diff and dismissals). A dismissal resurfaces if the advisory's `modified` time changes.
+
+### Sweep flow (per target, sequential)
+
+1. Feeds: delta-sync all sources (skip a source that fails, record the error in the report).
+2. Inventory:
+   - Mac and GitHub: app collects.
+   - Server: agent run 1 (`server-inventory` prompt) SSHes in and writes `inventory.json`
+     against a schema. The app needs that inventory to pre-filter advisories.
+3. Bundle: app writes `bundle/` = `inventory.json`, filtered `advisories.jsonl`,
+   `findings.schema.json`, rendered prompt.
+4. Agent run: headless CLI in `bundle/` as cwd; agent writes `findings.json`.
+5. Validate with serde (strict). On failure, one retry with the error appended; then mark the
+   target failed.
+6. Merge, apply dismissals, diff against previous sweep, write report, update tray, notify on
+   new critical/high.
+
+### Fix flow
+
+Fix click -> agent run with `fix-plan` prompt -> plan (steps + exact commands) shown in the
+details window -> user confirms -> agent run with `fix-exec` prompt and the confirmed plan ->
+result appended to `state/fixes.jsonl` -> targeted re-check of that finding.
+
+### Agent adapters
+
+One `match` on `AgentKind` builds the `Command` (headless flag, full-access flag, prompt via
+stdin or arg). Exact flags for each CLI are verified against current docs at implementation
+time, not from memory. Detection: GUI apps launched at login get a minimal `PATH`, so resolve
+binaries once via the user's login shell (`$SHELL -lc 'command -v <bin>'`) and cache the paths
+in config. An agent missing or logged out is a target error with a fix hint, never a silent skip.
+
+### Feeds
+
+- OSV: per-ecosystem bulk zip from the public GCS bucket on first sync (limited to ecosystems
+  present in any inventory), then `modified_id.csv` deltas.
+- NVD: API 2.0 with `lastModStartDate`/`lastModEndDate` windows (120-day max per request);
+  optional API key from Keychain, otherwise the unauthenticated rate limit.
+- KEV: full JSON each sync (small).
+- GHSA: GitHub REST `/advisories` with `modified` filter, token from `gh auth token`.
+- `index.json`: `(ecosystem, name) -> [advisory ids]`, plus CPE product names for NVD.
+
+### UI (Tauri 2)
+
+- `LSUIElement` (no Dock icon), tray icon states: idle-clean, findings (by worst severity),
+  sweeping, error.
+- Popover panel under the icon, hidden on blur: per-target counts, Sweep now, newest findings.
+- Window: finding details (agent explanation, evidence, fix plan + confirm), targets
+  (Mac folders, repos, servers), agent picker, schedule, history window, report history.
+- Rust <-> UI: Tauri commands call core; sweep progress streams as Tauri events.
+- Plugins: notification, autostart, positioner (versions looked up at implementation time).
+- Scheduler: in-app interval timer; skip if a sweep is running; run once on wake if overdue.
+
+### CLI
+
+`ancient-protector sweep [--target <id>]`, `findings [--json]`, `dismiss <key> --reason <text>`,
+`fix plan <key>`, `fix apply <key>` (needs the confirmed plan id). Same core, same files.
+
+## Risks to keep visible
+
+- Prompt injection: advisory text and repo/server content are untrusted, and the agent has
+  full access. Prompts mark the bundle data as untrusted. Per-fix confirmation is the only
+  hard gate. Revisit the permission level if this proves a problem.
+- Sweep runs have no timeout and no transcript (user's choice). `agent.log` captures stdout and
+  stderr only.
+- Agent cost: sequential per-target runs; feed pre-filtering keeps context small.
+
+## Implementation order
+
+Each step is a feature branch + draft PR with a fresh-context review per the global rules.
+Load `rust-style` (plus the async/concurrency topic files), `ts-style`, and `gh-actions-style`
+before the first edit in each area; look up current crate versions (tauri, tokio, serde,
+toml, reqwest, clap, zip) before adding them.
+
+1. Workspace skeleton, lints, deny.toml, CI, `config` + `paths`.
+2. Feeds: KEV, OSV, GHSA, NVD sync + name index.
+3. Mac inventory collectors.
+4. Agent adapters + detection + sweep for the Mac target + findings schema/validation + report.
+5. GitHub target (deps, alerts, workflows, settings via `gh`).
+6. Server target (two-phase agent run).
+7. Lifecycle: dismissals, diff, fix plan/confirm/exec, fix history.
+8. CLI.
+9. Tauri app: tray, popover, window, notifications, autostart, scheduler.
+10. Later: signing + notarization in CI once an Apple Developer account is available.
+
+## Verification
+
+- Unit tests per module with fixture files (feed records, `brew info --json`, lockfiles, `gh`
+  API responses).
+- Property tests for config round-trip, feed parsing, and the name-index pre-filter.
+- Fake agent: a test script on `PATH` that writes canned `findings.json` (valid, invalid,
+  missing) to exercise the sweep, retry, and failure paths without a real agent.
+- `cargo-mutants` over core logic; kill or explain survivors.
+- End to end: `ancient-protector sweep` against this Mac with a real agent and a test repo;
+  then `cargo tauri dev`, run a sweep from the tray, confirm icon state, notification,
+  report files, and a fix plan + apply on a deliberately outdated Homebrew formula.
+- Zero warnings: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, oxlint/tsc.

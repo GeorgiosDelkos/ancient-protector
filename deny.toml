@@ -1,0 +1,50 @@
+# deny.toml: cargo-deny policy. Copy to the repo root; ci/deny.yml runs `cargo deny check`
+# (blocking, never continue-on-error). Vulnerable and unmaintained crates are denied by
+# cargo-deny's defaults; yanked and unsound are set explicitly below because their defaults
+# are weaker (warn, and direct dependencies only).
+
+[graph]
+all-features = true
+
+[advisories]
+# Every ignore needs an advisory id and a reason, e.g.
+# { id = "RUSTSEC-0000-0000", reason = "not reachable: we never call X" }
+ignore = []
+yanked = "deny"
+unsound = "all"
+
+[licenses]
+# Permissive licenses only. Adding one is a deliberate, reviewed decision.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# A shared allow-list is broader than any one repo needs; do not warn on unused entries.
+unused-allowed-license = "allow"
+
+# Unpublished crates (`publish = false`, typical for applications) need no license field.
+[licenses.private]
+ignore = true
+
+[bans]
+# Warn, not deny: Tokio-ecosystem applications carry duplicates they cannot remove.
+multiple-versions = "warn"
+# `*` version requirements are never allowed; workspace path dependencies are exempt
+# (Cranelift).
+wildcards = "deny"
+allow-wildcard-paths = true
+# No anyhow/eyre ban here: `bans.deny` matches the whole graph, transitive dependencies
+# included, while rust-style ERR-3 only keeps them out of library code. house-check enforces
+# that on each library's own manifest and sources.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
