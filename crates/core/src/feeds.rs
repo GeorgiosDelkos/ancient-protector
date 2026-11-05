@@ -285,12 +285,15 @@ fn cache_key(key: &str) -> Result<&str, FeedError> {
 
 /// The gap between NVD requests. NVD allows 5 requests per rolling 30 seconds without an API
 /// key and 50 with one ("Rate Limits" in <https://nvd.nist.gov/developers/start-here>, which has
-/// no versioned copy; checked 2026-11-05), so 30 s / 5 and 30 s / 50.
+/// no versioned copy; checked 2026-11-05). Spacing at exactly 30 s / 5 puts six requests in one
+/// inclusive 30 s window, and our clock and NVD's disagree slightly, so the gap is 10% longer.
+/// The margin is arbitrary.
 fn nvd_interval(access: &NvdAccess) -> Duration {
-    match access {
-        NvdAccess::Anonymous => Duration::from_secs(30) / 5,
-        NvdAccess::ApiKey(_) => Duration::from_secs(30) / 50,
-    }
+    let requests = match access {
+        NvdAccess::Anonymous => 5,
+        NvdAccess::ApiKey(_) => 50,
+    };
+    Duration::from_secs(30) / requests * 11 / 10
 }
 
 #[cfg(test)]
@@ -335,10 +338,13 @@ mod tests {
 
     #[test]
     fn nvd_pacing_follows_published_limits() {
-        assert_eq!(nvd_interval(&NvdAccess::Anonymous), Duration::from_secs(6));
+        assert_eq!(
+            nvd_interval(&NvdAccess::Anonymous),
+            Duration::from_millis(6600)
+        );
         assert_eq!(
             nvd_interval(&NvdAccess::ApiKey("k".into())),
-            Duration::from_millis(600)
+            Duration::from_millis(660)
         );
     }
 }

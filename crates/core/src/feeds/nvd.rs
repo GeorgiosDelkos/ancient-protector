@@ -48,9 +48,9 @@ const KEYCHAIN_NOT_FOUND: i32 = 44;
 
 /// How requests to NVD authenticate, which sets the rate limit they are paced to.
 pub enum NvdAccess {
-    /// No key: 5 requests per 30 seconds.
+    /// No key: 5 requests per 30 seconds, paced one every 6.6 s.
     Anonymous,
-    /// An NVD API key, sent in the `apiKey` header: 50 requests per 30 seconds.
+    /// An NVD API key, sent in the `apiKey` header: 50 requests per 30 seconds, one every 0.66 s.
     ApiKey(String),
 }
 
