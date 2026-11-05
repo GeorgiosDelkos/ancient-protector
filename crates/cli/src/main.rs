@@ -1,11 +1,16 @@
 //! Command-line interface to Ancient Protector.
 
+use std::path::Path;
 use std::path::PathBuf;
 
 use ancient_protector_core::Config;
 use ancient_protector_core::DataDir;
+use ancient_protector_core::Feeds;
 use ancient_protector_core::History;
 use ancient_protector_core::LoadConfigError;
+use ancient_protector_core::NvdAccess;
+use ancient_protector_core::Package;
+use ancient_protector_core::Product;
 use ancient_protector_core::Schedule;
 use ancient_protector_core::SshConn;
 use anyhow::Context as _;
@@ -30,6 +35,19 @@ enum Command {
     Init,
     /// Validate config.toml and print what a sweep would cover.
     Config,
+    /// Fetch advisories for packages and NVD products, one JSON object per line.
+    ///
+    /// Uses `history.since` from config.toml. An NVD API key stored in the Keychain with
+    /// `security add-generic-password -s ancient-protector -a nvd-api-key -w <key>` raises
+    /// NVD's rate limit from 5 to 50 requests per 30 seconds.
+    Advisories {
+        /// A package as ecosystem:name, such as npm:lodash or crates.io:serde. Repeatable.
+        #[arg(long = "package", value_name = "ECOSYSTEM:NAME")]
+        packages: Vec<Package>,
+        /// An NVD product (CPE product name, any vendor), such as openssl. Repeatable.
+        #[arg(long = "product", value_name = "NAME")]
+        products: Vec<Product>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -46,18 +64,40 @@ fn main() -> anyhow::Result<()> {
             let path = data_dir.init()?;
             print(&format!("wrote {}", path.display()));
         }
-        Command::Config => {
-            let path = data_dir.config_file();
-            let config = Config::load(&path, &home()?).map_err(|e| match e {
-                LoadConfigError::Missing { .. } => {
-                    anyhow::Error::new(e).context("run `ancient-protector init` first")
-                }
-                e => e.into(),
-            })?;
-            print(&summary(&config));
+        Command::Config => print(&summary(&load_config(&data_dir, &home()?)?)),
+        Command::Advisories { packages, products } => {
+            let config = load_config(&data_dir, &home()?)?;
+            // Reading the Keychain can prompt the user, so only when NVD will be queried.
+            let nvd = if products.is_empty() {
+                NvdAccess::Anonymous
+            } else {
+                NvdAccess::from_keychain()?
+            };
+            let feeds = Feeds::new(&data_dir, nvd);
+            let kev = feeds.kev()?;
+
+            let mut advisories = feeds.osv(&packages, config.history)?;
+            for product in &products {
+                let found = feeds
+                    .nvd(product, config.history)
+                    .with_context(|| format!("NVD product {product}"))?;
+                advisories.extend(found);
+            }
+            for advisory in &advisories {
+                print(&advisory.to_json_line(&kev));
+            }
         }
     }
     Ok(())
+}
+
+fn load_config(data_dir: &DataDir, home: &Path) -> anyhow::Result<Config> {
+    Config::load(&data_dir.config_file(), home).map_err(|e| match e {
+        LoadConfigError::Missing { .. } => {
+            anyhow::Error::new(e).context("run `ancient-protector init` first")
+        }
+        e => e.into(),
+    })
 }
 
 /// Renders the parts of `config` a sweep acts on, one line each.
@@ -72,7 +112,7 @@ fn summary(config: &Config) -> String {
     };
     let history = match config.history {
         History::All => "all".to_owned(),
-        History::Since(date) => format!("since {date}"),
+        History::Since(since) => format!("since {}", since.date()),
     };
 
     let mut out = format!("agent: {agent}\nschedule: {schedule}\nhistory: {history}\n");

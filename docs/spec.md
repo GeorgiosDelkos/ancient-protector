@@ -18,7 +18,7 @@ and the user can approve a fix the agent then performs.
 |---|---|
 | Outcome | Report, and fix on per-finding approval |
 | Who decides "affected" | The agent. The app only narrows input |
-| Sources | OSV.dev, NVD + CISA KEV, GitHub Advisory DB |
+| Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
 | Feed flow | App fetches into a local cache; agent reads files |
 | History window | User-chosen (`since` date or `all`); then deltas |
 | Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries |
@@ -68,7 +68,7 @@ Core modules (one concept each):
 ~/Library/Application Support/ancient-protector/
   config.toml
   prompts/{sweep,server-inventory,fix-plan,fix-exec}.md
-  feeds/<source>/cursor.json, records/*.json, index.json
+  feeds/osv/<id>.json, feeds/nvd/<product>.json
   state/dismissals.json, fixes.jsonl
   sweeps/<utc-timestamp>/<target>/{bundle/, findings.json, agent.log}
   sweeps/<utc-timestamp>/report.{json,md}, diff.json
@@ -121,13 +121,27 @@ in config. An agent missing or logged out is a target error with a fix hint, nev
 
 ### Feeds
 
-- OSV: per-ecosystem bulk zip from the public GCS bucket on first sync (limited to ecosystems
-  present in any inventory), then `modified_id.csv` deltas.
-- NVD: API 2.0 with `lastModStartDate`/`lastModEndDate` windows (120-day max per request);
-  optional API key from Keychain, otherwise the unauthenticated rate limit.
-- KEV: full JSON each sync (small).
-- GHSA: GitHub REST `/advisories` with `modified` filter, token from `gh auth token`.
-- `index.json`: `(ecosystem, name) -> [advisory ids]`, plus CPE product names for NVD.
+Decided 2026-11-05 after checking the live APIs: OSV already mirrors the GitHub Advisory
+Database (GHSA IDs), so there is no separate GHSA client; OSV bulk files are large (npm alone
+is 220 MB, mostly `MAL-` reports), so the app queries by name instead of mirroring; Homebrew is
+not an OSV ecosystem, so formulae go through NVD.
+
+- OSV: `POST /v1/querybatch` with the inventory's package names (no versions), which returns
+  every advisory id and `modified` time for those packages, `MAL-` malicious-package reports
+  included. Full records come from `GET /v1/vulns/{id}` and are cached by id; a record is
+  fetched again only when its `modified` time changes. OSV sees the package names, never the
+  versions.
+- NVD: CVE API 2.0 queried per product with `virtualMatchString=cpe:2.3:*:*:<product>`, all
+  history on the first fetch, then `lastModStartDate`/`lastModEndDate` windows (120-day
+  maximum; an older cache is fetched in full again). Requests are paced to the published
+  limit: 5 per 30 s without a key, 50 per 30 s with an API key read from the macOS Keychain
+  (service `ancient-protector`, account `nvd-api-key`).
+- KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
+  actively exploited.
+- `history.since` drops advisories published before that date; records without a published
+  date are kept.
+- Advisory ids and product names come from the network and become cache file names, so they
+  are checked against a safe character set first.
 
 ### UI (Tauri 2)
 
@@ -162,7 +176,7 @@ before the first edit in each area; look up current crate versions (tauri, tokio
 toml, reqwest, clap, zip) before adding them.
 
 1. Workspace skeleton, lints, deny.toml, CI, `config` + `paths`.
-2. Feeds: KEV, OSV, GHSA, NVD sync + name index.
+2. Feeds: OSV query + record cache, NVD per-product cache, KEV, and an `advisories` CLI command.
 3. Mac inventory collectors.
 4. Agent adapters + detection + sweep for the Mac target + findings schema/validation + report.
 5. GitHub target (deps, alerts, workflows, settings via `gh`).
