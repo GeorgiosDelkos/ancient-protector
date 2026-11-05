@@ -420,9 +420,10 @@ fn judge(
     ))
 }
 
-/// `text` with every control or invisible character ([`is_forging`]) replaced by U+FFFD, for
-/// messages that quote the agent (a rejected id, a serde error naming its field) and reach the
-/// terminal, `report.json` or the agent's next prompt.
+/// `text` as one line: line breaks and tabs become spaces, and every other control or
+/// invisible character ([`is_forging`]) becomes U+FFFD. For messages that quote the agent (a
+/// rejected id, a serde error naming its field) and reach the terminal, `report.json` or the
+/// agent's next prompt.
 fn plain(text: &str) -> String {
     text.chars()
         .map(|c| match c {

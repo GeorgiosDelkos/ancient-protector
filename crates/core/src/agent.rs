@@ -384,7 +384,8 @@ mod tests {
             let developer = command.get_envs().find(|(k, _)| *k == "HOMEBREW_DEVELOPER");
             assert_eq!(
                 developer,
-                Some((std::ffi::OsStr::new("HOMEBREW_DEVELOPER"), None))
+                Some((std::ffi::OsStr::new("HOMEBREW_DEVELOPER"), None)),
+                "{kind}"
             );
             for arg in command.get_args() {
                 let arg = arg.to_string_lossy();

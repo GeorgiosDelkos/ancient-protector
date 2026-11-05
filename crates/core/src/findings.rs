@@ -283,9 +283,9 @@ fn check_text(at: &str, finding: &Finding, problems: &mut Vec<String>) {
 /// bidirectional formatting character (the "Trojan Source" set,
 /// <https://trojansource.codes/trojan-source.pdf>), or an invisible one: zero-width spaces and
 /// joiners, invisible operators, the soft hyphen, the combining grapheme joiner, the Hangul
-/// fillers, the byte-order mark, the line and paragraph separators, and the tag block and the
-/// variation selectors, which can carry hidden text. U+FE0F stays allowed: it follows emoji in
-/// ordinary prose.
+/// fillers, the byte-order mark, the Mongolian vowel separator, the line and paragraph
+/// separators, and the tag block and the variation selectors, which can carry hidden text.
+/// U+FE0F stays allowed: it follows emoji in ordinary prose.
 pub(crate) fn is_forging(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -474,6 +474,27 @@ mod tests {
             assert!(problems[0].starts_with("findings.json: "), "{problems:?}");
         }
         assert!(check(&[finding(&["GHSA-1"], "c1", "severe", false)], &known(None)).is_err());
+    }
+
+    #[test]
+    fn separators_and_variation_selectors_are_forging() {
+        let edges = [
+            '\u{2028}',
+            '\u{2029}',
+            '\u{180e}',
+            '\u{fe00}',
+            '\u{fe0e}',
+            '\u{e0100}',
+            '\u{e01ef}',
+        ];
+        for c in edges {
+            assert!(is_forging(c), "{:04x}", u32::from(c));
+        }
+        assert!(
+            !is_forging('\u{fe0f}'),
+            "the emoji presentation selector stays allowed"
+        );
+        assert!(!is_forging('\u{e01f0}'), "past the last variation selector");
     }
 
     #[test]
