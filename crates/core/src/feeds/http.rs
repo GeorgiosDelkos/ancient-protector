@@ -157,6 +157,16 @@ mod tests {
         assert!(!err.to_string().contains("secret"));
     }
 
+    /// Responses of a few MB, like the KEV catalog and NVD pages, must fit under the limit.
+    #[test]
+    fn reads_multi_megabyte_bodies() {
+        let big = "x".repeat(2 * 1024 * 1024);
+        let expected = big.clone();
+        let server = TestServer::start(move |_| (200, big.clone()));
+        let body = Http::new().get(&server.url, &[], &[]).unwrap();
+        assert_eq!(body.len(), expected.len());
+    }
+
     #[test]
     fn decode_names_the_url() {
         let err = decode::<Vec<u8>>("https://x", "not json").unwrap_err();
