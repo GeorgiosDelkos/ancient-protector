@@ -45,7 +45,16 @@ fn init_then_config_prints_summary() {
         history.since = "2025-06-01"
         mac.project_dirs = ["~/src"]
         github.repos = ["octo/app"]
-        servers = [{ name = "prod", ssh = "prod" }, { name = "db", host = "10.0.0.5" }]
+        [[servers]]
+        name = "prod"
+        ssh = "prod"
+
+        [[servers]]
+        name = "db"
+        host = "10.0.0.5"
+        user = "deploy"
+        port = 2222
+        identity_file = "~/.ssh/id"
         "#,
     )
     .unwrap();
@@ -59,7 +68,7 @@ fn init_then_config_prints_summary() {
          mac project dir: /Users/me/src\n\
          github repo: octo/app\n\
          server: prod (ssh alias prod)\n\
-         server: db (host 10.0.0.5)\n"
+         server: db (host 10.0.0.5, user deploy, port 2222, key /Users/me/.ssh/id)\n"
     );
 }
 
@@ -87,4 +96,17 @@ fn invalid_config_lists_every_problem() {
     let stderr = text(&out.stderr);
     assert!(stderr.contains("github.repos[0]"), "{stderr}");
     assert!(stderr.contains("mac.project_dirs[0]"), "{stderr}");
+}
+
+#[test]
+fn init_with_data_dir_does_not_need_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("init")
+        .env_remove("HOME")
+        .output()
+        .expect("the test binary was built by cargo");
+    assert!(out.status.success(), "{}", text(&out.stderr));
 }

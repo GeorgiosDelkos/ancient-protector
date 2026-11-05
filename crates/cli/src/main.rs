@@ -34,10 +34,12 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let home = std::env::home_dir().context("cannot find the home directory; set HOME")?;
-    let data_dir = cli
-        .data_dir
-        .map_or_else(|| DataDir::for_home(&home), DataDir::new);
+    // Looked up only when needed, so `--data-dir X init` works without HOME.
+    let home = || std::env::home_dir().context("cannot find the home directory; set HOME");
+    let data_dir = match cli.data_dir {
+        Some(dir) => DataDir::new(dir),
+        None => DataDir::for_home(&home()?),
+    };
 
     match cli.command {
         Command::Init => {
@@ -46,7 +48,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Config => {
             let path = data_dir.config_file();
-            let config = Config::load(&path, &home).map_err(|e| match e {
+            let config = Config::load(&path, &home()?).map_err(|e| match e {
                 LoadConfigError::Missing { .. } => {
                     anyhow::Error::new(e).context("run `ancient-protector init` first")
                 }
@@ -83,7 +85,24 @@ fn summary(config: &Config) -> String {
     for server in &config.servers {
         let conn = match &server.conn {
             SshConn::Alias(alias) => format!("ssh alias {alias}"),
-            SshConn::Direct { host, .. } => format!("host {host}"),
+            SshConn::Direct {
+                host,
+                user,
+                port,
+                identity_file,
+            } => {
+                let mut conn = format!("host {host}");
+                if let Some(user) = user {
+                    conn.push_str(&format!(", user {user}"));
+                }
+                if let Some(port) = port {
+                    conn.push_str(&format!(", port {port}"));
+                }
+                if let Some(key) = identity_file {
+                    conn.push_str(&format!(", key {}", key.display()));
+                }
+                conn
+            }
         };
         out.push_str(&format!("server: {} ({conn})\n", server.name));
     }
