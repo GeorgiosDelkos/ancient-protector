@@ -27,7 +27,8 @@ pub struct Inventory {
     /// Installed components, in collection order. The same component appears once per place it
     /// was found.
     pub components: Vec<Component>,
-    /// Sources or files that could not be read, and names that cannot be looked up.
+    /// Sources or files that could not be read, names that cannot be looked up, and notes on
+    /// sources that were still read (see [`InventoryError::is_failure`]).
     pub problems: Vec<InventoryError>,
     /// Listing tools that are not on `PATH`, so their part was not checked.
     pub not_installed: Vec<&'static str>,

@@ -3,75 +3,99 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
+use std::process::Output;
 
-/// Writes an executable shell script `name` into `dir`.
-fn tool(dir: &Path, name: &str, script: &str) {
-    let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the temp dir is writable");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("the script exists");
+/// A temporary home with a `bin` folder of fake tools, the only thing on `PATH`.
+struct Sandbox {
+    root: tempfile::TempDir,
+}
+
+impl Sandbox {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("a temp dir can be created");
+        fs::create_dir_all(root.path().join("bin")).expect("the temp dir is writable");
+        Self { root }
+    }
+
+    fn path(&self) -> &Path {
+        self.root.path()
+    }
+
+    fn bin(&self) -> PathBuf {
+        self.path().join("bin")
+    }
+
+    /// Writes an executable shell script `name` into `bin`.
+    fn tool(&self, name: &str, script: &str) {
+        let path = self.bin().join(name);
+        fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the temp dir is writable");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("the script exists");
+    }
+
+    /// Runs `inventory` with `config` as config.toml.
+    fn inventory(&self, config: &str) -> Output {
+        let data = self.path().join("data");
+        fs::create_dir_all(&data).expect("the temp dir is writable");
+        fs::write(data.join("config.toml"), config).expect("the temp dir is writable");
+        Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+            .arg("--data-dir")
+            .arg(&data)
+            .arg("inventory")
+            .env("HOME", self.path())
+            .env("PATH", self.bin())
+            .output()
+            .expect("the test binary was built by cargo")
+    }
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 #[test]
 fn collects_every_source() {
-    let tmp = tempfile::tempdir().unwrap();
-    let bin = tmp.path().join("bin");
-    let project = tmp.path().join("src/app");
-    fs::create_dir_all(&bin).unwrap();
-    fs::create_dir_all(&project).unwrap();
-
-    tool(&bin, "sw_vers", "echo 27.2");
-    tool(
-        &bin,
+    let sandbox = Sandbox::new();
+    sandbox.tool("sw_vers", "echo 27.2");
+    sandbox.tool(
         "brew",
         r#"echo '{"formulae": [{"name": "openssl@3", "installed": [{"version": "3.4.0"}]}],
                  "casks": [{"token": "codex", "installed": "0.128.0"}]}'"#,
     );
-    tool(
-        &bin,
+    sandbox.tool(
         "rustup",
         r#"if [ "$1" = toolchain ]; then echo "stable-aarch64-apple-darwin (default)";
            else echo "rustc 1.99.1 (abc 2026-10-13)"; fi"#,
     );
-    tool(&bin, "cargo", r"printf 'ripgrep v14.1.0:\n    rg\n'");
-    tool(&bin, "node", "echo v22.1.0");
-    tool(
-        &bin,
+    sandbox.tool("cargo", r"printf 'ripgrep v14.1.0:\n    rg\n'");
+    sandbox.tool("node", "echo v22.1.0");
+    sandbox.tool(
         "npm",
         r#"echo '{"dependencies": {"npm": {"version": "10.9.7"}}}'"#,
     );
-    tool(&bin, "python3", "echo 'Python 3.13.1'");
-    tool(&bin, "uv", r"printf 'ruff v0.6.9\n- ruff\n'");
-    // `pipx` is deliberately missing: a tool that is not installed is skipped quietly.
+    sandbox.tool("python3", "echo 'Python 3.13.1'");
+    sandbox.tool("uv", r"printf 'ruff v0.6.9\n- ruff\n'");
+    // `pipx` is deliberately missing: a tool that is not installed is listed, not an error.
 
+    let project = sandbox.path().join("src/app");
+    fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("Cargo.lock"),
         "[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\n\
          source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
     )
     .unwrap();
-    let data = tmp.path().join("data");
-    fs::create_dir_all(&data).unwrap();
-    let src = tmp.path().join("src");
-    fs::write(
-        data.join("config.toml"),
-        format!("mac.project_dirs = [{:?}]\n", src.to_str().unwrap()),
-    )
-    .unwrap();
+    let src = sandbox.path().join("src");
+    let out = sandbox.inventory(&format!(
+        "mac.project_dirs = [{:?}]\n",
+        src.to_str().unwrap()
+    ));
 
-    let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
-        .arg("--data-dir")
-        .arg(&data)
-        .arg("inventory")
-        .env("HOME", tmp.path())
-        .env("PATH", &bin)
-        .output()
-        .expect("the test binary was built by cargo");
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = text(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert_eq!(stderr, "warning: not installed, so not checked: pipx\n");
-    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+    let lines: Vec<serde_json::Value> = text(&out.stdout)
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
@@ -119,25 +143,12 @@ fn collects_every_source() {
 
 #[test]
 fn failing_tool_is_reported_and_the_rest_still_count() {
-    let tmp = tempfile::tempdir().unwrap();
-    let bin = tmp.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    tool(&bin, "sw_vers", "echo 27.2");
-    tool(&bin, "brew", "echo 'brew is broken' >&2; exit 1");
-    let data = tmp.path().join("data");
-    fs::create_dir_all(&data).unwrap();
-    fs::write(data.join("config.toml"), "").unwrap();
+    let sandbox = Sandbox::new();
+    sandbox.tool("sw_vers", "echo 27.2");
+    sandbox.tool("brew", "echo 'brew is broken' >&2; exit 1");
+    let out = sandbox.inventory("");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
-        .arg("--data-dir")
-        .arg(&data)
-        .arg("inventory")
-        .env("HOME", tmp.path())
-        .env("PATH", &bin)
-        .output()
-        .expect("the test binary was built by cargo");
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = text(&out.stderr);
     assert!(
         !out.status.success(),
         "a failed source makes the list incomplete: {stderr}"
@@ -152,7 +163,7 @@ fn failing_tool_is_reported_and_the_rest_still_count() {
         "{stderr}"
     );
     assert!(stderr.contains("brew is broken"), "{stderr}");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = text(&out.stdout);
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(stdout.contains("apple:macos"), "{stdout}");
 }
@@ -161,36 +172,22 @@ fn failing_tool_is_reported_and_the_rest_still_count() {
 /// count, the problem is noted, and it does not fail the command.
 #[test]
 fn npm_tree_problem_keeps_its_packages() {
-    let tmp = tempfile::tempdir().unwrap();
-    let bin = tmp.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    tool(
-        &bin,
+    let sandbox = Sandbox::new();
+    sandbox.tool(
         "npm",
         r#"echo '{"dependencies": {"npm": {"version": "10.9.7"}}}'
            echo 'npm error code ELSPROBLEMS' >&2; exit 1"#,
     );
-    let data = tmp.path().join("data");
-    fs::create_dir_all(&data).unwrap();
-    fs::write(data.join("config.toml"), "").unwrap();
+    let out = sandbox.inventory("");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
-        .arg("--data-dir")
-        .arg(&data)
-        .arg("inventory")
-        .env("HOME", tmp.path())
-        .env("PATH", &bin)
-        .output()
-        .expect("the test binary was built by cargo");
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = text(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(
         stderr.contains("reports a problem in the global packages"),
         "{stderr}"
     );
     assert!(stderr.contains("ELSPROBLEMS"), "{stderr}");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = text(&out.stdout);
     assert!(stdout.contains(r#""name":"npm""#), "{stdout}");
 }
 
@@ -202,28 +199,14 @@ fn unreadable_npm_output_names_the_right_cause() {
         ("exit 0", "cannot parse npm ls -g --json"),
         ("exit 1", "`npm ls -g --json --depth=0` failed"),
     ] {
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        tool(
-            &bin,
+        let sandbox = Sandbox::new();
+        sandbox.tool(
             "npm",
             &format!("echo 'not json'; echo 'npm broke' >&2; {exit}"),
         );
-        let data = tmp.path().join("data");
-        fs::create_dir_all(&data).unwrap();
-        fs::write(data.join("config.toml"), "").unwrap();
+        let out = sandbox.inventory("");
 
-        let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
-            .arg("--data-dir")
-            .arg(&data)
-            .arg("inventory")
-            .env("HOME", tmp.path())
-            .env("PATH", &bin)
-            .output()
-            .expect("the test binary was built by cargo");
-
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = text(&out.stderr);
         assert!(!out.status.success(), "{exit}: {stderr}");
         assert!(stderr.contains(expected), "{exit}: {stderr}");
     }

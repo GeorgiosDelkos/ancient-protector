@@ -116,17 +116,20 @@ fn wait(
     command: &str,
     timeout: Duration,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), InventoryError> {
-    // Each reader sends its bytes once the pipe closes. The channel holds that one message, so
-    // the send never blocks, and a reader nobody waits for any more simply ends.
-    fn reader(pipe: Option<impl io::Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    // Each reader sends its result once the pipe closes. The channel holds that one message, so
+    // the send never blocks. A reader whose pipe is still held by a helper that left the process
+    // group stays blocked until that helper exits: one thread and descriptor, accepted, since
+    // it takes a tool that escapes its own group.
+    fn reader(pipe: Option<impl io::Read + Send + 'static>) -> mpsc::Receiver<io::Result<Vec<u8>>> {
         let (tx, rx) = mpsc::sync_channel(1);
         thread::spawn(move || {
             let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
-                // A read error keeps what was read; the exit status still reports a failure.
-                drop(pipe.read_to_end(&mut bytes));
-            }
-            drop(tx.send(bytes));
+            let read = match pipe {
+                Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+                None => Ok(bytes),
+            };
+            // The receiver is gone only when the command was already abandoned.
+            drop(tx.send(read));
         });
         rx
     }
@@ -154,17 +157,30 @@ fn wait(
         let detail = "exited, but something it started kept its output open; stopped";
         return Err(stop(&mut child, command, detail.to_owned()));
     };
-    Ok((status, stdout, stderr))
+    // A failed read means the output may be cut short, which would parse as a shorter list.
+    let read_err = |source| InventoryError::Spawn {
+        command: command.to_owned(),
+        source,
+    };
+    Ok((status, stdout.map_err(read_err)?, stderr.map_err(read_err)?))
 }
 
 /// Stops `child` and everything in its process group, and returns the error to report.
 ///
 /// The group is killed with `kill`, because sending a signal to a group needs `libc` and an
 /// `unsafe` call, and this crate has neither. Every step is best effort: the command is
-/// abandoned either way, and a failed kill means the process already exited.
+/// abandoned either way, and a failed kill means the process already exited. If the leader has
+/// exited and the group emptied, its id could in principle be reused by a new group before the
+/// kill; the window is the few milliseconds since the deadline, and accepted.
 fn stop(child: &mut Child, command: &str, detail: String) -> InventoryError {
     let group = format!("-{}", child.id());
-    drop(Command::new("/bin/kill").args(["-KILL", &group]).status());
+    let kill = Command::new("/bin/kill")
+        .args(["-KILL", &group])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    drop(kill);
     drop(child.kill());
     drop(child.wait());
     InventoryError::Command {
@@ -254,10 +270,23 @@ mod tests {
     /// The tool exits at once, but a helper it started keeps stdout open for 30 s.
     #[test]
     fn helper_holding_output_open_is_stopped() {
-        let script = "sleep 30 &
- echo done";
-        let err = run_within("sh", &["-c", script], Duration::from_millis(500)).unwrap_err();
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("pid");
+        let script = format!("sleep 30 & echo $! > '{}'; echo done", pidfile.display());
+        let err = run_within("sh", &["-c", &script], Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("kept its output open"), "{err}");
+
+        // The helper was in the tool's process group, so it is gone (or a zombie) now.
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let ps = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid.trim()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&ps.stdout);
+        assert!(
+            stat.trim().is_empty() || stat.starts_with('Z'),
+            "helper survived: {stat}"
+        );
     }
 
     #[test]

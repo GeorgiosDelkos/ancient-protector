@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -38,7 +39,7 @@ pub(super) fn collect(root: &Path, inventory: &mut Inventory) {
         for (path, kind) in list(&dir, &mut inventory.problems) {
             match kind {
                 Entry::Dir => pending.push(path),
-                Entry::File(name) => read(&path, &name, inventory),
+                Entry::File => read(&path, inventory),
             }
         }
     }
@@ -48,8 +49,8 @@ pub(super) fn collect(root: &Path, inventory: &mut Inventory) {
 enum Entry {
     /// A folder to enter.
     Dir,
-    /// A regular file, with its name.
-    File(String),
+    /// A regular file.
+    File,
 }
 
 /// Returns `dir`'s entries the walk cares about, sorted by name: folders it enters and regular
@@ -80,20 +81,24 @@ fn list(dir: &Path, problems: &mut Vec<InventoryError>) -> Vec<(PathBuf, Entry)>
                 continue;
             }
         };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if file_type.is_dir() && !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_str()) {
-            listed.push((entry.path(), Entry::Dir));
-        } else if file_type.is_file() {
-            listed.push((entry.path(), Entry::File(name)));
+        if file_type.is_file() {
+            listed.push((entry.path(), Entry::File));
+        } else if file_type.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_ref()) {
+                listed.push((entry.path(), Entry::Dir));
+            }
         }
     }
     listed.sort_by(|a, b| a.0.cmp(&b.0));
     listed
 }
 
-/// Adds the packages of `path` if `name` is a lockfile this module reads.
-fn read(path: &Path, name: &str, inventory: &mut Inventory) {
-    let found = match name {
+/// Adds the packages of `path` if it is a lockfile this module reads.
+fn read(path: &Path, inventory: &mut Inventory) {
+    let name = path.file_name().and_then(OsStr::to_str);
+    let found = match name.unwrap_or_default() {
         "Cargo.lock" => read_lockfile(path)
             .and_then(|text| parse_cargo_lock(path, &text, &mut inventory.problems)),
         // npm-shrinkwrap.json is a package-lock.json that a package publishes with itself.

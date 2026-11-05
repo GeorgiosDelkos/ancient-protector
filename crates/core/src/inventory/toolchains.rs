@@ -230,13 +230,12 @@ fn parse_npm_global(json: &str) -> Parsed {
 /// `xcode-select -p` finds the tools.
 fn python_is_real(inventory: &mut Inventory) -> bool {
     let mut problem = None;
-    let has_tools = || match command::run("xcode-select", &["-p"]) {
-        Ok(found) => found.is_some(),
+    // A non-zero exit from `xcode-select -p` means no tools; any other failure (it cannot run,
+    // hangs, prints something unreadable) is reported, and python3 is then not run.
+    let has_tools = || match command::run_any_status("xcode-select", &["-p"]) {
+        Ok(found) => found.is_some_and(|output| output.success),
         Err(e) => {
-            // A failing `xcode-select -p` means no tools; one that cannot run is reported.
-            if matches!(e, InventoryError::Spawn { .. }) {
-                problem = Some(e);
-            }
+            problem = Some(e);
             false
         }
     };
