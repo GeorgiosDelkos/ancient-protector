@@ -420,7 +420,7 @@ fn judge(
     ))
 }
 
-/// `text` as one line: line breaks and tabs become spaces, and every other control or
+/// `text` as one line: `\n`, `\r` and `\t` become spaces, and every other control or
 /// invisible character ([`is_forging`]) becomes U+FFFD. For messages that quote the agent (a
 /// rejected id, a serde error naming its field) and reach the terminal, `report.json` or the
 /// agent's next prompt.
@@ -994,6 +994,7 @@ mod tests {
         assert_eq!(escape("bidi \u{202e}x"), "bidi \u{fffd}x");
         assert_eq!(escape("&#x202e;"), "\\&\\#x202e;", "no entity reference");
         assert_eq!(plain("id \u{1b}[2J\n"), "id \u{fffd}[2J ");
+        assert_eq!(plain("a\tb\r\nc\u{2028}d"), "a b  c\u{fffd}d");
 
         // The explanation follows a label, so it cannot start a list or a rule.
         let mut listy = report_finding("GHSA-1", "low", false, "npm:lodash");
