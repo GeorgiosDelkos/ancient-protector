@@ -16,7 +16,7 @@ mod kev;
 mod nvd;
 mod osv;
 #[cfg(test)]
-mod test_server;
+pub(crate) mod test_server;
 
 use std::cell::Cell;
 use std::io;
@@ -41,10 +41,10 @@ pub use crate::feeds::nvd::Product;
 
 /// Where each source is served. Tests point these at a local server.
 #[derive(Debug)]
-struct Endpoints {
-    osv: String,
-    nvd: String,
-    kev: String,
+pub(crate) struct Endpoints {
+    pub(crate) osv: String,
+    pub(crate) nvd: String,
+    pub(crate) kev: String,
 }
 
 impl Endpoints {
@@ -83,7 +83,14 @@ impl Feeds {
         Self::with_endpoints(data_dir.feeds_dir(), nvd, Endpoints::public())
     }
 
-    fn with_endpoints(dir: PathBuf, nvd: NvdAccess, endpoints: Endpoints) -> Self {
+    /// Turns NVD pacing off, so tests against a local server do not sleep.
+    #[cfg(test)]
+    pub(crate) fn without_pacing(mut self) -> Self {
+        self.nvd_interval = Duration::ZERO;
+        self
+    }
+
+    pub(crate) fn with_endpoints(dir: PathBuf, nvd: NvdAccess, endpoints: Endpoints) -> Self {
         Self {
             http: Http::new(),
             endpoints,
@@ -122,6 +129,19 @@ impl Feeds {
     /// rate limit is exceeded; an API key raises the limit.
     pub fn nvd(&self, product: &Product, history: History) -> Result<Vec<Advisory>, FeedError> {
         nvd::fetch(self, product, history)
+    }
+
+    /// Returns whether NVD's CPE dictionary lists `product`, so a product with no CVEs can be
+    /// told apart from a name NVD does not know.
+    ///
+    /// Asks NVD at most once per product, then every 30 days while the answer is "unknown".
+    /// Paced like every NVD request.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a network, decoding or cache error.
+    pub fn nvd_product_known(&self, product: &Product) -> Result<bool, FeedError> {
+        nvd::product_known(self, product)
     }
 
     /// Downloads the current CISA Known Exploited Vulnerabilities catalog.

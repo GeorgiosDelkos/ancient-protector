@@ -290,8 +290,9 @@ mod tests {
             .unwrap();
         let stat = String::from_utf8_lossy(&ps.stdout);
         assert!(
-            // Gone, a zombie (Z), or still being torn down after SIGKILL (E).
-            stat.trim().is_empty() || stat.starts_with(['Z', 'E']),
+            // Gone, a zombie (Z), or still being torn down after SIGKILL (E); ps may put a
+            // flag such as ? before the state letter.
+            stat.trim().is_empty() || stat.contains(['Z', 'E']),
             "helper survived: {stat}"
         );
     }

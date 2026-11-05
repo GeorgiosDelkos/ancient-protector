@@ -150,11 +150,54 @@ result appended to `state/fixes.jsonl` -> targeted re-check of that finding.
 
 ### Agent adapters
 
-One `match` on `AgentKind` builds the `Command` (headless flag, full-access flag, prompt via
-stdin or arg). Exact flags for each CLI are verified against current docs at implementation
+One `match` on `AgentKind` builds the `Command` (headless flag, full-access flag, prompt as an
+argument). Exact flags for each CLI are verified against current docs at implementation
 time, not from memory. Detection: GUI apps launched at login get a minimal `PATH`, so resolve
-binaries once via the user's login shell (`$SHELL -lc 'command -v <bin>'`) and cache the paths
-in config. An agent missing or logged out is a target error with a fix hint, never a silent skip.
+binaries via the user's login shell (`$SHELL -lc 'command -v <bin>'`) at the start of each
+sweep. An agent missing or logged out is a target error with a fix hint, never a silent skip.
+
+Flags, checked 2026-11-05 against each CLI's `--help` (Codex against its source at
+`openai/codex@49f0c60`, since it is not installed here). Every agent runs with the bundle folder
+as its working directory:
+
+| Agent | Headless call | Full access |
+|---|---|---|
+| `claude` | `claude -p <prompt>` | `--dangerously-skip-permissions` |
+| `grok` | `grok -p <prompt> --cwd <bundle>` | `--always-approve` |
+| `codex` | `codex exec -C <bundle> --skip-git-repo-check <prompt>` | `--dangerously-bypass-approvals-and-sandbox` |
+| `gemini` | `gemini -p <prompt>` | `--yolo` |
+| `opencode` | `opencode run --dir <bundle> <prompt>` | `--dangerously-skip-permissions` |
+
+The prompt argument is one line pointing at `PROMPT.md` in the bundle, so the real prompt is a
+file the user can read and edit (`prompts/sweep.md` in the data dir, copied from the built-in
+default on first use). The agent's stdout and stderr go to `agent.log` beside the bundle.
+
+### Bundle and findings (decided 2026-11-05)
+
+Each target's bundle folder holds:
+
+- `PROMPT.md`: the rendered sweep prompt.
+- `inventory.jsonl`: one component per line with a short id (`c1`, `c2`, ...).
+- `advisories.jsonl`: one compact line per advisory: id, source, aliases, summary, source
+  severity (CVSS score and vector, or GHSA severity), affected ranges, `known_exploited`, the
+  ids of the components it was fetched for, and `record`, the path of its full record.
+- `records/<id>.json`: each advisory's full record as the source served it, opened on demand.
+- `findings.schema.json`: the JSON Schema of `findings.json`.
+
+The agent writes `findings.json`: only advisories it judges to affect an installed version.
+Each finding names its advisory ids (which must be in `advisories.jsonl`), its component id
+(which must be in `inventory.jsonl`), a severity (`critical`, `high`, `medium`, `low`), whether
+it is known exploited, a confidence (`confirmed` or `likely`), the evidence, a plain-language
+explanation, and a suggested fix (summary, steps and commands, never run during a sweep). The
+agent sets severity from the source score and this machine's context and says why when it
+differs; a known-exploited finding is raised to at least `high` by the app.
+
+The app validates strictly (unknown fields, unknown ids and bad enums are errors) and retries
+once with the errors appended to the prompt; a second failure marks the target failed. One
+sweep runs at a time, held by a lock file in the data dir.
+
+Homebrew products for which NVD returns no CVEs are checked once against NVD's CPE dictionary;
+a product NVD does not know is reported in the sweep report, so a wrong guessed name is visible.
 
 ### Feeds
 
@@ -217,7 +260,8 @@ toml, reqwest, clap, zip) before adding them.
 1. Workspace skeleton, lints, deny.toml, CI, `config` + `paths`.
 2. Feeds: OSV query + record cache, NVD per-product cache, KEV, and an `advisories` CLI command.
 3. Mac inventory collectors and an `inventory` CLI command.
-4. Agent adapters + detection + sweep for the Mac target + findings schema/validation + report.
+4. Agent adapters + detection + sweep for the Mac target + findings schema/validation + report,
+   and the `sweep` CLI command.
 5. GitHub target (deps, alerts, workflows, settings via `gh`).
 6. Server target (two-phase agent run).
 7. Lifecycle: dismissals, diff, fix plan/confirm/exec, fix history.
