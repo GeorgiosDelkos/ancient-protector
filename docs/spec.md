@@ -90,6 +90,27 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
 `FindingKey` = hash of target + primary advisory id + component name, stable across sweeps
 (drives diff and dismissals). A dismissal resurfaces if the advisory's `modified` time changes.
 
+### Mac inventory
+
+Decided 2026-11-05. Each source is collected on its own; a failing one is reported and the
+rest still count. A tool that is not installed is skipped, not an error.
+
+| Source | Command or file | Looked up as |
+|---|---|---|
+| macOS | `sw_vers -productVersion` | NVD product `apple:macos` |
+| Homebrew formulae and casks, dependencies included | `brew info --json=v2 --installed` | NVD product: name without `@version`, through a small alias table checked against NVD (`node` -> `node.js`, `gh` -> `github:cli`); a name that is not a valid product is reported |
+| Rust toolchains | `rustup toolchain list`, `rustup run <toolchain> rustc --version` | NVD product `rust` |
+| Cargo-installed binaries | `cargo install --list` | OSV `crates.io` |
+| Node.js | `node --version` | NVD product `node.js` |
+| Global npm packages | `npm ls -g --json --depth=0` | OSV `npm` |
+| Python | `python3 --version` | NVD product `python` |
+| uv and pipx tools | `uv tool list`, `pipx list --json` | OSV `PyPI` |
+| Project lockfiles under `mac.project_dirs` | `Cargo.lock`, `package-lock.json` (v2/v3), `uv.lock`, `poetry.lock` | OSV by ecosystem |
+
+The folder walk skips `node_modules`, `target`, `.git`, `vendor`, `.venv`, `dist`, `build` and
+every hidden folder, follows no symlinks, and only reads lockfiles: it never runs project code.
+Workspace members and local path packages (no registry source) are left out of lockfile results.
+
 ### Sweep flow (per target, sequential)
 
 1. Feeds: delta-sync all sources (skip a source that fails, record the error in the report).
@@ -178,7 +199,7 @@ toml, reqwest, clap, zip) before adding them.
 
 1. Workspace skeleton, lints, deny.toml, CI, `config` + `paths`.
 2. Feeds: OSV query + record cache, NVD per-product cache, KEV, and an `advisories` CLI command.
-3. Mac inventory collectors.
+3. Mac inventory collectors and an `inventory` CLI command.
 4. Agent adapters + detection + sweep for the Mac target + findings schema/validation + report.
 5. GitHub target (deps, alerts, workflows, settings via `gh`).
 6. Server target (two-phase agent run).

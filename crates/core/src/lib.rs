@@ -1,15 +1,17 @@
 //! Sweeps a Mac, GitHub repos and servers for known vulnerabilities with a coding agent.
 //!
-//! The app fetches advisories ([`Feeds`]: OSV.dev, which includes the GitHub Advisory
-//! Database, plus NVD and CISA KEV), collects what is installed, and hands both to the user's
-//! chosen coding agent, which decides what is affected and, on approval, fixes it. This crate
-//! holds all of that logic; the tray app and the CLI are thin front ends over it.
+//! The app collects what is installed ([`Inventory`]), fetches advisories ([`Feeds`]:
+//! OSV.dev, which includes the GitHub Advisory Database, plus NVD and CISA KEV), and hands
+//! both to the user's chosen coding agent, which decides what is affected and, on approval,
+//! fixes it. This crate holds all of that logic; the tray app and the CLI are thin front ends
+//! over it.
 //!
 //! State lives in plain files under a [`DataDir`], configured by [`Config`].
 
 mod agent;
 mod config;
 mod feeds;
+mod inventory;
 mod package;
 mod paths;
 
@@ -35,6 +37,11 @@ pub use crate::feeds::OsvAdvisories;
 pub use crate::feeds::ParseProductError;
 pub use crate::feeds::Product;
 pub use crate::feeds::Source;
+pub use crate::inventory::Component;
+pub use crate::inventory::FoundIn;
+pub use crate::inventory::Inventory;
+pub use crate::inventory::InventoryError;
+pub use crate::inventory::Lookup;
 pub use crate::package::Ecosystem;
 pub use crate::package::Package;
 pub use crate::package::ParsePackageError;

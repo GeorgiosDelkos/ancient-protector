@@ -15,6 +15,7 @@ dependencies = [
  "ancient-protector-core",
  "anyhow",
  "clap",
+ "serde_json",
  "tempfile",
 ]
 

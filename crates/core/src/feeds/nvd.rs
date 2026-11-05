@@ -118,23 +118,56 @@ pub enum KeychainError {
     Signal,
 }
 
-/// A CPE product name, such as `openssl` or `node.js`, matched under any vendor.
-#[derive(Debug, Clone)]
-pub struct Product(String);
+/// A CPE product, such as `openssl`, matched under any vendor, or `vendor:product`, such as
+/// `github:cli`, when the bare name is shared by unrelated products.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(into = "String")]
+pub struct Product {
+    vendor: Option<String>,
+    name: String,
+}
+
+impl Product {
+    /// Returns the `virtualMatchString` for NVD.
+    fn matcher(&self) -> String {
+        let vendor = self.vendor.as_deref().unwrap_or("*");
+        format!("cpe:2.3:*:{vendor}:{}", self.name)
+    }
+
+    /// Returns the cache file name. Neither part may contain `..`, so `github..cli` cannot be
+    /// confused with a vendorless product.
+    fn cache_name(&self) -> String {
+        match &self.vendor {
+            Some(vendor) => format!("{vendor}..{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
 
 impl FromStr for Product {
     type Err = ParseProductError;
 
-    /// Accepts 1 to 64 lowercase ASCII letters, digits, `.`, `-` and `_`, starting with a
-    /// letter or digit: the characters CPE product names use without escaping.
+    /// Accepts `product` or `vendor:product`, each 1 to 64 lowercase ASCII letters, digits,
+    /// `.`, `-` and `_`, starting with a letter or digit and without `..`: the characters CPE
+    /// names use without escaping.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let ok = (1..=64).contains(&s.len())
-            && s.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-            && s.bytes().all(|b| {
-                b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')
-            });
-        if ok {
-            Ok(Self(s.to_owned()))
+        let part_ok = |p: &str| {
+            (1..=64).contains(&p.len())
+                && p.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && !p.contains("..")
+                && p.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')
+                })
+        };
+        let (vendor, name) = match s.split_once(':') {
+            Some((vendor, name)) => (Some(vendor), name),
+            None => (None, s),
+        };
+        if part_ok(name) && vendor.is_none_or(part_ok) {
+            Ok(Self {
+                vendor: vendor.map(str::to_owned),
+                name: name.to_owned(),
+            })
         } else {
             Err(ParseProductError)
         }
@@ -143,13 +176,25 @@ impl FromStr for Product {
 
 impl fmt::Display for Product {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match &self.vendor {
+            Some(vendor) => write!(f, "{vendor}:{}", self.name),
+            None => f.write_str(&self.name),
+        }
     }
 }
 
-/// A string that is not a CPE product name.
+impl From<Product> for String {
+    fn from(product: Product) -> Self {
+        product.to_string()
+    }
+}
+
+/// A string that is not a CPE product.
 #[derive(Debug, thiserror::Error)]
-#[error("product must be 1-64 lowercase letters, digits, '.', '-' or '_', starting alphanumeric")]
+#[error(
+    "product must be name or vendor:name, each 1-64 lowercase letters, digits, '.', '-' or '_', \
+     starting alphanumeric, without '..'"
+)]
 pub struct ParseProductError;
 
 pub(super) fn fetch(
@@ -157,7 +202,8 @@ pub(super) fn fetch(
     product: &Product,
     history: History,
 ) -> Result<Vec<Advisory>, FeedError> {
-    let key = cache_key(&product.0)?;
+    let name = product.cache_name();
+    let key = cache_key(&name)?;
     let cached: Option<ProductCache> = feeds.cache.read("nvd", key)?;
     let now = Timestamp::now();
     let window = cached
@@ -227,7 +273,7 @@ fn request_page(
     start: usize,
 ) -> Result<PageData, FeedError> {
     let url = cves_url(feeds);
-    let matcher = format!("cpe:2.3:*:*:{product}");
+    let matcher = product.matcher();
     let start_index = start;
     let start = start.to_string();
     let page_size = PAGE.to_string();
@@ -665,9 +711,26 @@ mod tests {
 
     #[test]
     fn products_are_cpe_names() {
-        for good in ["openssl", "node.js", "x11", "libxml2", "go-git", "a_b"] {
+        for good in [
+            "openssl",
+            "node.js",
+            "x11",
+            "libxml2",
+            "go-git",
+            "a_b",
+            "github:cli",
+        ] {
             assert_eq!(product(good).to_string(), good);
         }
+        assert_eq!(product("openssl").matcher(), "cpe:2.3:*:*:openssl");
+        assert_eq!(product("github:cli").matcher(), "cpe:2.3:*:github:cli");
+        assert_eq!(product("openssl").cache_name(), "openssl");
+        assert_eq!(product("github:cli").cache_name(), "github..cli");
+        assert_eq!(
+            serde_json::to_string(&product("github:cli")).unwrap(),
+            "\"github:cli\""
+        );
+
         for bad in [
             "",
             "OpenSSL",
@@ -675,7 +738,11 @@ mod tests {
             ".x",
             "a/b",
             "a b",
-            "a:b",
+            "a:b:c",
+            ":b",
+            "a:",
+            "a..b",
+            "Git:cli",
             &"a".repeat(65),
         ] {
             assert!(

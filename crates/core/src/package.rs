@@ -2,20 +2,25 @@
 
 use std::str::FromStr;
 
+use serde::Serialize;
+
 /// A package ecosystem, as OSV names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Ecosystem {
-    /// Rust crates (`Cargo.lock`).
+    /// Rust crates (`Cargo.lock`, `cargo install`).
+    #[serde(rename = "crates.io")]
     CratesIo,
-    /// npm packages (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`).
+    /// npm packages (`package-lock.json`, `npm install -g`).
+    #[serde(rename = "npm")]
     Npm,
-    /// Python packages (`uv.lock`, `poetry.lock`, `requirements.txt`).
+    /// Python packages (`uv.lock`, `poetry.lock`, uv and pipx tools).
     PyPI,
-    /// Go modules (`go.sum`).
+    /// Go modules.
     Go,
-    /// Ruby gems (`Gemfile.lock`).
+    /// Ruby gems.
     RubyGems,
     /// GitHub Actions used by workflows.
+    #[serde(rename = "GitHub Actions")]
     GitHubActions,
 }
 
@@ -57,7 +62,7 @@ impl FromStr for Ecosystem {
 
 /// A package in one ecosystem. Versions are deliberately absent: advisories are looked up by
 /// name, and the agent decides whether the installed version is affected.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Package {
     /// The ecosystem the name belongs to.
     pub ecosystem: Ecosystem,

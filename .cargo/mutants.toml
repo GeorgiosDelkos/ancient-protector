@@ -1,0 +1,3 @@
+# Run every workspace package's tests against each mutant, not only the mutated package's:
+# the CLI's end-to-end tests are what exercise the core's command-running collectors.
+test_workspace = true

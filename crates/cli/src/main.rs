@@ -7,6 +7,7 @@ use ancient_protector_core::Config;
 use ancient_protector_core::DataDir;
 use ancient_protector_core::Feeds;
 use ancient_protector_core::History;
+use ancient_protector_core::Inventory;
 use ancient_protector_core::LoadConfigError;
 use ancient_protector_core::NvdAccess;
 use ancient_protector_core::Package;
@@ -51,10 +52,16 @@ enum Command {
         /// A package as ecosystem:name, such as npm:lodash or crates.io:serde. Repeatable.
         #[arg(long = "package", value_name = "ECOSYSTEM:NAME")]
         packages: Vec<Package>,
-        /// An NVD product (CPE product name, any vendor), such as openssl. Repeatable.
+        /// An NVD product, `name` (any vendor) or `vendor:name`, such as openssl or github:cli.
+        /// Repeatable.
         #[arg(long = "product", value_name = "NAME")]
         products: Vec<Product>,
     },
+    /// List what is installed on this Mac, one JSON object per line.
+    ///
+    /// Reads macOS, Homebrew, global toolchains, and lockfiles under `mac.project_dirs` from
+    /// config.toml. Anything that could not be read is reported on stderr.
+    Inventory,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -75,6 +82,20 @@ fn main() -> anyhow::Result<()> {
         Command::Advisories { packages, products } => {
             let config = load_config(&data_dir, &home()?)?;
             advisories(&data_dir, config.history, &packages, &products)?;
+        }
+        Command::Inventory => {
+            let config = load_config(&data_dir, &home()?)?;
+            let inventory = Inventory::collect_mac(&config.project_dirs);
+            for component in &inventory.components {
+                let line = serde_json::to_string(component)
+                    .expect("components are strings and paths, which always serialize");
+                print(&line);
+            }
+            // Problems are listed but do not fail the command: a formula with no NVD name is
+            // a lasting fact about this Mac, not a transient error a retry would fix.
+            for problem in &inventory.problems {
+                warn(&error_chain(problem));
+            }
         }
     }
     Ok(())
