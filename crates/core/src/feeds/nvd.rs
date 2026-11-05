@@ -1,4 +1,5 @@
-//! NVD CVE API 2.0, queried per product with `virtualMatchString=cpe:2.3:*:*:<product>`.
+//! NVD CVE API 2.0, queried per product with `virtualMatchString=cpe:2.3:*:<vendor>:<product>`,
+//! where `<vendor>` is `*` for a product given without one.
 //!
 //! API: <https://nvd.nist.gov/developers/vulnerabilities>. Each product's CVEs are cached in
 //! one file with the time the last fetch's coverage ended. The next fetch asks only for CVEs
@@ -120,7 +121,7 @@ pub enum KeychainError {
 
 /// A CPE product, such as `openssl`, matched under any vendor, or `vendor:product`, such as
 /// `github:cli`, when the bare name is shared by unrelated products.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(into = "String")]
 pub struct Product {
     vendor: Option<String>,
@@ -148,8 +149,8 @@ impl FromStr for Product {
     type Err = ParseProductError;
 
     /// Accepts `product` or `vendor:product`, each 1 to 64 lowercase ASCII letters, digits,
-    /// `.`, `-` and `_`, starting with a letter or digit and without `..`: the characters CPE
-    /// names use without escaping.
+    /// `.`, `-` and `_` (together at most 126, so the cache name fits), starting with a letter or
+    /// digit and without `..`: the characters CPE names use without escaping.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let part_ok = |p: &str| {
             (1..=64).contains(&p.len())
@@ -163,7 +164,9 @@ impl FromStr for Product {
             Some((vendor, name)) => (Some(vendor), name),
             None => (None, s),
         };
-        if part_ok(name) && vendor.is_none_or(part_ok) {
+        // The cache name is `vendor..name`, which must fit `cache_key`'s 128 bytes.
+        let cache_len = vendor.map_or(0, |v| v.len() + 2) + name.len();
+        if part_ok(name) && vendor.is_none_or(part_ok) && cache_len <= 128 {
             Ok(Self {
                 vendor: vendor.map(str::to_owned),
                 name: name.to_owned(),
@@ -750,6 +753,10 @@ mod tests {
                 "{bad:?}"
             );
         }
+        let longest = format!("{}:{}", "v".repeat(62), "n".repeat(64));
+        assert_eq!(product(&longest).cache_name().len(), 128);
+        let too_long = format!("{}:{}", "v".repeat(63), "n".repeat(64));
+        assert!(too_long.parse::<Product>().is_err());
     }
 
     #[test]
@@ -786,5 +793,42 @@ mod tests {
         assert_eq!(nvd_time(ts), "2026-11-04T20:18:52.330Z");
         assert_eq!(parse_nvd_time("2026-11-04T20:18:52.330"), Some(ts));
         assert_eq!(parse_nvd_time("garbage"), None);
+    }
+}
+
+#[cfg(test)]
+mod product_properties {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// Valid product parts: at most 1 + 2 * 30 = 61 bytes, under the 64-byte limit.
+    const PART: &str = "[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-]){0,30}";
+
+    proptest! {
+        /// Every accepted product prints back as itself and has a valid cache name.
+        #[test]
+        fn round_trips_with_a_valid_cache_name(
+            vendor in proptest::option::of(PART),
+            name in PART,
+        ) {
+            let text = vendor.as_ref().map_or_else(|| name.clone(), |v| format!("{v}:{name}"));
+            let product: Product = text.parse().unwrap();
+            prop_assert_eq!(product.to_string(), text);
+            prop_assert!(cache_key(&product.cache_name()).is_ok());
+        }
+
+        /// Two different products never share a cache file.
+        #[test]
+        fn cache_names_are_distinct(
+            a in proptest::option::of(PART), b in PART,
+            c in proptest::option::of(PART), d in PART,
+        ) {
+            let make = |v: &Option<String>, n: &str| -> Product {
+                v.as_ref().map_or_else(|| n.to_owned(), |v| format!("{v}:{n}")).parse().unwrap()
+            };
+            let (x, y) = (make(&a, &b), make(&c, &d));
+            prop_assert_eq!(x.to_string() == y.to_string(), x.cache_name() == y.cache_name());
+        }
     }
 }

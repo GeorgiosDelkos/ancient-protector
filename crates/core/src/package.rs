@@ -5,13 +5,11 @@ use std::str::FromStr;
 use serde::Serialize;
 
 /// A package ecosystem, as OSV names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ecosystem {
     /// Rust crates (`Cargo.lock`, `cargo install`).
-    #[serde(rename = "crates.io")]
     CratesIo,
     /// npm packages (`package-lock.json`, `npm install -g`).
-    #[serde(rename = "npm")]
     Npm,
     /// Python packages (`uv.lock`, `poetry.lock`, uv and pipx tools).
     PyPI,
@@ -20,7 +18,6 @@ pub enum Ecosystem {
     /// Ruby gems.
     RubyGems,
     /// GitHub Actions used by workflows.
-    #[serde(rename = "GitHub Actions")]
     GitHubActions,
 }
 
@@ -45,6 +42,13 @@ impl Ecosystem {
             Self::RubyGems => "RubyGems",
             Self::GitHubActions => "GitHub Actions",
         }
+    }
+}
+
+/// Serialized as OSV's name, the same string the OSV API is sent.
+impl Serialize for Ecosystem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.osv_name())
     }
 }
 
@@ -121,6 +125,23 @@ mod tests {
             let package: Package = text.parse().unwrap();
             assert_eq!(package.ecosystem, ecosystem, "{text}");
             assert_eq!(package.name, name, "{text}");
+        }
+    }
+
+    #[test]
+    fn serializes_with_osv_names() {
+        let json = serde_json::to_string(
+            &"GitHub Actions:actions/checkout"
+                .parse::<Package>()
+                .unwrap(),
+        );
+        assert_eq!(
+            json.unwrap(),
+            r#"{"ecosystem":"GitHub Actions","name":"actions/checkout"}"#
+        );
+        for ecosystem in Ecosystem::ALL {
+            let json = serde_json::to_string(&ecosystem).unwrap();
+            assert_eq!(json, format!("{:?}", ecosystem.osv_name()));
         }
     }
 
