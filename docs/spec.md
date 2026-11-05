@@ -138,8 +138,9 @@ not an OSV ecosystem, so formulae go through NVD.
   (service `ancient-protector`, account `nvd-api-key`).
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
-- `history.since` drops advisories published before that date; records without a published
-  date are kept.
+- `history.since` drops advisories both published and last modified before that date (NVD keeps
+  a CVE's original published date when it later adds a product); records without either date
+  are kept.
 - Advisory ids and product names come from the network and become cache file names, so they
   are checked against a safe character set first.
 

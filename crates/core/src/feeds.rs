@@ -179,26 +179,59 @@ impl Advisory {
     }
 }
 
-/// Keeps an advisory unless it was published before the history window. An advisory without
-/// a published date is kept: dropping it could hide a real issue.
-fn in_window(published: Option<Timestamp>, history: History) -> bool {
-    match (history, published) {
-        (History::All, _) | (History::Since(_), None) => true,
-        (History::Since(since), Some(published)) => published >= since.start(),
+/// Keeps an advisory that was published or modified inside the history window. A record
+/// modified recently matters even if it is old: NVD keeps a CVE's original `published` date
+/// when it later adds the product that makes it relevant. An advisory without dates is kept:
+/// dropping it could hide a real issue.
+fn in_window(published: Option<Timestamp>, modified: Option<Timestamp>, history: History) -> bool {
+    let History::Since(since) = history else {
+        return true;
+    };
+    match (published, modified) {
+        (None, None) => true,
+        (published, modified) => published.max(modified) >= Some(since.start()),
     }
 }
 
 /// Error from a feed request.
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
-    /// The request failed or the server answered with an error status.
+    /// The request could not be sent or the connection failed.
     #[error("request to {url} failed")]
     Http {
         /// The URL requested. API keys travel in headers, so it holds none.
         url: String,
-        /// The underlying error, including the HTTP status.
+        /// The underlying error.
         #[source]
         source: Box<ureq::Error>,
+    },
+    /// The server answered with a status other than 2xx. Redirects count: they are not
+    /// followed, so a 3xx means the endpoint moved.
+    #[error("{url} answered {status}: {detail}")]
+    Status {
+        /// The URL requested.
+        url: String,
+        /// The HTTP status.
+        status: u16,
+        /// The start of the response body, which for NVD and OSV explains the refusal.
+        detail: String,
+    },
+    /// The connection failed while the body was read.
+    #[error("reading the response from {url} failed")]
+    Body {
+        /// The URL requested.
+        url: String,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+    /// The decoded body is larger than the client accepts.
+    #[error("response from {url} exceeds {limit} bytes")]
+    TooLarge {
+        /// The URL requested.
+        url: String,
+        /// The limit, in bytes.
+        limit: u64,
     },
     /// The response was not the JSON the source documents.
     #[error("unexpected response from {url}")]
@@ -289,10 +322,15 @@ mod tests {
         let since = History::Since(Since::new(jiff::civil::date(2025, 1, 31)).unwrap());
         let ts = |s: &str| Some(s.parse::<Timestamp>().unwrap());
 
-        assert!(in_window(None, since));
-        assert!(in_window(ts("2025-01-31T00:00:00Z"), since));
-        assert!(!in_window(ts("2025-01-30T23:59:59Z"), since));
-        assert!(in_window(ts("1999-01-01T00:00:00Z"), History::All));
+        let old = ts("2025-01-30T23:59:59Z");
+        assert!(in_window(None, None, since));
+        assert!(in_window(ts("2025-01-31T00:00:00Z"), None, since));
+        assert!(!in_window(old, None, since));
+        assert!(!in_window(old, old, since));
+        assert!(!in_window(None, old, since));
+        assert!(in_window(old, ts("2025-01-31T00:00:00Z"), since));
+        assert!(in_window(None, ts("2026-01-01T00:00:00Z"), since));
+        assert!(in_window(ts("1999-01-01T00:00:00Z"), old, History::All));
     }
 
     #[test]

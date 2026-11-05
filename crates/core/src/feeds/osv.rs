@@ -33,7 +33,7 @@ pub(super) fn fetch(
     let mut advisories = Vec::with_capacity(ids.len());
     for (id, modified) in ids {
         let (header, record) = record(feeds, &id, modified)?;
-        if in_window(header.published, history) {
+        if in_window(header.published, Some(header.modified), history) {
             advisories.push(Advisory {
                 source: Source::Osv,
                 id: header.id,
@@ -269,16 +269,24 @@ mod tests {
         assert_eq!(server.requests().len(), 7, "both records changed upstream");
     }
 
+    /// A-1 was published in 2020 and B-2 in 2025; both were modified 2026-01-01.
     #[test]
-    fn history_window_drops_old_advisories() {
+    fn history_window_uses_published_or_modified() {
         let server = osv_server(Arc::new(Mutex::new("2026-01-01T00:00:00Z".to_owned())));
         let tmp = tempfile::tempdir().unwrap();
-        let since = History::Since(Since::new(jiff::civil::date(2024, 1, 1)).unwrap());
-        let advisories = feeds(&server, tmp.path())
-            .osv(&[pkg("npm:lodash")], since)
-            .unwrap();
-        let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["B-2"]);
+        let feeds = feeds(&server, tmp.path());
+        let ids = |year, month| -> Vec<String> {
+            let since = History::Since(Since::new(jiff::civil::date(year, month, 1)).unwrap());
+            let advisories = feeds.osv(&[pkg("npm:lodash")], since).unwrap();
+            advisories.into_iter().map(|a| a.id).collect()
+        };
+
+        assert_eq!(
+            ids(2024, 1),
+            ["A-1", "B-2"],
+            "an old advisory modified recently stays"
+        );
+        assert!(ids(2026, 6).is_empty(), "neither date is in the window");
     }
 
     #[test]

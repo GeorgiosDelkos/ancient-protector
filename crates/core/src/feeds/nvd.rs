@@ -279,10 +279,10 @@ fn nvd_time(ts: Timestamp) -> String {
 fn advisories(cves: BTreeMap<String, Box<RawValue>>, history: History) -> Vec<Advisory> {
     cves.into_iter()
         .filter_map(|(id, record)| {
-            let published = serde_json::from_str::<CveHeader>(record.get())
-                .ok()
-                .and_then(|h| h.published);
-            in_window(published, history).then_some(Advisory {
+            let header = serde_json::from_str::<CveHeader>(record.get()).ok();
+            let published = header.as_ref().and_then(|h| h.published);
+            let modified = header.and_then(|h| h.last_modified);
+            in_window(published, modified, history).then_some(Advisory {
                 source: Source::Nvd,
                 id,
                 aliases: Vec::new(),
@@ -314,10 +314,13 @@ struct Item {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CveHeader {
     id: String,
     #[serde(default, deserialize_with = "de_nvd_time_opt")]
     published: Option<Timestamp>,
+    #[serde(default, deserialize_with = "de_nvd_time_opt")]
+    last_modified: Option<Timestamp>,
 }
 
 /// NVD writes UTC times without an offset, as `2026-11-04T20:18:52.330`.

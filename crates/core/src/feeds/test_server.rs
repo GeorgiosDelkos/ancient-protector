@@ -44,6 +44,9 @@ impl Request {
     }
 }
 
+/// A status, extra headers and the raw body.
+pub(crate) type RawResponse = (u16, Vec<(String, String)>, Vec<u8>);
+
 /// Serves each request with `handler` on a background thread until the test process exits.
 /// The thread is never joined: it blocks in `accept`, and the test binary ends it on exit.
 #[derive(Debug)]
@@ -54,7 +57,17 @@ pub(crate) struct TestServer {
 }
 
 impl TestServer {
+    /// Answers each request with a status and a JSON body.
     pub(crate) fn start(handler: impl Fn(&Request) -> (u16, String) + Send + 'static) -> Self {
+        Self::start_raw(move |request| {
+            let (status, body) = handler(request);
+            let headers = vec![("content-type".to_owned(), "application/json".to_owned())];
+            (status, headers, body.into_bytes())
+        })
+    }
+
+    /// Answers each request with a status, extra headers and raw body bytes.
+    pub(crate) fn start_raw(handler: impl Fn(&Request) -> RawResponse + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("binding a loopback port");
         let url = format!("http://{}", listener.local_addr().expect("bound socket"));
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -64,17 +77,25 @@ impl TestServer {
             for stream in listener.incoming() {
                 let mut stream = stream.expect("accepting a loopback connection");
                 let request = read_request(&stream);
-                let (status, body) = handler(&request);
+                let (status, headers, body) = handler(&request);
                 log.lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(request);
-                let response = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                let mut head = format!("HTTP/1.1 {status} X\r\n");
+                for (name, value) in headers {
+                    head.push_str(&format!("{name}: {value}\r\n"));
+                }
+                head.push_str(&format!(
+                    "content-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
+                ));
+                // The client may hang up early, after an error status or a size limit; the
+                // test asserts on what the client saw, not on this write.
+                drop(
+                    stream
+                        .write_all(head.as_bytes())
+                        .and_then(|()| stream.write_all(&body)),
                 );
-                // The client may have hung up after an error status; that is its business.
-                drop(stream.write_all(response.as_bytes()));
             }
         });
         Self { url, requests }

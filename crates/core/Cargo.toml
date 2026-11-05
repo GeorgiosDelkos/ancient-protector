@@ -27,5 +27,6 @@ ureq = { version = "3.5.0", default-features = false, features = ["native-tls-no
 workspace = true
 
 [dev-dependencies]
+flate2 = "1.1.10"
 proptest = "1.12.0"
 tempfile = "3.27.0"
