@@ -174,7 +174,7 @@ pub(super) fn fetch(
         let count = page.cves.len();
         cves.extend(page.cves);
         start += count;
-        if count == 0 || start >= page.total_results {
+        if start >= page.total_results {
             break;
         }
     }
@@ -220,6 +220,7 @@ fn request_page(
 ) -> Result<PageData, FeedError> {
     let url = format!("{}/rest/json/cves/2.0", feeds.endpoints.nvd);
     let matcher = format!("cpe:2.3:*:*:{product}");
+    let start_index = start;
     let start = start.to_string();
     let page_size = PAGE.to_string();
     let (from, to) = window.map_or((String::new(), String::new()), |(from, to)| {
@@ -243,6 +244,20 @@ fn request_page(
     pace(feeds);
     let text = feeds.http.get(&url, &query, &headers)?;
     let page: Page = decode(&url, &text)?;
+    // A page that does not start where asked (a proxy dropping the query, say), or an empty
+    // page before the end, would otherwise pass for a complete sync and hide the rest.
+    if page.start_index != start_index {
+        return Err(FeedError::Unexpected {
+            url,
+            what: "the page starts at a different index than requested",
+        });
+    }
+    if page.vulnerabilities.is_empty() && start_index < page.total_results {
+        return Err(FeedError::Unexpected {
+            url,
+            what: "an empty page before the end of the results",
+        });
+    }
     let cves = page
         .vulnerabilities
         .into_iter()
@@ -302,6 +317,7 @@ struct ProductCache {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Page {
+    start_index: usize,
     total_results: usize,
     #[serde(deserialize_with = "de_nvd_time")]
     timestamp: Timestamp,
@@ -373,9 +389,13 @@ mod tests {
     }
 
     fn page(total: usize, timestamp: &str, items: &[serde_json::Value]) -> String {
+        page_at(0, total, timestamp, items)
+    }
+
+    fn page_at(start: usize, total: usize, timestamp: &str, items: &[serde_json::Value]) -> String {
         serde_json::json!({
             "resultsPerPage": items.len(),
-            "startIndex": 0,
+            "startIndex": start,
             "totalResults": total,
             "timestamp": timestamp,
             "vulnerabilities": items,
@@ -407,7 +427,8 @@ mod tests {
                 ),
                 (0, "2") => (
                     200,
-                    page(
+                    page_at(
+                        2,
                         3,
                         "2026-11-01T10:00:01.000",
                         &[cve("CVE-3", "2026-01-01T00:00:00.000")],
@@ -578,15 +599,46 @@ mod tests {
     }
 
     #[test]
-    fn empty_page_ends_pagination() {
+    fn empty_page_before_the_end_fails_without_caching() {
         let server =
             TestServer::start(|_: &Request| (200, page(10, "2026-11-01T10:00:00.000", &[])));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = feeds(&server, tmp.path(), NvdAccess::Anonymous)
+            .nvd(&product("zlib"), History::All)
+            .unwrap_err();
+        assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
+        assert!(!tmp.path().join("nvd/zlib.json").exists());
+    }
+
+    #[test]
+    fn no_results_is_a_complete_sync() {
+        let server =
+            TestServer::start(|_: &Request| (200, page(0, "2026-11-01T10:00:00.000", &[])));
         let tmp = tempfile::tempdir().unwrap();
         let advisories = feeds(&server, tmp.path(), NvdAccess::Anonymous)
             .nvd(&product("zlib"), History::All)
             .unwrap();
         assert!(advisories.is_empty());
-        assert_eq!(server.requests().len(), 1);
+        assert!(tmp.path().join("nvd/zlib.json").exists());
+    }
+
+    /// Every request answered with the first page, as a proxy that drops the query would.
+    #[test]
+    fn repeated_first_page_fails_without_caching() {
+        let server = TestServer::start(|_: &Request| {
+            let body = page(
+                2,
+                "2026-11-01T10:00:00.000",
+                &[cve("CVE-1", "2026-01-01T00:00:00.000")],
+            );
+            (200, body)
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let err = feeds(&server, tmp.path(), NvdAccess::Anonymous)
+            .nvd(&product("zlib"), History::All)
+            .unwrap_err();
+        assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
+        assert!(!tmp.path().join("nvd/zlib.json").exists());
     }
 
     #[test]
