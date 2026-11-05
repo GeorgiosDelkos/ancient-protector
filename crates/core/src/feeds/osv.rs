@@ -56,6 +56,7 @@ fn query_ids(
     let mut pending: Vec<(&Package, Option<String>)> =
         unique.into_iter().map(|p| (p, None)).collect();
     let mut ids = BTreeMap::new();
+    let mut seen_tokens = BTreeSet::new();
 
     while !pending.is_empty() {
         let batch: Vec<_> = pending.drain(..pending.len().min(BATCH)).collect();
@@ -84,8 +85,17 @@ fn query_ids(
                 let modified = ids.entry(vuln.id).or_insert(vuln.modified);
                 *modified = (*modified).max(vuln.modified);
             }
-            if let Some(token) = result.next_page_token {
-                pending.push((package, Some(token)));
+            // A repeated token would loop forever; OSV documents tokens as moving forward.
+            match result.next_page_token {
+                Some(token) if token.is_empty() => {}
+                Some(token) if !seen_tokens.insert((package, token.clone())) => {
+                    return Err(FeedError::Unexpected {
+                        url,
+                        what: "querybatch repeated a page token",
+                    });
+                }
+                Some(token) => pending.push((package, Some(token))),
+                None => {}
             }
         }
     }
@@ -287,6 +297,34 @@ mod tests {
             "an old advisory modified recently stays"
         );
         assert!(ids(2026, 6).is_empty(), "neither date is in the window");
+    }
+
+    #[test]
+    fn repeated_page_token_is_an_error_not_a_loop() {
+        let server = TestServer::start(|_: &Request| {
+            let result = serde_json::json!({"vulns": [], "next_page_token": "same"});
+            (200, serde_json::json!({ "results": [result] }).to_string())
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let err = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap_err();
+        assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
+    fn empty_page_token_ends_paging() {
+        let server = TestServer::start(|_: &Request| {
+            let result = serde_json::json!({"vulns": [], "next_page_token": ""});
+            (200, serde_json::json!({ "results": [result] }).to_string())
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let advisories = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap();
+        assert!(advisories.is_empty());
+        assert_eq!(server.requests().len(), 1);
     }
 
     #[test]
