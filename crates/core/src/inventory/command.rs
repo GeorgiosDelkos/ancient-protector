@@ -1,0 +1,331 @@
+//! Runs a listing command and returns its stdout.
+//!
+//! Commands run from `/` with stdin closed and a time limit. From `/`, no project file in
+//! the caller's folder (`rust-toolchain.toml`, `.nvmrc`, `.python-version`) changes which tool
+//! version answers, and rustup cannot decide to install a toolchain a project pins. Closed
+//! stdin and the time limit keep a tool that prompts or hangs from stopping the sweep.
+
+use std::env;
+use std::io;
+use std::os::unix::process::CommandExt as _;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Child;
+use std::process::Command;
+use std::process::ExitStatus;
+use std::process::Stdio;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+
+use crate::inventory::InventoryError;
+
+/// How much of a failing command's stderr goes into the error, in characters. Arbitrary.
+const STDERR_LIMIT: usize = 300;
+
+/// How long one listing command may run. Arbitrary: `brew info --installed` takes a few
+/// seconds with a hundred formulae; a minute means the tool is stuck.
+const TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often a running command is checked for having exited. Arbitrary; short enough that
+/// fast commands return promptly.
+const POLL: Duration = Duration::from_millis(20);
+
+/// A command that ran to completion.
+#[derive(Debug)]
+pub(crate) struct Output {
+    /// Whether it exited with status 0.
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    /// The exit status and the start of stderr, for an error message.
+    pub(crate) detail: String,
+    /// The command line, for an error message.
+    pub(crate) command: String,
+}
+
+/// Runs `program` and returns stdout, or `None` when it is not installed. A non-zero exit is
+/// an error.
+pub(crate) fn run(program: &str, args: &[&str]) -> Result<Option<String>, InventoryError> {
+    let Some(output) = run_any_status(program, args)? else {
+        return Ok(None);
+    };
+    if output.success {
+        Ok(Some(output.stdout))
+    } else {
+        Err(InventoryError::Command {
+            command: output.command,
+            detail: output.detail,
+        })
+    }
+}
+
+/// Runs `program` and returns its output whatever the exit status, or `None` when it is not
+/// installed. For tools that print a complete answer and still exit non-zero.
+pub(crate) fn run_any_status(
+    program: &str,
+    args: &[&str],
+) -> Result<Option<Output>, InventoryError> {
+    run_within(program, args, TIMEOUT)
+}
+
+fn run_within(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Option<Output>, InventoryError> {
+    let command = command_line(program, args);
+    let child = Command::new(program)
+        .args(args)
+        .current_dir("/")
+        // Its own process group, so a timeout can stop the helpers it starts as well.
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let child = match child {
+        Ok(child) => child,
+        // A script whose interpreter is gone also fails with NotFound; only a program that is
+        // nowhere on PATH is "not installed".
+        Err(e) if e.kind() == io::ErrorKind::NotFound && which(program).is_none() => {
+            return Ok(None);
+        }
+        Err(source) => return Err(InventoryError::Spawn { command, source }),
+    };
+    let (status, stdout, stderr) = wait(child, &command, timeout)?;
+
+    let stdout = String::from_utf8(stdout).map_err(|e| InventoryError::parse(&command, &e))?;
+    let stderr: String = String::from_utf8_lossy(&stderr)
+        .chars()
+        .take(STDERR_LIMIT)
+        .collect();
+    Ok(Some(Output {
+        success: status.success(),
+        stdout,
+        detail: format!("{status}: {}", stderr.trim()),
+        command,
+    }))
+}
+
+/// Waits for `child` and its output up to `timeout`, reading stdout and stderr on their own
+/// threads so a full pipe cannot stall it. A tool still running at the deadline, or a helper
+/// it left behind that keeps its output open, is stopped with its whole process group.
+fn wait(
+    mut child: Child,
+    command: &str,
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), InventoryError> {
+    // Each reader sends its result once the pipe closes. The channel holds that one message, so
+    // the send never blocks. A reader whose pipe is still held by a helper that left the process
+    // group stays blocked until that helper exits: one thread and descriptor, accepted, since
+    // it takes a tool that escapes its own group.
+    fn reader(pipe: Option<impl io::Read + Send + 'static>) -> mpsc::Receiver<io::Result<Vec<u8>>> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read = match pipe {
+                Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+                None => Ok(bytes),
+            };
+            // The receiver is gone only when the command was already abandoned.
+            drop(tx.send(read));
+        });
+        rx
+    }
+    let stdout = reader(child.stdout.take());
+    let stderr = reader(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+
+    let status = loop {
+        let polled = child.try_wait().map_err(|source| InventoryError::Spawn {
+            command: command.to_owned(),
+            source,
+        })?;
+        if let Some(status) = polled {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let detail = format!("still running after {timeout:?}; stopped");
+            return Err(stop(&mut child, command, detail));
+        }
+        thread::sleep(POLL);
+    };
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let (Ok(stdout), Ok(stderr)) = (stdout.recv_timeout(left()), stderr.recv_timeout(left()))
+    else {
+        let detail = "exited, but something it started kept its output open; stopped";
+        return Err(stop(&mut child, command, detail.to_owned()));
+    };
+    // A failed read means the output may be cut short, which would parse as a shorter list.
+    let read_err = |source| InventoryError::Spawn {
+        command: command.to_owned(),
+        source,
+    };
+    Ok((status, stdout.map_err(read_err)?, stderr.map_err(read_err)?))
+}
+
+/// Stops `child` and everything in its process group, and returns the error to report.
+///
+/// The group is killed with `kill`, because sending a signal to a group needs `libc` and an
+/// `unsafe` call, and this crate has neither. Every step is best effort: the command is
+/// abandoned either way, and a failed kill means the process already exited.
+///
+/// Process ids can be reused, which bounds what the kill can hit. On a timeout the leader is not
+/// yet reaped, so the group id stays reserved and only the group is killed. When the leader has
+/// exited and been reaped (the "kept its output open" case), the id is free once the rest of
+/// the group also exits, which can happen at any point before the deadline if something outside
+/// the group holds the output; a new group could take the id in that time and be killed.
+/// Accepted: it takes a tool that escapes its own group, and an id reused within a minute is
+/// rare.
+fn stop(child: &mut Child, command: &str, detail: String) -> InventoryError {
+    let group = format!("-{}", child.id());
+    let kill = Command::new("/bin/kill")
+        .args(["-KILL", &group])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    drop(kill);
+    drop(child.kill());
+    drop(child.wait());
+    InventoryError::Command {
+        command: command.to_owned(),
+        detail,
+    }
+}
+
+/// Returns the file `program` runs: itself if it names a path, else the first match on `PATH`.
+pub(crate) fn which(program: &str) -> Option<PathBuf> {
+    if program.contains('/') {
+        return Path::new(program).exists().then(|| PathBuf::from(program));
+    }
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.exists())
+}
+
+fn command_line(program: &str, args: &[&str]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    fn script(dir: &Path, body: &str) -> String {
+        let path = dir.join("tool");
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn returns_stdout() {
+        assert_eq!(run("echo", &["a", "b"]).unwrap().as_deref(), Some("a b\n"));
+    }
+
+    #[test]
+    fn missing_program_is_none() {
+        assert!(
+            run("ancient-protector-no-such-tool", &[])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn runs_from_root_with_stdin_closed() {
+        assert_eq!(run("pwd", &[]).unwrap().as_deref(), Some("/\n"));
+        assert_eq!(run("cat", &[]).unwrap().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn failure_names_the_command_and_stderr() {
+        let err = run("sh", &["-c", "echo boom >&2; exit 3"]).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("`sh -c echo boom >&2; exit 3` failed"),
+            "{message}"
+        );
+        assert!(message.contains("boom"), "{message}");
+    }
+
+    #[test]
+    fn any_status_keeps_stdout_of_a_failure() {
+        let output = run_any_status("sh", &["-c", "echo '{}'; echo bad >&2; exit 1"])
+            .unwrap()
+            .unwrap();
+        assert!(!output.success);
+        assert_eq!(output.stdout, "{}\n");
+        assert!(output.detail.contains("bad"), "{}", output.detail);
+    }
+
+    #[test]
+    fn hung_command_is_stopped() {
+        let err = run_within("sleep", &["30"], Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("still running"), "{err}");
+    }
+
+    /// The tool exits at once, but a helper it started keeps stdout open for 30 s.
+    #[test]
+    fn helper_holding_output_open_is_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("pid");
+        let script = format!("sleep 30 & echo $! > '{}'; echo done", pidfile.display());
+        let err = run_within("sh", &["-c", &script], Duration::from_secs(5)).unwrap_err();
+        assert!(err.to_string().contains("kept its output open"), "{err}");
+
+        // The helper was in the tool's process group, so the group kill reached it.
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let ps = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid.trim()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&ps.stdout);
+        assert!(
+            // Gone, a zombie (Z), or still being torn down after SIGKILL (E).
+            stat.trim().is_empty() || stat.starts_with(['Z', 'E']),
+            "helper survived: {stat}"
+        );
+    }
+
+    #[test]
+    fn non_utf8_output_is_a_parse_error() {
+        let err = run("printf", &["\\377"]).unwrap_err();
+        assert!(matches!(err, InventoryError::Parse { .. }), "{err:?}");
+    }
+
+    /// A program that exists but cannot run is an error, not "not installed".
+    #[test]
+    fn unrunnable_program_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tool");
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        let err = run(path.to_str().unwrap(), &[]).unwrap_err();
+        assert!(matches!(err, InventoryError::Spawn { .. }), "{err:?}");
+    }
+
+    /// A script whose interpreter was removed fails with `NotFound`, but it is installed.
+    #[test]
+    fn broken_shebang_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let program = script(tmp.path(), "#!/nonexistent/python3\n");
+        let err = run(&program, &[]).unwrap_err();
+        assert!(matches!(err, InventoryError::Spawn { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn which_finds_programs() {
+        assert!(which("sh").is_some());
+        assert_eq!(which("/bin/sh"), Some(PathBuf::from("/bin/sh")));
+        assert_eq!(which("ancient-protector-no-such-tool"), None);
+        assert_eq!(which("/nonexistent/tool"), None);
+    }
+}

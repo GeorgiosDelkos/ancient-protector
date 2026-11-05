@@ -2,18 +2,20 @@
 
 use std::str::FromStr;
 
+use serde::Serialize;
+
 /// A package ecosystem, as OSV names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ecosystem {
-    /// Rust crates (`Cargo.lock`).
+    /// Rust crates (`Cargo.lock`, `cargo install`).
     CratesIo,
-    /// npm packages (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`).
+    /// npm packages (`package-lock.json`, `npm install -g`).
     Npm,
-    /// Python packages (`uv.lock`, `poetry.lock`, `requirements.txt`).
+    /// Python packages (`uv.lock`, `poetry.lock`, uv and pipx tools).
     PyPI,
-    /// Go modules (`go.sum`).
+    /// Go modules.
     Go,
-    /// Ruby gems (`Gemfile.lock`).
+    /// Ruby gems.
     RubyGems,
     /// GitHub Actions used by workflows.
     GitHubActions,
@@ -43,6 +45,13 @@ impl Ecosystem {
     }
 }
 
+/// Serialized as OSV's name, the same string the OSV API is sent.
+impl Serialize for Ecosystem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.osv_name())
+    }
+}
+
 impl FromStr for Ecosystem {
     type Err = ParsePackageError;
 
@@ -57,7 +66,7 @@ impl FromStr for Ecosystem {
 
 /// A package in one ecosystem. Versions are deliberately absent: advisories are looked up by
 /// name, and the agent decides whether the installed version is affected.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Package {
     /// The ecosystem the name belongs to.
     pub ecosystem: Ecosystem,
@@ -116,6 +125,23 @@ mod tests {
             let package: Package = text.parse().unwrap();
             assert_eq!(package.ecosystem, ecosystem, "{text}");
             assert_eq!(package.name, name, "{text}");
+        }
+    }
+
+    #[test]
+    fn serializes_with_osv_names() {
+        let json = serde_json::to_string(
+            &"GitHub Actions:actions/checkout"
+                .parse::<Package>()
+                .unwrap(),
+        );
+        assert_eq!(
+            json.unwrap(),
+            r#"{"ecosystem":"GitHub Actions","name":"actions/checkout"}"#
+        );
+        for ecosystem in Ecosystem::ALL {
+            let json = serde_json::to_string(&ecosystem).unwrap();
+            assert_eq!(json, format!("{:?}", ecosystem.osv_name()));
         }
     }
 

@@ -1,4 +1,5 @@
-//! NVD CVE API 2.0, queried per product with `virtualMatchString=cpe:2.3:*:*:<product>`.
+//! NVD CVE API 2.0, queried per product with `virtualMatchString=cpe:2.3:*:<vendor>:<product>`,
+//! where `<vendor>` is `*` for a product given without one.
 //!
 //! API: <https://nvd.nist.gov/developers/vulnerabilities>. Each product's CVEs are cached in
 //! one file with the time the last fetch's coverage ended. The next fetch asks only for CVEs
@@ -118,38 +119,88 @@ pub enum KeychainError {
     Signal,
 }
 
-/// A CPE product name, such as `openssl` or `node.js`, matched under any vendor.
-#[derive(Debug, Clone)]
-pub struct Product(String);
+/// A CPE product, such as `openssl`, matched under any vendor, or `vendor:product`, such as
+/// `github:cli`, when the bare name is shared by unrelated products.
+#[derive(Debug, Clone, Serialize)]
+#[serde(into = "String")]
+pub struct Product {
+    vendor: Option<String>,
+    name: String,
+}
+
+impl Product {
+    /// Returns the `virtualMatchString` for NVD.
+    fn matcher(&self) -> String {
+        let vendor = self.vendor.as_deref().unwrap_or("*");
+        format!("cpe:2.3:*:{vendor}:{}", self.name)
+    }
+
+    /// Returns the cache file name. Neither part may contain `..`, so `github..cli` cannot be
+    /// confused with a vendorless product.
+    fn cache_name(&self) -> String {
+        match &self.vendor {
+            Some(vendor) => format!("{vendor}..{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
 
 impl FromStr for Product {
     type Err = ParseProductError;
 
-    /// Accepts 1 to 64 lowercase ASCII letters, digits, `.`, `-` and `_`, starting with a
-    /// letter or digit: the characters CPE product names use without escaping.
+    /// Accepts `product` or `vendor:product`, each 1 to 64 lowercase ASCII letters, digits,
+    /// `.`, `-` and `_` (short enough together that the cache name fits), starting with a letter or
+    /// digit and without `..`: the characters CPE names use without escaping.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let ok = (1..=64).contains(&s.len())
-            && s.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-            && s.bytes().all(|b| {
-                b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')
-            });
-        if ok {
-            Ok(Self(s.to_owned()))
-        } else {
-            Err(ParseProductError)
+        let part_ok = |p: &str| {
+            (1..=64).contains(&p.len())
+                && p.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && !p.contains("..")
+                && p.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')
+                })
+        };
+        let (vendor, name) = match s.split_once(':') {
+            Some((vendor, name)) => (Some(vendor), name),
+            None => (None, s),
+        };
+        if !part_ok(name) || !vendor.is_none_or(part_ok) {
+            return Err(ParseProductError);
         }
+        let product = Self {
+            vendor: vendor.map(str::to_owned),
+            name: name.to_owned(),
+        };
+        // Only a product whose cache file name is valid is a product: fetching it must not fail
+        // later over a name the parser accepted.
+        if cache_key(&product.cache_name()).is_err() {
+            return Err(ParseProductError);
+        }
+        Ok(product)
     }
 }
 
 impl fmt::Display for Product {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match &self.vendor {
+            Some(vendor) => write!(f, "{vendor}:{}", self.name),
+            None => f.write_str(&self.name),
+        }
     }
 }
 
-/// A string that is not a CPE product name.
+impl From<Product> for String {
+    fn from(product: Product) -> Self {
+        product.to_string()
+    }
+}
+
+/// A string that is not a CPE product.
 #[derive(Debug, thiserror::Error)]
-#[error("product must be 1-64 lowercase letters, digits, '.', '-' or '_', starting alphanumeric")]
+#[error(
+    "product must be name or vendor:name, each 1-64 lowercase letters, digits, '.', '-' or '_', \
+     starting alphanumeric, without '..'"
+)]
 pub struct ParseProductError;
 
 pub(super) fn fetch(
@@ -157,7 +208,8 @@ pub(super) fn fetch(
     product: &Product,
     history: History,
 ) -> Result<Vec<Advisory>, FeedError> {
-    let key = cache_key(&product.0)?;
+    let name = product.cache_name();
+    let key = cache_key(&name)?;
     let cached: Option<ProductCache> = feeds.cache.read("nvd", key)?;
     let now = Timestamp::now();
     let window = cached
@@ -227,7 +279,7 @@ fn request_page(
     start: usize,
 ) -> Result<PageData, FeedError> {
     let url = cves_url(feeds);
-    let matcher = format!("cpe:2.3:*:*:{product}");
+    let matcher = product.matcher();
     let start_index = start;
     let start = start.to_string();
     let page_size = PAGE.to_string();
@@ -665,9 +717,26 @@ mod tests {
 
     #[test]
     fn products_are_cpe_names() {
-        for good in ["openssl", "node.js", "x11", "libxml2", "go-git", "a_b"] {
+        for good in [
+            "openssl",
+            "node.js",
+            "x11",
+            "libxml2",
+            "go-git",
+            "a_b",
+            "github:cli",
+        ] {
             assert_eq!(product(good).to_string(), good);
         }
+        assert_eq!(product("openssl").matcher(), "cpe:2.3:*:*:openssl");
+        assert_eq!(product("github:cli").matcher(), "cpe:2.3:*:github:cli");
+        assert_eq!(product("openssl").cache_name(), "openssl");
+        assert_eq!(product("github:cli").cache_name(), "github..cli");
+        assert_eq!(
+            serde_json::to_string(&product("github:cli")).unwrap(),
+            "\"github:cli\""
+        );
+
         for bad in [
             "",
             "OpenSSL",
@@ -675,7 +744,11 @@ mod tests {
             ".x",
             "a/b",
             "a b",
-            "a:b",
+            "a:b:c",
+            ":b",
+            "a:",
+            "a..b",
+            "Git:cli",
             &"a".repeat(65),
         ] {
             assert!(
@@ -683,6 +756,10 @@ mod tests {
                 "{bad:?}"
             );
         }
+        let longest = format!("{}:{}", "v".repeat(62), "n".repeat(64));
+        assert_eq!(product(&longest).cache_name().len(), 128);
+        let too_long = format!("{}:{}", "v".repeat(63), "n".repeat(64));
+        assert!(too_long.parse::<Product>().is_err());
     }
 
     #[test]
@@ -719,5 +796,42 @@ mod tests {
         assert_eq!(nvd_time(ts), "2026-11-04T20:18:52.330Z");
         assert_eq!(parse_nvd_time("2026-11-04T20:18:52.330"), Some(ts));
         assert_eq!(parse_nvd_time("garbage"), None);
+    }
+}
+
+#[cfg(test)]
+mod product_properties {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// Valid product parts: at most 1 + 2 * 30 = 61 bytes, under the 64-byte limit.
+    const PART: &str = "[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-]){0,30}";
+
+    proptest! {
+        /// Every accepted product prints back as itself and has a valid cache name.
+        #[test]
+        fn round_trips_with_a_valid_cache_name(
+            vendor in proptest::option::of(PART),
+            name in PART,
+        ) {
+            let text = vendor.as_ref().map_or_else(|| name.clone(), |v| format!("{v}:{name}"));
+            let product: Product = text.parse().unwrap();
+            prop_assert_eq!(product.to_string(), text);
+            prop_assert!(cache_key(&product.cache_name()).is_ok());
+        }
+
+        /// Two different products never share a cache file.
+        #[test]
+        fn cache_names_are_distinct(
+            a in proptest::option::of(PART), b in PART,
+            c in proptest::option::of(PART), d in PART,
+        ) {
+            let make = |v: &Option<String>, n: &str| -> Product {
+                v.as_ref().map_or_else(|| n.to_owned(), |v| format!("{v}:{n}")).parse().unwrap()
+            };
+            let (x, y) = (make(&a, &b), make(&c, &d));
+            prop_assert_eq!(x.to_string() == y.to_string(), x.cache_name() == y.cache_name());
+        }
     }
 }

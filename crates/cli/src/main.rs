@@ -7,6 +7,7 @@ use ancient_protector_core::Config;
 use ancient_protector_core::DataDir;
 use ancient_protector_core::Feeds;
 use ancient_protector_core::History;
+use ancient_protector_core::Inventory;
 use ancient_protector_core::LoadConfigError;
 use ancient_protector_core::NvdAccess;
 use ancient_protector_core::Package;
@@ -51,10 +52,16 @@ enum Command {
         /// A package as ecosystem:name, such as npm:lodash or crates.io:serde. Repeatable.
         #[arg(long = "package", value_name = "ECOSYSTEM:NAME")]
         packages: Vec<Package>,
-        /// An NVD product (CPE product name, any vendor), such as openssl. Repeatable.
-        #[arg(long = "product", value_name = "NAME")]
+        /// An NVD product, `name` (any vendor) or `vendor:name`, such as openssl or github:cli.
+        /// Repeatable.
+        #[arg(long = "product", value_name = "[VENDOR:]NAME")]
         products: Vec<Product>,
     },
+    /// List what is installed on this Mac, one JSON object per line.
+    ///
+    /// Reads macOS, Homebrew, global toolchains, and lockfiles under `mac.project_dirs` from
+    /// config.toml. Anything that could not be read is reported on stderr.
+    Inventory,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -75,6 +82,10 @@ fn main() -> anyhow::Result<()> {
         Command::Advisories { packages, products } => {
             let config = load_config(&data_dir, &home()?)?;
             advisories(&data_dir, config.history, &packages, &products)?;
+        }
+        Command::Inventory => {
+            let config = load_config(&data_dir, &home()?)?;
+            inventory(&Inventory::collect_mac(&config.project_dirs))?;
         }
     }
     Ok(())
@@ -133,6 +144,45 @@ fn advisories(
     }
 
     incomplete(failures)
+}
+
+/// Prints each component as a JSON line and reports problems and missing tools on stderr.
+///
+/// Exits non-zero when anything could not be collected or printed, so a script sees the list is
+/// incomplete. Lasting facts about this Mac that the next run would report again do not count:
+/// a Homebrew name with no NVD product, crates from a registry other than crates.io, and a
+/// problem npm reports in a global tree it still lists.
+fn inventory(inventory: &Inventory) -> anyhow::Result<()> {
+    let mut failures = 0;
+    for component in &inventory.components {
+        // A path that is not UTF-8 (possible on network or FAT volumes) cannot be JSON.
+        match serde_json::to_string(component) {
+            Ok(line) => print(&line),
+            Err(e) => {
+                failures += 1;
+                warn(&format!(
+                    "cannot print a component found in {:?}: {e}",
+                    component.found_in
+                ));
+            }
+        }
+    }
+    for problem in &inventory.problems {
+        if problem.is_failure() {
+            failures += 1;
+        }
+        warn(&error_chain(problem));
+    }
+    if !inventory.not_installed.is_empty() {
+        warn(&format!(
+            "not installed, so not checked: {}",
+            inventory.not_installed.join(", ")
+        ));
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures} inventory problem(s); the list above is incomplete");
+    }
+    Ok(())
 }
 
 /// Fails when any feed request failed, so a script sees that the printed output has gaps.
@@ -248,6 +298,28 @@ mod tests {
             err.to_string(),
             "3 feed request(s) failed; the output above is incomplete"
         );
+    }
+
+    /// A path that is not UTF-8 cannot be JSON: it is reported and fails the command.
+    #[test]
+    fn unprintable_component_is_a_failure() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/p/\xff/Cargo.lock".to_vec()));
+        let inventory = Inventory {
+            components: vec![ancient_protector_core::Component {
+                lookup: ancient_protector_core::Lookup::Package("npm:a".parse().unwrap()),
+                version: "1".into(),
+                found_in: ancient_protector_core::FoundIn::Lockfile { path },
+            }],
+            ..Inventory::default()
+        };
+        let err = super::inventory(&inventory).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "1 inventory problem(s); the list above is incomplete"
+        );
+        assert!(super::inventory(&Inventory::default()).is_ok());
     }
 
     #[test]
