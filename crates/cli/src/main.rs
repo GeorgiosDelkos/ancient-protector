@@ -96,14 +96,17 @@ fn main() -> anyhow::Result<()> {
             let config = load_config(&data_dir, &home()?)?;
             inventory(&Inventory::collect_mac(&config.project_dirs))?;
         }
-        Command::Sweep => {
-            let config = load_config(&data_dir, &home()?)?;
-            let report = sweep_mac(&data_dir, &config, &mut |p| show_progress(&p))?;
-            print(&report_markdown(&report));
-            if let Some(failure) = &report.failure {
-                anyhow::bail!("sweep incomplete: {failure}");
-            }
-        }
+        Command::Sweep => sweep(&data_dir, &load_config(&data_dir, &home()?)?)?,
+    }
+    Ok(())
+}
+
+/// Sweeps this Mac and prints the report; fails when the agent gave no valid verdict.
+fn sweep(data_dir: &DataDir, config: &Config) -> anyhow::Result<()> {
+    let report = sweep_mac(data_dir, config, &mut |p| show_progress(&p))?;
+    print(&report_markdown(&report));
+    if let Some(failure) = &report.failure {
+        anyhow::bail!("sweep incomplete: {failure}");
     }
     Ok(())
 }
@@ -139,8 +142,8 @@ fn advisories(
     if !packages.is_empty() {
         match feeds.osv(packages, history) {
             Ok(osv) => {
-                for advisory in &osv.advisories {
-                    print(&advisory.to_json_line(kev));
+                for found in &osv.advisories {
+                    print(&found.advisory.to_json_line(kev));
                 }
                 for e in &osv.failures {
                     fail("OSV record", e);

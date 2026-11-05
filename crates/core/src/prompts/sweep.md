@@ -8,9 +8,11 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   `c2`, ...), a `lookup` (an OSV package or an NVD product), the installed `version`, and
   `found_in` (where it was found: Homebrew, a lockfile path, a toolchain).
 - `advisories.jsonl`: advisories that name those components, one per line: `id`, `aliases`,
-  `summary`, the source's `severity`, the `affected` version ranges, `known_exploited` (CISA
-  KEV), the `components` it was fetched for, and `record`, the path of the full advisory.
-- `records/<id>.json`: the full advisory. Open it when the index line is not enough to decide.
+  `summary`, the source's `severity`, what is `affected` (OSV ranges and explicit versions, or
+  NVD configurations), `known_exploited` (CISA KEV), the `components` it was fetched for,
+  and `record`, the path of the full advisory.
+- `records/<source>-<id>.json` (`osv-GHSA-...json`, `nvd-CVE-...json`): the full advisory.
+  Open it when the index line is not enough to decide.
 - `findings.schema.json`: the exact shape of the file you write.
 
 ## What to do
@@ -25,7 +27,8 @@ after the user approves it.
 Write `findings.json` in this folder, following `findings.schema.json`:
 
 - List only advisories that affect an installed version. Leave out everything else.
-- Use only advisory ids from `advisories.jsonl` and component ids from `inventory.jsonl`.
+- Use only advisory ids (or their aliases) from `advisories.jsonl` and component ids from
+  `inventory.jsonl`, and name a component only for an advisory that lists it in `components`.
 - When several advisories describe the same issue for the same component (a GHSA and its
   CVE), make one finding listing all their ids, the primary one first.
 - Set `severity` from the advisory's score and this machine's context. When you choose a

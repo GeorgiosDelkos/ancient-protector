@@ -1,10 +1,11 @@
 //! The folder an agent works in for one target: prompt, inventory, advisories and schema.
 //!
 //! `advisories.jsonl` is an index, one compact line per advisory, so a product with hundreds of
-//! CVEs still fits in the agent's context; each line names `records/<id>.json`, the full record
-//! as the source served it, for when the agent needs detail. Layout: spec, "Bundle and
-//! findings".
+//! CVEs still fits in the agent's context; each line names `records/<source>-<id>.json`, the
+//! full record as the source served it, for when the agent needs detail. Layout: spec, "Bundle
+//! and findings".
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -16,6 +17,7 @@ use serde_json::json;
 use crate::feeds::Advisory;
 use crate::feeds::Kev;
 use crate::feeds::Source;
+use crate::feeds::cache_key;
 use crate::findings::Known;
 use crate::findings::SCHEMA;
 use crate::inventory::Component;
@@ -24,11 +26,16 @@ use crate::inventory::Component;
 /// sentence or two; the full text is in the record.
 const SUMMARY_LIMIT: usize = 400;
 
-/// One advisory and the ids of the components it was fetched for.
+/// The most explicit affected versions kept on an index line. Arbitrary: short lists (often
+/// the only affected set, as in malicious-package records) stay, and a longer one is replaced
+/// by its length and a pointer to the record, so the agent knows to open it.
+const VERSIONS_LIMIT: usize = 50;
+
+/// One advisory and the indexes of the components it was fetched for.
 #[derive(Debug)]
 pub(crate) struct Entry<'a> {
     pub(crate) advisory: &'a Advisory,
-    pub(crate) components: Vec<String>,
+    pub(crate) components: BTreeSet<usize>,
 }
 
 /// Writes the bundle into `dir` (created if needed) and returns what findings may refer to.
@@ -44,41 +51,65 @@ pub(crate) fn write(
 ) -> Result<Known, BundleError> {
     let io_err = |path: &Path| {
         let path = path.to_owned();
-        move |source| BundleError { path, source }
+        move |source| BundleError::Write { path, source }
     };
     let records = dir.join("records");
     fs::create_dir_all(&records).map_err(io_err(&records))?;
 
-    let mut known = Known::default();
     let mut inventory = String::new();
     for (i, component) in components.iter().enumerate() {
-        let id = component_id(i);
         let mut line = serde_json::to_value(component)
-            .expect("components hold strings and paths checked by the caller");
-        line["id"] = Value::String(id.clone());
+            .map_err(|e| io_err(&dir.join("inventory.jsonl"))(io::Error::other(e)))?;
+        line["id"] = Value::String(component_id(i));
         inventory.push_str(&line.to_string());
         inventory.push('\n');
-        known.components.insert(id);
     }
 
+    let mut known = Known {
+        components: components.len(),
+        exploited: kev.map(|_| BTreeSet::new()),
+        ..Known::default()
+    };
     let mut index = String::new();
     for entry in entries {
         let advisory = entry.advisory;
-        let record_name = format!("records/{}.json", advisory.id);
+        // Ids name files. The feeds check them already; this keeps an id that slipped past a
+        // feed from naming a path outside the bundle.
+        let id = cache_key(&advisory.id)
+            .map_err(|_| BundleError::BadId {
+                id: advisory.id.clone(),
+            })?
+            .to_owned();
+        let record_name = format!("records/{}-{id}.json", advisory.source.name());
         let record_path = dir.join(&record_name);
         fs::write(&record_path, advisory.record.get()).map_err(io_err(&record_path))?;
 
         let exploited = kev.map(|kev| advisory.is_known_exploited(kev));
-        if exploited == Some(true) {
-            known.exploited.insert(advisory.id.clone());
+        if exploited == Some(true)
+            && let Some(set) = &mut known.exploited
+        {
+            set.insert(id.clone());
         }
         let mut line = compact(advisory);
         line["known_exploited"] = json!(exploited);
-        line["components"] = json!(entry.components);
+        let ids: Vec<String> = entry.components.iter().map(|i| component_id(*i)).collect();
+        line["components"] = json!(ids);
         line["record"] = json!(record_name);
         index.push_str(&line.to_string());
         index.push('\n');
-        known.advisories.insert(advisory.id.clone());
+
+        for alias in &advisory.aliases {
+            known
+                .aliases
+                .entry(alias.clone())
+                .or_default()
+                .insert(id.clone());
+        }
+        known
+            .advisories
+            .entry(id)
+            .or_default()
+            .extend(&entry.components);
     }
 
     for (name, text) in [
@@ -101,17 +132,13 @@ pub(crate) fn component_id(i: usize) -> String {
 /// The index line for one advisory: the fields that decide whether it applies.
 fn compact(advisory: &Advisory) -> Value {
     let record: Value = serde_json::from_str(advisory.record.get()).unwrap_or(Value::Null);
-    let source = match advisory.source {
-        Source::Osv => "osv",
-        Source::Nvd => "nvd",
-    };
     let (summary, severity, affected) = match advisory.source {
         Source::Osv => osv_fields(&record),
         Source::Nvd => nvd_fields(&record),
     };
     json!({
         "id": advisory.id,
-        "source": source,
+        "source": advisory.source.name(),
         "aliases": advisory.aliases,
         "summary": truncate(&summary),
         "severity": severity,
@@ -120,9 +147,9 @@ fn compact(advisory: &Advisory) -> Value {
 }
 
 /// OSV: `summary` (or the start of `details`), `severity` (CVSS vectors) or the GitHub
-/// `database_specific.severity`, and each `affected` package with its version ranges. The
-/// explicit `versions` lists are left out: they can run to thousands of entries and the ranges
-/// say the same thing; the record has them.
+/// `database_specific.severity`, and each `affected` package with its ranges and its explicit
+/// `versions`. A version is affected when it is in a range or in `versions`, and some records
+/// have only the list, so it is kept; a long list is replaced by its length.
 fn osv_fields(record: &Value) -> (String, Value, Value) {
     let summary = record["summary"]
         .as_str()
@@ -136,17 +163,30 @@ fn osv_fields(record: &Value) -> (String, Value, Value) {
     };
     let affected = record["affected"]
         .as_array()
-        .map(|list| {
-            list.iter()
-                .map(|a| json!({"package": a["package"], "ranges": a["ranges"]}))
-                .collect()
-        })
-        .unwrap_or_default();
+        .into_iter()
+        .flatten()
+        .map(osv_affected)
+        .collect();
     (summary, severity, Value::Array(affected))
 }
 
+fn osv_affected(affected: &Value) -> Value {
+    let mut line = json!({"package": affected["package"], "ranges": affected["ranges"]});
+    match affected["versions"].as_array() {
+        Some(versions) if versions.len() > VERSIONS_LIMIT => {
+            line["versions_count"] = json!(versions.len());
+            line["versions_note"] = json!("too many to list here; read the record");
+        }
+        Some(versions) => line["versions"] = json!(versions),
+        None => {}
+    }
+    line
+}
+
 /// NVD: the English description, the newest CVSS metric present (v4.0, v3.1, v3.0, then v2),
-/// and every vulnerable CPE match with its version bounds.
+/// preferring NVD's own `Primary` score over a vendor's `Secondary` one, and the
+/// configurations with their AND/OR structure. A CVE that needs a vulnerable product on a
+/// particular platform is not a plain version range, and flattening the matches would hide that.
 fn nvd_fields(record: &Value) -> (String, Value, Value) {
     let summary = record["descriptions"]
         .as_array()
@@ -162,7 +202,12 @@ fn nvd_fields(record: &Value) -> (String, Value, Value) {
         "cvssMetricV2",
     ]
     .iter()
-    .find_map(|key| metrics[key].as_array().and_then(|list| list.first()))
+    .find_map(|key| {
+        let list = metrics[key].as_array()?;
+        list.iter()
+            .find(|m| m["type"] == "Primary")
+            .or(list.first())
+    })
     .map_or(Value::Null, |metric| {
         let data = &metric["cvssData"];
         json!({
@@ -172,29 +217,47 @@ fn nvd_fields(record: &Value) -> (String, Value, Value) {
             "vector": data["vectorString"],
         })
     });
-    let mut matches = Vec::new();
-    for config in record["configurations"].as_array().into_iter().flatten() {
-        for node in config["nodes"].as_array().into_iter().flatten() {
-            for cpe in node["cpeMatch"].as_array().into_iter().flatten() {
-                if cpe["vulnerable"] == true {
-                    let mut kept = serde_json::Map::new();
-                    for key in [
-                        "criteria",
-                        "versionStartIncluding",
-                        "versionStartExcluding",
-                        "versionEndIncluding",
-                        "versionEndExcluding",
-                    ] {
-                        if !cpe[key].is_null() {
-                            kept.insert(key.to_owned(), cpe[key].clone());
-                        }
-                    }
-                    matches.push(Value::Object(kept));
+    let configurations = record["configurations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|config| {
+            let nodes: Vec<Value> = config["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(nvd_node)
+                .collect();
+            json!({"operator": config["operator"], "nodes": nodes})
+        })
+        .collect();
+    (summary, severity, Value::Array(configurations))
+}
+
+/// A configuration node with its CPE matches, without their database ids.
+fn nvd_node(node: &Value) -> Value {
+    let matches: Vec<Value> = node["cpeMatch"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|cpe| {
+            let mut kept = serde_json::Map::new();
+            for key in [
+                "vulnerable",
+                "criteria",
+                "versionStartIncluding",
+                "versionStartExcluding",
+                "versionEndIncluding",
+                "versionEndExcluding",
+            ] {
+                if !cpe[key].is_null() {
+                    kept.insert(key.to_owned(), cpe[key].clone());
                 }
             }
-        }
-    }
-    (summary, severity, Value::Array(matches))
+            Value::Object(kept)
+        })
+        .collect();
+    json!({"operator": node["operator"], "negate": node["negate"], "cpeMatch": matches})
 }
 
 fn truncate(text: &str) -> String {
@@ -206,15 +269,28 @@ fn truncate(text: &str) -> String {
     format!("{cut}...")
 }
 
-/// A bundle file could not be written.
+/// The bundle could not be written.
 #[derive(Debug, thiserror::Error)]
-#[error("cannot write the agent bundle file {}", path.display())]
-pub struct BundleError {
-    /// The file or folder.
-    pub path: PathBuf,
-    /// The underlying error.
-    #[source]
-    pub source: io::Error,
+pub enum BundleError {
+    /// A file or folder could not be written.
+    #[error("cannot write the agent bundle file {}", path.display())]
+    Write {
+        /// The file or folder.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+    /// An advisory id is not a safe file name. The feeds reject such ids, so only a damaged
+    /// feed cache can hold one.
+    #[error(
+        "advisory id {id:?} is not a safe file name; delete the data directory's feeds folder to \
+         fetch it again"
+    )]
+    BadId {
+        /// The id.
+        id: String,
+    },
 }
 
 #[cfg(test)]
@@ -234,7 +310,7 @@ mod tests {
         }
     }
 
-    fn osv_record() -> Value {
+    fn osv_record(versions: &[String]) -> Value {
         json!({
             "id": "GHSA-1",
             "summary": "Prototype pollution in lodash",
@@ -244,9 +320,13 @@ mod tests {
                 "ranges": [{"type": "SEMVER", "events": [
                     {"introduced": "0"}, {"fixed": "4.17.21"}
                 ]}],
-                "versions": ["1.0.0", "2.0.0"]
+                "versions": versions
             }]
         })
+    }
+
+    fn versions(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("1.{i}")).collect()
     }
 
     fn nvd_record() -> Value {
@@ -256,38 +336,76 @@ mod tests {
                 {"lang": "es", "value": "No"},
                 {"lang": "en", "value": "Overflow in openssl"}
             ],
-            "metrics": {"cvssMetricV31": [{"cvssData": {
-                "version": "3.1", "baseScore": 9.8, "baseSeverity": "CRITICAL",
-                "vectorString": "CVSS:3.1/AV:N"
-            }}]},
-            "configurations": [{"nodes": [{"cpeMatch": [
-                {"vulnerable": true, "criteria": "cpe:2.3:a:openssl:openssl:*",
-                 "versionEndExcluding": "3.0.8", "matchCriteriaId": "x"},
-                {"vulnerable": false, "criteria": "cpe:2.3:o:linux:linux_kernel:*"}
-            ]}]}]
+            "metrics": {"cvssMetricV31": [
+                {"type": "Secondary", "cvssData": {"version": "3.1", "baseScore": 5.0,
+                 "baseSeverity": "MEDIUM", "vectorString": "V"}},
+                {"type": "Primary", "cvssData": {"version": "3.1", "baseScore": 9.8,
+                 "baseSeverity": "CRITICAL", "vectorString": "CVSS:3.1/AV:N"}}
+            ]},
+            "configurations": [{"operator": "AND", "nodes": [
+                {"operator": "OR", "negate": false, "cpeMatch": [
+                    {"vulnerable": true, "criteria": "cpe:2.3:a:openssl:openssl:*",
+                     "versionEndExcluding": "3.0.8", "matchCriteriaId": "x"}
+                ]},
+                {"operator": "OR", "negate": false, "cpeMatch": [
+                    {"vulnerable": false, "criteria": "cpe:2.3:o:microsoft:windows:-"}
+                ]}
+            ]}]
         })
     }
 
     #[test]
-    fn osv_and_nvd_index_lines() {
-        let osv = compact(&advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record()));
-        assert_eq!(osv["summary"], "Prototype pollution in lodash");
-        assert_eq!(osv["severity"], "HIGH");
-        assert_eq!(osv["aliases"], json!(["CVE-1"]));
-        assert_eq!(osv["affected"][0]["package"]["name"], "lodash");
-        assert!(
-            osv["affected"][0].get("versions").is_none(),
-            "versions lists are left out"
+    fn osv_index_line_keeps_ranges_and_short_version_lists() {
+        let record = osv_record(&versions(1));
+        let line = compact(&advisory(Source::Osv, "GHSA-1", &["CVE-1"], &record));
+        assert_eq!(line["summary"], "Prototype pollution in lodash");
+        assert_eq!(line["severity"], "HIGH");
+        assert_eq!(line["aliases"], json!(["CVE-1"]));
+        assert_eq!(line["source"], "osv");
+        let affected = &line["affected"][0];
+        assert_eq!(affected["package"]["name"], "lodash");
+        assert_eq!(
+            affected["versions"],
+            json!(["1.0"]),
+            "listed versions are affected too"
         );
 
-        let nvd = compact(&advisory(Source::Nvd, "CVE-2", &[], &nvd_record()));
-        assert_eq!(nvd["summary"], "Overflow in openssl");
-        assert_eq!(nvd["severity"]["score"], 9.8);
-        assert_eq!(nvd["severity"]["severity"], "CRITICAL");
+        let record = osv_record(&versions(VERSIONS_LIMIT));
+        let line = compact(&advisory(Source::Osv, "GHSA-1", &[], &record));
+        let listed = line["affected"][0]["versions"].as_array().unwrap();
+        assert_eq!(listed.len(), VERSIONS_LIMIT);
+
+        let record = osv_record(&versions(VERSIONS_LIMIT + 1));
+        let line = compact(&advisory(Source::Osv, "GHSA-1", &[], &record));
+        let affected = &line["affected"][0];
+        assert!(affected.get("versions").is_none());
+        assert_eq!(affected["versions_count"], VERSIONS_LIMIT + 1);
+        let note = affected["versions_note"].as_str().unwrap();
+        assert!(note.contains("read the record"), "{note}");
+    }
+
+    #[test]
+    fn nvd_index_line_keeps_structure_and_primary_score() {
+        let line = compact(&advisory(Source::Nvd, "CVE-2", &[], &nvd_record()));
+        assert_eq!(line["summary"], "Overflow in openssl");
+        assert_eq!(line["severity"]["score"], 9.8, "NVD's primary score");
+        assert_eq!(line["severity"]["severity"], "CRITICAL");
+        let config = &line["affected"][0];
+        assert_eq!(config["operator"], "AND");
+        let first = &config["nodes"][0]["cpeMatch"][0];
+        assert_eq!(first["versionEndExcluding"], "3.0.8");
+        assert!(first.get("matchCriteriaId").is_none());
+        let platform = &config["nodes"][1]["cpeMatch"][0];
         assert_eq!(
-            nvd["affected"],
-            json!([{"criteria": "cpe:2.3:a:openssl:openssl:*", "versionEndExcluding": "3.0.8"}])
+            platform["vulnerable"], false,
+            "the platform condition stays"
         );
+
+        let only_secondary = json!({"metrics": {"cvssMetricV31": [
+            {"type": "Secondary", "cvssData": {"baseScore": 5.0}}
+        ]}});
+        let line = compact(&advisory(Source::Nvd, "CVE-3", &[], &only_secondary));
+        assert_eq!(line["severity"]["score"], 5.0);
     }
 
     #[test]
@@ -305,9 +423,10 @@ mod tests {
             Source::Osv,
             "X-1",
             &[],
-            &json!({"details": "Long text"}),
+            &json!({"details": "Long"}),
         ));
-        assert_eq!(line["summary"], "Long text");
+        assert_eq!(line["summary"], "Long");
+        assert_eq!(line["affected"], json!([]));
     }
 
     #[test]
@@ -315,10 +434,12 @@ mod tests {
         let long = "a".repeat(SUMMARY_LIMIT + 10);
         assert_eq!(truncate(&long).chars().count(), SUMMARY_LIMIT + 3);
         assert_eq!(truncate("  short  "), "short");
+        let exact = "b".repeat(SUMMARY_LIMIT);
+        assert_eq!(truncate(&exact), exact);
     }
 
     #[test]
-    fn writes_every_file_and_returns_the_known_ids() {
+    fn writes_every_file_and_returns_what_findings_may_name() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("bundle");
         let components = vec![Component {
@@ -326,69 +447,83 @@ mod tests {
             version: "4.17.20".into(),
             found_in: FoundIn::NpmGlobal,
         }];
-        let osv = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record());
-        let entries = [Entry {
-            advisory: &osv,
-            components: vec!["c1".into()],
-        }];
+        let osv = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record(&[]));
+        let nvd = advisory(Source::Nvd, "CVE-1", &[], &nvd_record());
+        let entries = [
+            Entry {
+                advisory: &osv,
+                components: [0].into(),
+            },
+            Entry {
+                advisory: &nvd,
+                components: BTreeSet::new(),
+            },
+        ];
 
         let known = write(&dir, "Do the sweep", &components, &entries, None).unwrap();
-        assert_eq!(known.advisories, ["GHSA-1".to_owned()].into());
-        assert_eq!(known.components, ["c1".to_owned()].into());
-        assert!(known.exploited.is_empty());
+        assert_eq!(known.components, 1);
+        assert_eq!(known.advisories["GHSA-1"], [0].into());
+        assert_eq!(
+            known.aliases["CVE-1"],
+            ["GHSA-1".to_owned()].into(),
+            "kept although CVE-1 is an advisory of its own here"
+        );
+        assert!(known.exploited.is_none(), "no catalog");
 
-        assert_eq!(
-            fs::read_to_string(dir.join("PROMPT.md")).unwrap(),
-            "Do the sweep"
-        );
-        assert_eq!(
-            fs::read_to_string(dir.join("findings.schema.json")).unwrap(),
-            SCHEMA
-        );
-        let inventory: Value = serde_json::from_str(
-            fs::read_to_string(dir.join("inventory.jsonl"))
-                .unwrap()
-                .trim(),
-        )
-        .unwrap();
+        let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!(read("PROMPT.md"), "Do the sweep");
+        assert_eq!(read("findings.schema.json"), SCHEMA);
+        let inventory: Value = serde_json::from_str(read("inventory.jsonl").trim()).unwrap();
         assert_eq!(inventory["id"], "c1");
-        assert_eq!(inventory["version"], "4.17.20");
-        let index: Value = serde_json::from_str(
-            fs::read_to_string(dir.join("advisories.jsonl"))
-                .unwrap()
-                .trim(),
-        )
-        .unwrap();
-        assert_eq!(index["components"], json!(["c1"]));
-        assert_eq!(index["record"], "records/GHSA-1.json");
+        let index = read("advisories.jsonl");
+        let lines: Vec<Value> = index
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0]["components"], json!(["c1"]));
+        assert_eq!(lines[0]["record"], "records/osv-GHSA-1.json");
+        assert_eq!(
+            lines[1]["record"], "records/nvd-CVE-1.json",
+            "sources never share a file"
+        );
         assert!(
-            index["known_exploited"].is_null(),
+            lines[0]["known_exploited"].is_null(),
             "unknown without a KEV catalog"
         );
-        let record: Value =
-            serde_json::from_str(&fs::read_to_string(dir.join("records/GHSA-1.json")).unwrap())
-                .unwrap();
-        assert_eq!(record, osv_record());
+        let record: Value = serde_json::from_str(&read("records/osv-GHSA-1.json")).unwrap();
+        assert_eq!(record, osv_record(&[]));
+    }
+
+    #[test]
+    fn aliases_point_at_their_advisory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let osv = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record(&[]));
+        let entries = [Entry {
+            advisory: &osv,
+            components: [0].into(),
+        }];
+        let known = write(tmp.path(), "p", &[], &entries, None).unwrap();
+        assert_eq!(known.aliases["CVE-1"], ["GHSA-1".to_owned()].into());
     }
 
     #[test]
     fn known_exploited_comes_from_the_catalog() {
         let tmp = tempfile::tempdir().unwrap();
-        let exploited = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record());
+        let exploited = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record(&[]));
         let other = advisory(Source::Nvd, "CVE-2", &[], &nvd_record());
         let entries = [
             Entry {
                 advisory: &exploited,
-                components: vec![],
+                components: BTreeSet::new(),
             },
             Entry {
                 advisory: &other,
-                components: vec![],
+                components: BTreeSet::new(),
             },
         ];
         let kev = Kev::from_ids(&["CVE-1"]);
         let known = write(tmp.path(), "p", &[], &entries, Some(&kev)).unwrap();
-        assert_eq!(known.exploited, ["GHSA-1".to_owned()].into());
+        assert_eq!(known.exploited, Some(["GHSA-1".to_owned()].into()));
         let index = fs::read_to_string(tmp.path().join("advisories.jsonl")).unwrap();
         let lines: Vec<Value> = index
             .lines()
@@ -396,6 +531,23 @@ mod tests {
             .collect();
         assert_eq!(lines[0]["known_exploited"], true);
         assert_eq!(lines[1]["known_exploited"], false);
+    }
+
+    #[test]
+    fn unsafe_ids_never_name_a_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let evil = advisory(Source::Nvd, "../../escape", &[], &json!({}));
+        let entries = [Entry {
+            advisory: &evil,
+            components: BTreeSet::new(),
+        }];
+        let err = write(&tmp.path().join("b"), "p", &[], &entries, None).unwrap_err();
+        assert!(
+            matches!(&err, BundleError::BadId { id } if id == "../../escape"),
+            "{err:?}"
+        );
+        assert!(!tmp.path().join("escape.json").exists());
+        assert!(!tmp.path().join("nvd-../../escape.json").exists());
     }
 
     #[test]

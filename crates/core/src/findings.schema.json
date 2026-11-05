@@ -23,13 +23,13 @@
         ],
         "properties": {
           "advisories": {
-            "description": "Advisory ids from advisories.jsonl; the first is the primary one.",
+            "description": "Advisory ids (or their aliases) from advisories.jsonl, each once; the first is the primary one.",
             "type": "array",
             "minItems": 1,
             "items": { "type": "string" }
           },
           "component": {
-            "description": "The affected component's id from inventory.jsonl, such as c12.",
+            "description": "The affected component's id from inventory.jsonl, such as c12; it must be in the components of one of these advisories.",
             "type": "string"
           },
           "severity": {

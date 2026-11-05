@@ -323,6 +323,8 @@ fn request_page(
         .into_iter()
         .map(|item| {
             let header: CveHeader = decode(&url, item.cve.get())?;
+            // The id names cache and bundle files, so it gets the same check as OSV ids.
+            cache_key(&header.id)?;
             Ok((header.id, item.cve))
         })
         .collect::<Result<_, FeedError>>()?;
@@ -348,8 +350,7 @@ pub(super) fn product_known(feeds: &Feeds, product: &Product) -> Result<bool, Fe
     let key = cache_key(&name)?;
     let cached: Option<ProductCheck> = feeds.cache.read("nvd-cpe", key)?;
     if let Some(check) = cached
-        && (check.known
-            || Timestamp::now().duration_since(check.checked_at) < UNKNOWN_PRODUCT_RECHECK)
+        && check.trusted_at(Timestamp::now())
     {
         return Ok(check.known);
     }
@@ -379,6 +380,14 @@ pub(super) fn product_known(feeds: &Feeds, product: &Product) -> Result<bool, Fe
 struct ProductCheck {
     known: bool,
     checked_at: Timestamp,
+}
+
+impl ProductCheck {
+    /// Whether the cached answer still holds at `now`: a known product always, an unknown one
+    /// for less than [`UNKNOWN_PRODUCT_RECHECK`].
+    fn trusted_at(&self, now: Timestamp) -> bool {
+        self.known || now.duration_since(self.checked_at) < UNKNOWN_PRODUCT_RECHECK
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -768,6 +777,25 @@ mod tests {
     #[test]
     fn recheck_is_thirty_days() {
         assert_eq!(UNKNOWN_PRODUCT_RECHECK, SignedDuration::from_hours(720));
+        let checked_at: Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
+        let unknown = ProductCheck {
+            known: false,
+            checked_at,
+        };
+        let edge = checked_at + UNKNOWN_PRODUCT_RECHECK;
+        assert!(unknown.trusted_at(edge - SignedDuration::from_secs(1)));
+        assert!(
+            !unknown.trusted_at(edge),
+            "exactly thirty days is asked again"
+        );
+        let known = ProductCheck {
+            known: true,
+            checked_at,
+        };
+        assert!(
+            known.trusted_at(edge + UNKNOWN_PRODUCT_RECHECK),
+            "a known product for good"
+        );
     }
 
     #[test]

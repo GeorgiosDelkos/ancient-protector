@@ -12,7 +12,8 @@ use std::process::Command;
 use std::process::Output;
 
 const FAKE_AGENT: &str = r#"#!/bin/sh
-# The sweep passes on the test's one-folder PATH; this script needs cat.
+echo "path: $PATH"
+# The login shell's PATH is made up; this script needs cat.
 PATH=/usr/bin:/bin
 n=$(cat "$FAKE_AGENT_COUNTER" 2>/dev/null || echo 0)
 n=$((n + 1))
@@ -25,6 +26,8 @@ case "$FAKE_AGENT_MODE:$n" in
   retry:*) echo '{"findings": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
   silent:*) ;;
+  crash:*) exit 3 ;;
+  late-crash:*) echo '{"findings": []}' > findings.json; exit 3 ;;
 esac
 "#;
 
@@ -44,8 +47,11 @@ impl Sandbox {
         sandbox.script(
             "login-shell",
             &format!(
-                "#!/bin/sh\n# Called as: login-shell -lc 'command -v <agent>'\n\
-                 case \"$2\" in *claude) echo {} ;; *) exit 1 ;; esac\n",
+                "#!/bin/sh\n# Called as: login-shell -lc '<script that runs command -v <agent>>'\n\
+                 printf '%s\\n' __ancient_protector_path__ /login/bin:/usr/bin \
+                 __ancient_protector_binary__\n\
+                 case \"$2\" in *'command -v claude;'*) echo {} ;; esac\n\
+                 echo __ancient_protector_end__\n",
                 claude.display()
             ),
         );
@@ -125,11 +131,13 @@ fn clean_sweep_writes_bundle_and_report() {
         "{stderr}"
     );
     assert!(stderr.contains("NVD 1/1: apple:macos"), "{stderr}");
+    // The feeds are unreachable, so the verdict says it covers only what was checked.
     assert!(
-        stdout.contains("No installed component is affected"),
+        stdout.contains("No affected component among what was checked"),
         "{stdout}"
     );
     assert!(stdout.contains("## Not checked"), "{stdout}");
+    assert!(stdout.contains("NVD product apple:macos"), "{stdout}");
     assert!(stdout.contains("CISA KEV catalog"), "{stdout}");
     assert!(
         stdout.contains("not installed, so not checked: brew"),
@@ -156,7 +164,15 @@ fn clean_sweep_writes_bundle_and_report() {
         "{prompt}"
     );
     let log = fs::read_to_string(dir.join("agent-1.log")).unwrap();
-    assert!(log.contains("--dangerously-skip-permissions"), "{log}");
+    assert!(
+        log.contains("--permission-mode dontAsk"),
+        "restricted: {log}"
+    );
+    assert!(!log.contains("dangerously"), "{log}");
+    assert!(
+        log.contains("path: /login/bin:/usr/bin"),
+        "the login shell's PATH: {log}"
+    );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
     assert_eq!(report["agent"], "claude");
@@ -166,10 +182,24 @@ fn clean_sweep_writes_bundle_and_report() {
     // The prompt template is now the user's to edit.
     let template = sandbox.path().join("data/prompts/sweep.md");
     assert!(fs::read_to_string(template).unwrap().contains("{{target}}"));
-    assert!(
-        !sandbox.path().join("data/sweeps/.lock").exists(),
-        "the lock is released"
-    );
+}
+
+#[test]
+fn agent_exit_codes_decide_only_without_a_valid_file() {
+    // Valid findings count even when the agent exits non-zero after writing them.
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let out = sandbox.sweep("late-crash");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(sandbox.runs().trim(), "1");
+
+    // Without a file, a failing agent would fail again, so it is not retried.
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let out = sandbox.sweep("crash");
+    let stderr = text(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("claude exited with"), "{stderr}");
+    assert!(stderr.contains("agent-1.log"), "{stderr}");
+    assert_eq!(sandbox.runs().trim(), "1");
 }
 
 #[test]
@@ -179,9 +209,15 @@ fn rejected_findings_are_retried_once_with_the_problems() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(text(&out.stderr).contains("fixing its rejected findings"));
     assert_eq!(sandbox.runs().trim(), "2");
-    let log = fs::read_to_string(sandbox.sweep_dir().join("agent-2.log")).unwrap();
+    let dir = sandbox.sweep_dir();
+    let log = fs::read_to_string(dir.join("agent-2.log")).unwrap();
     assert!(log.contains("was rejected"), "{log}");
     assert!(log.contains("unknown field"), "{log}");
+    let rejected = fs::read_to_string(dir.join("bundle/findings.rejected.json")).unwrap();
+    assert!(
+        rejected.contains("bogus"),
+        "the first answer is kept: {rejected}"
+    );
 }
 
 #[test]

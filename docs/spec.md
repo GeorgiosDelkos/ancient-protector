@@ -23,7 +23,7 @@ and the user can approve a fix the agent then performs.
 | History window | User-chosen (`since` date or `all`); then deltas |
 | Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries |
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
-| Agent permissions | Full access (agent CLI's bypass mode) |
+| Agent permissions | Sweeps restricted: read anything, write only `findings.json`, read-only listing commands. Fixes get full access, only after the user confirms (decided 2026-11-05) |
 | Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
 | GitHub | Explicit repo list added on demand; deps, Dependabot/code/secret alerts, Actions workflows, account/org settings; auth via `gh` login |
 | Servers | Agent inspects over SSH; declared as `~/.ssh/config` alias or host/user/port/key fields |
@@ -71,8 +71,8 @@ Core modules (one concept each):
   prompts/{sweep,server-inventory,fix-plan,fix-exec}.md
   feeds/osv/<id>.json, feeds/nvd/<product>.json
   state/dismissals.json, fixes.jsonl
-  sweeps/<utc-timestamp>/<target>/{bundle/, findings.json, agent.log}
-  sweeps/<utc-timestamp>/report.{json,md}, diff.json
+  sweeps/.lock
+  sweeps/<utc-timestamp>[-n]/<target>/{bundle/, agent-1.log, agent-2.log, report.json, report.md}
 ```
 
 ### Key types (sketch, final shapes decided at the call site)
@@ -150,27 +150,37 @@ result appended to `state/fixes.jsonl` -> targeted re-check of that finding.
 
 ### Agent adapters
 
-One `match` on `AgentKind` builds the `Command` (headless flag, full-access flag, prompt as an
+One `match` on `AgentKind` builds the `Command` (headless flag, permission flags, prompt as an
 argument). Exact flags for each CLI are verified against current docs at implementation
-time, not from memory. Detection: GUI apps launched at login get a minimal `PATH`, so resolve
-binaries via the user's login shell (`$SHELL -lc 'command -v <bin>'`) at the start of each
-sweep. An agent missing or logged out is a target error with a fix hint, never a silent skip.
+time, not from memory. Detection: GUI apps launched at login get a minimal `PATH`, so the
+user's login shell (`$SHELL -lc`) prints its `PATH` and `command -v <bin>` between marker lines
+at the start of each sweep; the agent then runs with that `PATH`, so an npm-installed agent and
+the tools it calls start as in a terminal. The shell is a non-interactive login shell, so zsh
+reads `.zprofile` but not `.zshrc`: an agent whose `PATH` entry is set only in `.zshrc` (nvm
+often is) is not found, and the error says to install it. An agent missing or logged out is a target error
+with a fix hint, never a silent skip.
 
-Flags, checked 2026-11-05 against each CLI's `--help` (Codex against its source at
-`openai/codex@49f0c60`, since it is not installed here). Every agent runs with the bundle folder
-as its working directory:
+Sweeps run restricted (decided 2026-11-05): the agent may read anything, write only
+`findings.json`, and run only listing commands (`brew info`, `brew list`, `npm ls`, `npm view`,
+`cargo tree`) where the CLI can allow commands one by one. Fixes (step 7) get full access, and
+only after the user confirms the plan. Flags, checked 2026-11-05 against each CLI's `--help` and
+docs; every agent runs with the bundle folder as its working directory:
 
-| Agent | Headless call | Full access |
+| Agent | Sweep call | Verified on this Mac |
 |---|---|---|
-| `claude` | `claude -p <prompt>` | `--dangerously-skip-permissions` |
-| `grok` | `grok -p <prompt> --cwd <bundle>` | `--always-approve` |
-| `codex` | `codex exec -C <bundle> --skip-git-repo-check <prompt>` | `--dangerously-bypass-approvals-and-sandbox` |
-| `gemini` | `gemini -p <prompt>` | `--yolo` |
-| `opencode` | `opencode run --dir <bundle> <prompt>` | `--dangerously-skip-permissions` |
+| `claude` | `claude -p <prompt> --permission-mode dontAsk --allowedTools Read(//**) Edit(./findings.json) Bash(brew info *) ...` | yes: writes `findings.json`, cannot write elsewhere |
+| `grok` | `grok -p <prompt> --permission-mode default --allow Read(//**) --allow Edit(./findings.json) --deny Bash --cwd <bundle>` | yes, same check |
+| `codex` | `codex exec --sandbox workspace-write --skip-git-repo-check -C <bundle> <prompt>` | no: not installed (from its source at `openai/codex@49f0c60`) |
+| `gemini` | `gemini -p <prompt> --approval-mode auto_edit --skip-trust` | no: the free tier is refused (`IneligibleTierError`) |
+| `opencode` | `opencode run --dir <bundle> <prompt>`, permissions in `OPENCODE_CONFIG_CONTENT` | no: the local model timed out |
+
+`auto_edit` (gemini) and `workspace-write` (codex) allow edits anywhere in the bundle, not only
+`findings.json`; the bundle is the app's own copy, so that is accepted.
 
 The prompt argument is one line pointing at `PROMPT.md` in the bundle, so the real prompt is a
 file the user can read and edit (`prompts/sweep.md` in the data dir, copied from the built-in
-default on first use). The agent's stdout and stderr go to `agent.log` beside the bundle.
+default on first use). The agent's stdout and stderr go to `agent-<attempt>.log` beside the
+bundle.
 
 ### Bundle and findings (decided 2026-11-05)
 
@@ -179,22 +189,31 @@ Each target's bundle folder holds:
 - `PROMPT.md`: the rendered sweep prompt.
 - `inventory.jsonl`: one component per line with a short id (`c1`, `c2`, ...).
 - `advisories.jsonl`: one compact line per advisory: id, source, aliases, summary, source
-  severity (CVSS score and vector, or GHSA severity), affected ranges, `known_exploited`, the
-  ids of the components it was fetched for, and `record`, the path of its full record.
-- `records/<id>.json`: each advisory's full record as the source served it, opened on demand.
+  severity (CVSS score and vector, NVD's primary score first, or GHSA severity), what is
+  affected, `known_exploited`, the ids of the components whose lookup returned it, and
+  `record`, the path of its full record.
+- `records/<source>-<id>.json`: each advisory's full record as the source served it, opened
+  on demand. OSV `versions` lists of up to 50 stay on the index line; a longer one is only
+  counted there. NVD configurations keep their AND/OR structure.
 - `findings.schema.json`: the JSON Schema of `findings.json`.
 
 The agent writes `findings.json`: only advisories it judges to affect an installed version.
-Each finding names its advisory ids (which must be in `advisories.jsonl`), its component id
-(which must be in `inventory.jsonl`), a severity (`critical`, `high`, `medium`, `low`), whether
+Each finding names its advisory ids or aliases (which must be in `advisories.jsonl`), its
+component id (which must be in `inventory.jsonl` and among the components of one of those
+advisories), a severity (`critical`, `high`, `medium`, `low`), whether
 it is known exploited, a confidence (`confirmed` or `likely`), the evidence, a plain-language
 explanation, and a suggested fix (summary, steps and commands, never run during a sweep). The
 agent sets severity from the source score and this machine's context and says why when it
-differs; a known-exploited finding is raised to at least `high` by the app.
+differs. When the KEV catalog was read, it decides `known_exploited` in both directions and
+the app raises such a finding to at least `high`; without it the agent's value stands.
 
-The app validates strictly (unknown fields, unknown ids and bad enums are errors) and retries
-once with the errors appended to the prompt; a second failure marks the target failed. One
-sweep runs at a time, held by a lock file in the data dir.
+The app validates strictly (unknown fields, unknown ids, an advisory not fetched for the finding's
+component, a repeated advisory and component pair, empty text, control and invisible formatting
+characters, and bad enums are errors) and retries once with
+the errors appended to the prompt, the rejected file kept as `findings.rejected.json`; a second
+failure marks the target failed. A valid file counts even if the agent then exits non-zero; an
+agent that exits non-zero without one is not retried. One sweep runs at a time: it holds a
+`flock` on `sweeps/.lock`, which the system releases when the process ends.
 
 Homebrew products for which NVD returns no CVEs are checked once against NVD's CPE dictionary;
 a product NVD does not know is reported in the sweep report, so a wrong guessed name is visible.
@@ -243,11 +262,12 @@ not an OSV ecosystem, so formulae go through NVD.
 
 ## Risks to keep visible
 
-- Prompt injection: advisory text and repo/server content are untrusted, and the agent has
-  full access. Prompts mark the bundle data as untrusted. Per-fix confirmation is the only
-  hard gate. Revisit the permission level if this proves a problem.
-- Sweep runs have no timeout and no transcript (user's choice). `agent.log` captures stdout and
-  stderr only.
+- Prompt injection: advisory text and repo/server content are untrusted. Sweeps run
+  restricted and prompts mark the bundle data as untrusted; fixes have full access, gated by
+  per-fix confirmation. The report escapes agent text, so it cannot forge Markdown or send
+  terminal escapes.
+- Sweep runs have no timeout and no transcript (user's choice). `agent-<attempt>.log` captures
+  stdout and stderr only.
 - Agent cost: sequential per-target runs; feed pre-filtering keeps context small.
 
 ## Implementation order
