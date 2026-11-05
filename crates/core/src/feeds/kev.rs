@@ -89,7 +89,8 @@ mod tests {
         assert!(!advisory("GHSA-y", &["CVE-2024-3"]).is_known_exploited(&kev));
 
         let line: serde_json::Value =
-            serde_json::from_str(&advisory("GHSA-x", &["CVE-2024-2"]).to_json_line(&kev)).unwrap();
+            serde_json::from_str(&advisory("GHSA-x", &["CVE-2024-2"]).to_json_line(Some(&kev)))
+                .unwrap();
         assert_eq!(
             line,
             serde_json::json!({
@@ -103,8 +104,11 @@ mod tests {
             source: Source::Nvd,
             ..advisory("CVE-2024-3", &[])
         };
-        let line: serde_json::Value = serde_json::from_str(&nvd.to_json_line(&kev)).unwrap();
+        let line: serde_json::Value = serde_json::from_str(&nvd.to_json_line(Some(&kev))).unwrap();
         assert_eq!(line["source"], "nvd");
         assert_eq!(line["known_exploited"], false);
+
+        let line: serde_json::Value = serde_json::from_str(&nvd.to_json_line(None)).unwrap();
+        assert!(line["known_exploited"].is_null());
     }
 }

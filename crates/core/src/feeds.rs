@@ -100,11 +100,13 @@ impl Feeds {
     /// Sends the package names, not versions, to OSV. Fetches only records that are new or
     /// changed since they were cached.
     ///
+    /// A record that cannot be fetched (a network error, an unsafe id) is reported in
+    /// [`OsvAdvisories::failures`] and the rest are still returned.
+    ///
     /// # Errors
     ///
-    /// Fails on the first network, decoding or cache-write error, or when OSV returns an id
-    /// that is not a safe file name.
-    pub fn osv(&self, packages: &[Package], history: History) -> Result<Vec<Advisory>, FeedError> {
+    /// Fails when the id query itself fails, since then no advisory is known.
+    pub fn osv(&self, packages: &[Package], history: History) -> Result<OsvAdvisories, FeedError> {
         osv::fetch(self, packages, history)
     }
 
@@ -130,6 +132,15 @@ impl Feeds {
     pub fn kev(&self) -> Result<Kev, FeedError> {
         kev::fetch(self)
     }
+}
+
+/// The result of [`Feeds::osv`]: the advisories fetched, and the records that could not be.
+#[derive(Debug)]
+pub struct OsvAdvisories {
+    /// Advisories in the history window, in id order.
+    pub advisories: Vec<Advisory>,
+    /// One error per record that could not be fetched or cached.
+    pub failures: Vec<FeedError>,
 }
 
 /// Which database an [`Advisory`] came from.
@@ -163,8 +174,9 @@ impl Advisory {
     }
 
     /// Returns the advisory as one line of JSON: `source` (`osv` or `nvd`), `id`,
-    /// `known_exploited` (in `kev`), and the source's full `record`.
-    pub fn to_json_line(&self, kev: &Kev) -> String {
+    /// `known_exploited` (whether it is in `kev`, or `null` when the catalog could not be read),
+    /// and the source's full `record`.
+    pub fn to_json_line(&self, kev: Option<&Kev>) -> String {
         let source = match self.source {
             Source::Osv => "osv",
             Source::Nvd => "nvd",
@@ -172,7 +184,7 @@ impl Advisory {
         serde_json::json!({
             "source": source,
             "id": self.id,
-            "known_exploited": self.is_known_exploited(kev),
+            "known_exploited": kev.map(|kev| self.is_known_exploited(kev)),
             "record": self.record,
         })
         .to_string()

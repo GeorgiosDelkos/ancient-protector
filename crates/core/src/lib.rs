@@ -31,6 +31,7 @@ pub use crate::feeds::Feeds;
 pub use crate::feeds::Kev;
 pub use crate::feeds::KeychainError;
 pub use crate::feeds::NvdAccess;
+pub use crate::feeds::OsvAdvisories;
 pub use crate::feeds::ParseProductError;
 pub use crate::feeds::Product;
 pub use crate::feeds::Source;

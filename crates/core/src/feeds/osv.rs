@@ -15,6 +15,7 @@ use crate::config::History;
 use crate::feeds::Advisory;
 use crate::feeds::FeedError;
 use crate::feeds::Feeds;
+use crate::feeds::OsvAdvisories;
 use crate::feeds::Source;
 use crate::feeds::cache_key;
 use crate::feeds::http::decode;
@@ -28,11 +29,19 @@ pub(super) fn fetch(
     feeds: &Feeds,
     packages: &[Package],
     history: History,
-) -> Result<Vec<Advisory>, FeedError> {
+) -> Result<OsvAdvisories, FeedError> {
     let ids = query_ids(feeds, packages)?;
     let mut advisories = Vec::with_capacity(ids.len());
+    let mut failures = Vec::new();
     for (id, modified) in ids {
-        let (header, record) = record(feeds, &id, modified)?;
+        // One bad record must not hide the others: keep going and report it.
+        let (header, record) = match record(feeds, &id, modified) {
+            Ok(fetched) => fetched,
+            Err(e) => {
+                failures.push(e);
+                continue;
+            }
+        };
         if in_window(header.published, Some(header.modified), history) {
             advisories.push(Advisory {
                 source: Source::Osv,
@@ -43,7 +52,10 @@ pub(super) fn fetch(
             });
         }
     }
-    Ok(advisories)
+    Ok(OsvAdvisories {
+        advisories,
+        failures,
+    })
 }
 
 /// Returns the id and latest `modified` time of every advisory for `packages`.
@@ -255,7 +267,7 @@ mod tests {
         let feeds = feeds(&server, tmp.path());
         let packages = [pkg("npm:lodash"), pkg("crates.io:serde"), pkg("npm:lodash")];
 
-        let advisories = feeds.osv(&packages, History::All).unwrap();
+        let advisories = feeds.osv(&packages, History::All).unwrap().advisories;
         let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["A-1", "B-2"]);
         assert_eq!(advisories[0].aliases, ["CVE-A-1"]);
@@ -289,7 +301,7 @@ mod tests {
         let feeds = feeds(&server, tmp.path());
         let ids = |year, month| -> Vec<String> {
             let since = History::Since(Since::new(jiff::civil::date(year, month, 1)).unwrap());
-            let advisories = feeds.osv(&[pkg("npm:lodash")], since).unwrap();
+            let advisories = feeds.osv(&[pkg("npm:lodash")], since).unwrap().advisories;
             advisories.into_iter().map(|a| a.id).collect()
         };
 
@@ -324,7 +336,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let advisories = feeds(&server, tmp.path())
             .osv(&[pkg("npm:a")], History::All)
-            .unwrap();
+            .unwrap()
+            .advisories;
         assert!(advisories.is_empty());
         assert_eq!(server.requests().len(), 1);
     }
@@ -367,7 +380,8 @@ mod tests {
 
         let advisories = feeds(&server, tmp.path())
             .osv(&packages, History::All)
-            .unwrap();
+            .unwrap()
+            .advisories;
         let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["P-1", "P-2"]);
 
@@ -406,8 +420,13 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
 
-        let err = feeds.osv(&[pkg("npm:a")], History::All).unwrap_err();
-        assert!(matches!(err, FeedError::BadId { .. }), "{err:?}");
+        let osv = feeds.osv(&[pkg("npm:a")], History::All).unwrap();
+        assert!(osv.advisories.is_empty());
+        assert!(
+            matches!(osv.failures[..], [FeedError::BadId { .. }]),
+            "{:?}",
+            osv.failures
+        );
     }
 
     /// One querybatch result for `A-1`, with or without a `modified` time.
@@ -437,7 +456,8 @@ mod tests {
 
         let advisories = feeds(&server, tmp.path())
             .osv(&[pkg("npm:a")], History::All)
-            .unwrap();
+            .unwrap()
+            .advisories;
         assert_eq!(advisories[0].id, "A-1");
         assert_eq!(server.requests().len(), 2, "the record was fetched");
     }
@@ -470,11 +490,46 @@ mod tests {
             }
         });
         let tmp = tempfile::tempdir().unwrap();
-        let err = feeds(&server, tmp.path())
+        let osv = feeds(&server, tmp.path())
             .osv(&[pkg("npm:a")], History::All)
-            .unwrap_err();
-        assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
+            .unwrap();
+        assert!(osv.advisories.is_empty());
+        assert!(
+            matches!(osv.failures[..], [FeedError::Unexpected { .. }]),
+            "{:?}",
+            osv.failures
+        );
         assert!(!tmp.path().join("osv/A-1.json").exists());
+    }
+
+    #[test]
+    fn one_failing_record_does_not_hide_the_others() {
+        let server = TestServer::start(|request: &Request| match request.path() {
+            "/v1/querybatch" => {
+                let vulns = serde_json::json!([
+                    {"id": "A-1", "modified": "2026-01-01T00:00:00Z"},
+                    {"id": "B-2", "modified": "2026-01-01T00:00:00Z"},
+                ]);
+                let body = serde_json::json!({"results": [{"vulns": vulns}]});
+                (200, body.to_string())
+            }
+            "/v1/vulns/A-1" => (404, "not found".to_owned()),
+            _ => (
+                200,
+                record_json("B-2", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+            ),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let osv = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:a")], History::All)
+            .unwrap();
+        let ids: Vec<_> = osv.advisories.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["B-2"]);
+        assert!(
+            matches!(osv.failures[..], [FeedError::Status { status: 404, .. }]),
+            "{:?}",
+            osv.failures
+        );
     }
 
     #[test]
@@ -485,6 +540,7 @@ mod tests {
             feeds(&server, tmp.path())
                 .osv(&[], History::All)
                 .unwrap()
+                .advisories
                 .is_empty()
         );
         assert!(server.requests().is_empty());

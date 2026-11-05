@@ -233,28 +233,49 @@ mod tests {
         assert!(elsewhere.requests().is_empty());
     }
 
-    /// ureq's own limit counts compressed bytes; the decoded body must be capped too.
-    #[test]
-    fn decoded_size_is_capped() {
+    /// A gzip body of `len` spaces: tiny on the wire, `len` bytes once decoded.
+    fn gzip_spaces(len: u64) -> Vec<u8> {
         use std::io::Write as _;
 
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         let chunk = vec![b' '; 1024 * 1024];
-        for _ in 0..=BODY_LIMIT / (1024 * 1024) {
-            encoder.write_all(&chunk).unwrap();
+        let mut left = len;
+        while left > 0 {
+            let n = left.min(chunk.len() as u64);
+            encoder
+                .write_all(&chunk[..usize::try_from(n).unwrap()])
+                .unwrap();
+            left -= n;
         }
-        let bomb = encoder.finish().unwrap();
+        let body = encoder.finish().unwrap();
         assert!(
-            (bomb.len() as u64) < BODY_LIMIT / 100,
+            (body.len() as u64) < len / 100 + 1024,
             "the test body must be small"
         );
+        body
+    }
 
-        let server = TestServer::start_raw(move |_| {
+    fn gzip_server(body: Vec<u8>) -> TestServer {
+        TestServer::start_raw(move |_| {
             let headers = vec![("content-encoding".to_owned(), "gzip".to_owned())];
-            (200, headers, bomb.clone())
-        });
+            (200, headers, body.clone())
+        })
+    }
+
+    /// ureq's own limit counts compressed bytes; the decoded body must be capped too.
+    #[test]
+    fn decoded_size_is_capped() {
+        let server = gzip_server(gzip_spaces(BODY_LIMIT + 1));
         let err = Http::new().get(&server.url, &[], &[]).unwrap_err();
         assert!(matches!(err, FeedError::TooLarge { .. }), "{err:?}");
+
+        let server = gzip_server(gzip_spaces(BODY_LIMIT));
+        let body = Http::new().get(&server.url, &[], &[]).unwrap();
+        assert_eq!(
+            body.len() as u64,
+            BODY_LIMIT,
+            "a body of exactly the limit is accepted"
+        );
     }
 
     /// Responses of a few MB, like the KEV catalog and NVD pages, must fit under the limit.
