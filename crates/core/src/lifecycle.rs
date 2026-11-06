@@ -301,7 +301,7 @@ fn newest_first(sweeps: &Path) -> Result<Vec<PathBuf>, StateError> {
                     15 => b == b'Z',
                     _ => b.is_ascii_digit(),
                 });
-            is_stamp.then(|| ((stamp.to_owned(), n), path.clone()))
+            is_stamp.then(|| ((stamp.to_owned(), n), path))
         })
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0));
@@ -471,6 +471,10 @@ mod tests {
             &report("2026-11-05T00:00:00Z", None, &[kept], at),
         );
 
+        // Files beside sweeps and beside targets are not folders to read, even when
+        // every folder is searched for a key that is not there.
+        fs::write(data_dir.sweeps_dir().join(".lock"), "").unwrap();
+        fs::write(data_dir.sweeps_dir().join("20261105T000000Z/stray"), "").unwrap();
         assert!(matches!(
             dismiss(&data_dir, kept, " \n"),
             Err(StateError::Reason)

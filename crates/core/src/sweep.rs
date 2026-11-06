@@ -567,7 +567,12 @@ fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey
                 FoundIn::Python => "python".to_owned(),
                 FoundIn::UvTool => "uv_tool".to_owned(),
                 FoundIn::Pipx => "pipx".to_owned(),
-                FoundIn::Lockfile { path } => format!("lockfile:{}", path.to_string_lossy()),
+                // A path that is not UTF-8 is spelled by its bytes: lossy text would give two
+                // such paths one key.
+                FoundIn::Lockfile { path } => match path.to_str() {
+                    Some(path) => format!("lockfile:{path}"),
+                    None => format!("lockfile-bytes:{:x?}", path.as_os_str().as_encoded_bytes()),
+                },
                 FoundIn::OsPackage { .. } => "os_package".to_owned(),
                 FoundIn::DependencyGraph { repo } => format!("dependency_graph:{repo}"),
             };
@@ -1239,6 +1244,8 @@ pub enum SweepError {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::PermissionsExt as _;
 
     use serde_json::Value;
@@ -1424,6 +1431,17 @@ mod tests {
             finding_keys("mac", &[("GHSA-1", &one)])[0],
             "no collision, no version"
         );
+
+        // Not UTF-8, and differing only in bytes that lossy text would replace alike.
+        let raw = |bytes: &[u8]| Component {
+            found_in: FoundIn::Lockfile {
+                path: PathBuf::from(OsStr::from_bytes(bytes)),
+            },
+            ..component("crates.io:syn", "1.0.109")
+        };
+        let (ff, fe) = (raw(b"/p/\xff/Cargo.lock"), raw(b"/p/\xfe/Cargo.lock"));
+        let keys = finding_keys("mac", &[("GHSA-1", &ff), ("GHSA-1", &fe)]);
+        assert_ne!(keys[0], keys[1]);
     }
 
     fn report_finding(id: &str, severity: &str, kev: bool, lookup: &str) -> ReportFinding {
