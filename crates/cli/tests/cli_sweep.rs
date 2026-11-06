@@ -745,3 +745,110 @@ fn only_a_current_undismissed_finding_is_fixed_and_a_silent_agent_fails() {
         text(&stale.stderr)
     );
 }
+
+#[test]
+fn findings_list_what_is_open_and_one_target_can_be_swept() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    let before = sandbox.run(&["findings"]);
+    assert!(before.status.success(), "{}", text(&before.stderr));
+    assert_eq!(
+        text(&before.stdout),
+        "mac: no sweep with a verdict yet\ngithub:o/r: no sweep with a verdict yet\n"
+    );
+
+    let only = sandbox
+        .command("issue")
+        .args(["sweep", "--target", "github:o/r"])
+        .output()
+        .unwrap();
+    assert!(only.status.success(), "{}", text(&only.stderr));
+    assert_eq!(sandbox.runs().trim(), "1", "the Mac was not swept");
+    assert!(
+        !sandbox
+            .target_dir("github-o--r")
+            .parent()
+            .unwrap()
+            .join("mac")
+            .exists()
+    );
+    let key = sandbox.newest_report("github-o--r")["issues"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let listed = text(&sandbox.run(&["findings"]).stdout);
+    assert!(
+        listed.starts_with("mac: no sweep with a verdict yet\ngithub:o/r (swept "),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!(
+            "): 1 open\n  medium   {key}  file github/workflows/ci.yml\n           fix: s\n"
+        )),
+        "{listed}"
+    );
+
+    // A dismissal shows at once, with no sweep between.
+    assert!(
+        sandbox
+            .run(&["dismiss", &key, "--reason", "fine"])
+            .status
+            .success()
+    );
+    let json = text(&sandbox.run(&["findings", "--json"]).stdout);
+    let lines: Vec<serde_json::Value> = json
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{json}");
+    assert_eq!(lines[0]["target"], "mac");
+    assert!(lines[0]["swept"].is_null());
+    assert_eq!(lines[1]["open"], serde_json::json!([]));
+    assert_eq!(lines[1]["dismissed"], 1);
+
+    let unknown = sandbox
+        .command("ok")
+        .args(["sweep", "--target", "github:o/x"])
+        .output()
+        .unwrap();
+    assert!(!unknown.status.success());
+    assert!(text(&unknown.stderr).contains("github:o/x is not a configured target"));
+    let sweeps = || {
+        fs::read_dir(sandbox.path().join("data/sweeps"))
+            .unwrap()
+            .count()
+    };
+    let (folders, runs) = (sweeps(), sandbox.runs());
+    for name in ["github:o", "github:O/R", "server:web"] {
+        let out = sandbox
+            .command("ok")
+            .args(["sweep", "--target", name])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{name} matches nothing");
+    }
+    assert_eq!(
+        (sweeps(), sandbox.runs()),
+        (folders, runs),
+        "nothing ran for unknown names"
+    );
+
+    assert!(sandbox.run(&["undismiss", &key]).status.success());
+    let json = text(&sandbox.run(&["findings", "--json"]).stdout);
+    let repo: serde_json::Value = serde_json::from_str(json.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(
+        repo["open"],
+        serde_json::json!([{"key": key, "severity": "medium",
+            "title": "file github/workflows/ci.yml", "fix": "s"}])
+    );
+
+    let mac = sandbox
+        .command("ok")
+        .args(["sweep", "--target", "mac"])
+        .output()
+        .unwrap();
+    assert!(mac.status.success(), "{}", text(&mac.stderr));
+    assert!(!text(&mac.stdout).contains("# Sweep of github:o/r"));
+    let listed = text(&sandbox.run(&["findings"]).stdout);
+    assert!(listed.starts_with("mac (swept "), "{listed}");
+}

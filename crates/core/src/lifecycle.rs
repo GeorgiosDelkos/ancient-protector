@@ -23,8 +23,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
+use crate::config::Config;
+use crate::findings::Severity;
 use crate::findings::is_forging;
 use crate::paths::DataDir;
+use crate::sweep;
 
 /// The stable id of a finding or issue: 16 hex digits, the same in every sweep that finds it.
 ///
@@ -287,6 +290,80 @@ pub(crate) fn newest_verdict(
     Ok(None)
 }
 
+/// A target's open findings and issues, as its newest report with a verdict has them.
+#[derive(Debug, Serialize)]
+pub struct Latest {
+    /// The target: `mac`, `github:owner/name` or `server:name`.
+    pub target: String,
+    /// When that sweep started; `None` when the target has no report with a verdict yet.
+    pub swept: Option<Timestamp>,
+    /// The findings and issues not dismissed, most severe first.
+    pub open: Vec<Open>,
+    /// How many are dismissed.
+    pub dismissed: usize,
+}
+
+/// One open finding or issue.
+#[derive(Debug, Serialize)]
+pub struct Open {
+    /// Its key, for `dismiss` and `fix`.
+    pub key: FindingKey,
+    /// How bad it is.
+    pub severity: Severity,
+    /// One line naming it.
+    pub title: String,
+    /// One line: what the fix does.
+    pub fix: String,
+}
+
+/// Each configured target's open findings and issues, in sweep order. Whether one is
+/// dismissed comes from `state/dismissals.json`, as for `fix`, so a dismissal shows at once.
+/// Titles and fix summaries are shown as plain lines: they hold agent text and names from the
+/// target.
+///
+/// # Errors
+///
+/// Fails when a sweep folder, a report or the dismissals cannot be read.
+pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateError> {
+    let sweeps = data_dir.sweeps_dir();
+    let dismissals = Dismissals::load(data_dir)?;
+    let mut all = Vec::new();
+    for (target, dir_name) in sweep::configured_targets(config) {
+        let Some((_, saved)) = newest_verdict(&sweeps, &dir_name)? else {
+            all.push(Latest {
+                target,
+                swept: None,
+                open: Vec::new(),
+                dismissed: 0,
+            });
+            continue;
+        };
+        let (dismissed, open): (Vec<_>, Vec<_>) = saved
+            .entries()
+            .partition(|e| dismissals.get(e.key, e.modified).is_some());
+        let mut open: Vec<Open> = open
+            .into_iter()
+            .map(|e| Open {
+                key: e.key,
+                severity: e.severity,
+                title: sweep::plain(&e.title),
+                fix: e
+                    .fix
+                    .as_ref()
+                    .map_or(String::new(), |f| sweep::plain(&f.summary)),
+            })
+            .collect();
+        open.sort_by_key(|o| o.severity);
+        all.push(Latest {
+            target,
+            swept: Some(saved.started),
+            open,
+            dismissed: dismissed.len(),
+        });
+    }
+    Ok(all)
+}
+
 /// What later sweeps and commands read back from a saved `report.json`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Saved {
@@ -296,14 +373,24 @@ pub(crate) struct Saved {
     issues: Vec<SavedEntry>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SavedEntry {
     key: FindingKey,
+    severity: Severity,
+    /// Empty in a report saved before entries had titles.
+    #[serde(default)]
+    title: String,
+    fix: Option<SavedFix>,
     #[serde(default)]
     modified: Option<Timestamp>,
     /// Only whether it is there matters.
     #[serde(default)]
     dismissed: Option<IgnoredAny>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SavedFix {
+    summary: String,
 }
 
 impl SavedEntry {
@@ -399,7 +486,7 @@ pub(crate) fn newest_report(
                 continue;
             };
             if let Some(entry) = saved.entries().find(|e| e.key == key) {
-                return Ok(Some((target.join("report.json"), *entry)));
+                return Ok(Some((target.join("report.json"), entry.clone())));
             }
         }
     }
@@ -659,5 +746,49 @@ mod tests {
             Changes::since_last(sweeps, "mac", &BTreeSet::new(), &BTreeSet::new()),
             Err(StateError::Read { path, .. }) if path == broken
         ));
+    }
+
+    #[test]
+    fn latest_lists_open_entries_worst_first_with_state_dismissals_and_plain_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "[github]\nrepos = [\"o/r\"]\n").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let sweeps = data_dir.sweeps_dir();
+        let [low, high, hidden] = [1, 2, 3].map(FindingKey);
+        let entry = |key: FindingKey, severity: &str, title: &str| {
+            json!({"key": key, "severity": severity, "title": title,
+                "fix": {"summary": "up\ngrade", "steps": [], "commands": []}})
+        };
+        let report = json!({
+            "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
+            "findings": [entry(low, "low", "a\u{1b}[2Jb"), entry(hidden, "high", "h")],
+            "issues": [entry(high, "critical", "file x\u{202e}y")],
+        });
+        save(&sweeps, "20261105T000000Z/mac", &report);
+        let failed = json!({"started": "2026-11-06T00:00:00Z", "target": "mac",
+            "failure": "agent", "findings": [], "issues": []});
+        save(&sweeps, "20261106T000000Z/mac", &failed);
+        dismiss(&data_dir, hidden, "accepted").unwrap();
+
+        let all = latest(&data_dir, &config).unwrap();
+        assert_eq!(all.len(), 2, "every configured target, in sweep order");
+        let mac = &all[0];
+        assert_eq!(mac.target, "mac");
+        assert_eq!(
+            mac.swept,
+            Some("2026-11-05T00:00:00Z".parse().unwrap()),
+            "past the failure"
+        );
+        assert_eq!(mac.dismissed, 1, "dismissed in state, with no sweep since");
+        let open: Vec<_> = mac.open.iter().map(|o| (o.key, o.title.as_str())).collect();
+        assert_eq!(
+            open,
+            [(high, "file x\u{fffd}y"), (low, "a\u{fffd}[2Jb")],
+            "worst first"
+        );
+        assert_eq!(mac.open[0].fix, "up grade", "one line");
+        assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
     }
 }

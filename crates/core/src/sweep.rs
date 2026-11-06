@@ -183,6 +183,8 @@ impl Report {
 pub struct ReportFinding {
     /// Its key, the same in every sweep that finds it.
     pub key: FindingKey,
+    /// One line naming it: the advisories, the component and where it was found.
+    pub title: String,
     /// The agent's finding.
     #[serde(flatten)]
     pub finding: Finding,
@@ -199,6 +201,8 @@ pub struct ReportFinding {
 pub struct ReportIssue {
     /// Its key, the same in every sweep that finds it.
     pub key: FindingKey,
+    /// One line naming it: its subject.
+    pub title: String,
     /// The agent's issue.
     #[serde(flatten)]
     pub issue: Issue,
@@ -206,8 +210,9 @@ pub struct ReportIssue {
     pub dismissed: Option<Dismissal>,
 }
 
-/// Sweeps this Mac and every repository in `config.repos`, one after the other, with the
-/// agent named in `config`, and returns one report per target.
+/// Sweeps the targets `targets` names (this Mac, the repositories in `config.repos`, the
+/// servers in `config.servers`) one after the other, with the agent named in `config`, and
+/// returns one report per target swept.
 ///
 /// Blocks for the whole sweep: inventory commands, `gh api` calls, every feed request (NVD is
 /// paced, so the first sweep of a Mac with a hundred Homebrew formulae takes over ten minutes
@@ -215,15 +220,28 @@ pub struct ReportIssue {
 ///
 /// # Errors
 ///
-/// Fails before any agent runs when no agent is configured or found, another sweep is
-/// running, or the sweep folder cannot be written; and stops when a prompt or bundle cannot be
+/// Fails before anything runs when `targets` names no configured target, and before any agent
+/// runs when no agent is configured or found, another sweep is running, or the sweep folder
+/// cannot be written; and stops when a prompt or bundle cannot be
 /// read or written. Failures of one target (a repository that cannot be read, the agent, its
 /// findings, the report files) are recorded in that target's report instead.
 pub fn sweep(
     data_dir: &DataDir,
     config: &Config,
+    targets: Targets<'_>,
     progress: &mut dyn FnMut(Progress<'_>),
 ) -> Result<Vec<Report>, SweepError> {
+    if let Targets::Only(only) = targets
+        && !configured_targets(config).iter().any(|(t, _)| t == only)
+    {
+        return Err(SweepError::UnknownTarget {
+            target: only.to_owned(),
+        });
+    }
+    let wanted = |target: &str| match targets {
+        Targets::All => true,
+        Targets::Only(only) => only == target,
+    };
     let agent = config.agent.ok_or(SweepError::NoAgent)?;
     let located = agent.locate()?.ok_or(SweepError::AgentNotFound { agent })?;
     let sweeps = data_dir.sweeps_dir();
@@ -263,18 +281,54 @@ pub fn sweep(
     };
 
     let mut reports = Vec::new();
-    progress(Progress::Target { target: "mac" });
-    progress(Progress::Inventory);
-    let mac = collect_mac(&config.project_dirs);
-    reports.push(shared.sweep_target(&dir, mac, progress)?);
-
-    for repo in &config.repos {
+    if wanted("mac") {
+        progress(Progress::Target { target: "mac" });
+        progress(Progress::Inventory);
+        let mac = collect_mac(&config.project_dirs);
+        reports.push(shared.sweep_target(&dir, mac, progress)?);
+    }
+    for repo in config.repos.iter().filter(|r| wanted(&repo_target(r))) {
         reports.push(shared.sweep_repo(&dir, repo, progress)?);
     }
-    for server in &config.servers {
+    for server in config.servers.iter().filter(|s| wanted(&server_target(s))) {
         reports.push(shared.sweep_server(&dir, server, progress)?);
     }
     Ok(reports)
+}
+
+/// Which targets a sweep covers.
+#[derive(Debug, Clone, Copy)]
+pub enum Targets<'a> {
+    /// This Mac, every configured repository and every configured server.
+    All,
+    /// One of them, by its report name: `mac`, `github:owner/name` or `server:name`.
+    Only(&'a str),
+}
+
+/// Every configured target, in sweep order, by report name and folder name.
+pub(crate) fn configured_targets(config: &Config) -> Vec<(String, String)> {
+    let mut targets = vec![("mac".to_owned(), "mac".to_owned())];
+    for repo in &config.repos {
+        targets.push((repo_target(repo), github_dir_name(repo)));
+    }
+    for server in &config.servers {
+        targets.push((server_target(server), server_dir_name(server)));
+    }
+    targets
+}
+
+/// A repository's report name, `github:owner/name`, matched exactly by `--target`.
+fn repo_target(repo: &RepoSlug) -> String {
+    format!("github:{repo}")
+}
+
+/// A server's report name, `server:name`.
+fn server_target(server: &Server) -> String {
+    format!("server:{}", server.name)
+}
+
+fn server_dir_name(server: &Server) -> String {
+    format!("server-{}", server.name)
 }
 
 /// What every target of one sweep shares.
@@ -352,7 +406,7 @@ impl Shared<'_> {
         repo: &RepoSlug,
         progress: &mut dyn FnMut(Progress<'_>),
     ) -> Result<Report, SweepError> {
-        let target = format!("github:{repo}");
+        let target = repo_target(repo);
         let dir_name = github_dir_name(repo);
         progress(Progress::Target { target: &target });
         progress(Progress::Inventory);
@@ -382,9 +436,9 @@ impl Shared<'_> {
         server: &Server,
         progress: &mut dyn FnMut(Progress<'_>),
     ) -> Result<Report, SweepError> {
-        let target = format!("server:{}", server.name);
+        let target = server_target(server);
         // `server-` keeps a server named `mac` from sharing the Mac's folder.
-        let dir_name = format!("server-{}", server.name);
+        let dir_name = server_dir_name(server);
         progress(Progress::Target { target: &target });
         progress(Progress::Inventory);
         let started = Timestamp::now();
@@ -512,10 +566,20 @@ impl Shared<'_> {
             .zip(keys)
             .map(|(valid, key)| {
                 let modified = modified.get(valid.advisory.as_str()).copied().flatten();
+                let installed = components[valid.component].clone();
+                // Names, versions and paths come from the target; one plain line.
+                let title = plain(&format!(
+                    "{} in {} {}, {}",
+                    valid.finding.advisories.join(", "),
+                    component_name(&installed),
+                    installed.version,
+                    installed.found_in
+                ));
                 ReportFinding {
                     key,
+                    title,
                     finding: valid.finding,
-                    installed: components[valid.component].clone(),
+                    installed,
                     modified,
                     dismissed: self.dismissals.get(key, modified).cloned(),
                 }
@@ -534,6 +598,7 @@ impl Shared<'_> {
                 let key = FindingKey::new(&[target, kind, name]);
                 ReportIssue {
                     key,
+                    title: plain(&issue.subject.to_string()),
                     issue,
                     dismissed: self.dismissals.get(key, None).cloned(),
                 }
@@ -844,7 +909,7 @@ fn judge(
 /// invisible character ([`is_forging`]) becomes U+FFFD. For messages that quote the agent (a
 /// rejected id, a serde error naming its field) and reach the terminal, `report.json` or the
 /// agent's next prompt.
-fn plain(text: &str) -> String {
+pub(crate) fn plain(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' | '\r' | '\t' => ' ',
@@ -978,12 +1043,7 @@ pub fn report_markdown(report: &Report) -> String {
     let dismissed = dismissed_findings
         .iter()
         .map(|f| {
-            let what = format!(
-                "{} {} in {}",
-                f.finding.advisories.join(", "),
-                component_name(&f.installed),
-                f.installed.found_in
-            );
+            let what = &f.title;
             let reason = &f
                 .dismissed
                 .as_ref()
@@ -992,7 +1052,7 @@ pub fn report_markdown(report: &Report) -> String {
             (f.key, f.finding.severity, what, reason)
         })
         .chain(dismissed_issues.iter().map(|i| {
-            let what = i.issue.subject.to_string();
+            let what = &i.title;
             let reason = &i
                 .dismissed
                 .as_ref()
@@ -1006,7 +1066,7 @@ pub fn report_markdown(report: &Report) -> String {
         for (key, severity, what, reason) in dismissed {
             out.push_str(&format!(
                 "- {severity} {} (key {key}): {}\n",
-                escape(&what),
+                escape(what),
                 escape(reason)
             ));
         }
@@ -1204,6 +1264,15 @@ impl Lock {
 /// Error that stops a sweep before the agent runs.
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
+    /// `--target` names no configured target.
+    #[error(
+        "{target} is not a configured target; use mac, github:<owner>/<name> or \
+         server:<name> from config.toml"
+    )]
+    UnknownTarget {
+        /// The name given.
+        target: String,
+    },
     /// config.toml names no agent.
     #[error(
         "no agent chosen; set `agent` in config.toml (claude, grok, codex, gemini or opencode)"
@@ -1455,6 +1524,7 @@ mod tests {
     fn report_finding(id: &str, severity: &str, kev: bool, lookup: &str) -> ReportFinding {
         ReportFinding {
             key: FindingKey::new(&[id, lookup]),
+            title: format!("{id} in {lookup}"),
             modified: None,
             dismissed: None,
             finding: serde_json::from_value(json!({
@@ -1537,6 +1607,7 @@ mod tests {
         let with_issue = Report {
             issues: vec![ReportIssue {
                 key: FindingKey::new(&["issue"]),
+                title: "setting default_branch_protection".to_owned(),
                 issue,
                 dismissed: None,
             }],
