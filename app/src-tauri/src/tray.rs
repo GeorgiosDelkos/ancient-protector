@@ -14,6 +14,7 @@ use tauri::tray::TrayIconEvent;
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt as _;
 
+use crate::runner;
 use crate::runner::Runner;
 use crate::runner::Status;
 
@@ -91,6 +92,8 @@ pub(crate) fn refresh(app: &AppHandle) {
     drop(tray.set_tooltip(Some(look.tooltip())));
 }
 
+/// While a sweep runs this returns at once; only an idle app reads the config and reports,
+/// which keeps the refresh on every progress step cheap.
 fn look(app: &AppHandle) -> Look {
     let runner = app.state::<Runner>();
     match runner.status() {
@@ -130,5 +133,5 @@ fn toggle(app: &AppHandle) {
     drop(window.show());
     drop(window.set_focus());
     // The popover asks for fresh data whenever it is shown.
-    drop(tauri::Emitter::emit(app, "changed", ()));
+    runner::changed(app);
 }

@@ -5,6 +5,11 @@ edition.workspace = true
 publish = false
 description = "Ancient Protector's menu-bar app"
 
+[features]
+# Serves the built UI from inside the app instead of the dev server's URL. `cargo tauri build`
+# turns it on; CI turns it on to check the release configuration.
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2.7.4", features = [] }
 

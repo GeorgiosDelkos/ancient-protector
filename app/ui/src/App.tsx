@@ -4,7 +4,7 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { For, Show, createResource, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { Overview } from "./overview.ts";
-import { counts, newest, statusLine } from "./view.ts";
+import { counts, mostSevere, statusLine } from "./view.ts";
 
 /** How many findings the popover lists. Arbitrary: what fits without scrolling. */
 const LISTED = 6;
@@ -29,10 +29,18 @@ export function App() {
     }
   };
 
-  const toggleLogin = act(async () => {
-    await (login() ? disable() : enable());
-    setLogin(await isEnabled());
-  });
+  const toggleLogin = (event: Event & { currentTarget: HTMLInputElement }) => {
+    const box = event.currentTarget;
+    void act(async () => {
+      try {
+        await (login() ? disable() : enable());
+      } finally {
+        // The box shows what is set, even when changing it failed.
+        setLogin(await isEnabled());
+        box.checked = login();
+      }
+    })();
+  };
 
   return (
     <main>
@@ -54,7 +62,7 @@ export function App() {
               </For>
             </ul>
             <ul class="findings">
-              <For each={newest(o().targets, LISTED)}>
+              <For each={mostSevere(o().targets, LISTED)}>
                 {(f) => (
                   <li class={f.severity} title={`fix: ${f.fix}\nkey: ${f.key}`}>
                     <span class="severity">{f.severity}</span> {f.title}

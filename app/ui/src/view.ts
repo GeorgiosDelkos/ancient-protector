@@ -20,8 +20,11 @@ export function counts(target: Target): string {
   return parts.join(", ");
 }
 
-/** The newest findings to list: the most severe first, at most `limit`. */
-export function newest(targets: readonly Target[], limit: number): (Open & { target: string })[] {
+/** The findings to list: the most severe first, at most `limit`. */
+export function mostSevere(
+  targets: readonly Target[],
+  limit: number,
+): (Open & { target: string })[] {
   const rank: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
   return targets
     .flatMap((t) => t.open.map((o) => ({ ...o, target: t.target })))

@@ -102,6 +102,17 @@ pub enum Schedule {
     EveryHours(NonZeroU32),
 }
 
+impl fmt::Display for Schedule {
+    /// "manual", "every hour" or "every 6 hours".
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Manual => f.write_str("manual"),
+            Self::EveryHours(hours) if hours.get() == 1 => f.write_str("every hour"),
+            Self::EveryHours(hours) => write!(f, "every {hours} hours"),
+        }
+    }
+}
+
 impl Schedule {
     /// Whether a sweep is due at `now`, when the last one started at `last` (`None`: never).
     /// A sweep that failed counts as the last one, so a target that always fails is retried on
@@ -1229,5 +1240,10 @@ mod tests {
             "clock set back"
         );
         assert!(!Schedule::Manual.due(None, at("2026-11-06T00:00:00Z")));
+
+        assert_eq!(every.to_string(), "every 6 hours");
+        let hourly = Schedule::EveryHours(NonZeroU32::new(1).unwrap());
+        assert_eq!(hourly.to_string(), "every hour");
+        assert_eq!(Schedule::Manual.to_string(), "manual");
     }
 }

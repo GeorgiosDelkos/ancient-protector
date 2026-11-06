@@ -1,6 +1,6 @@
 # Run the core's and the CLI's tests against each mutant, not only the mutated package's: the
 # CLI's end-to-end tests are what exercise the core's command-running collectors. Not the
-# whole workspace: the menu-bar app builds only after its web UI is built (app.yml checks it),
-# and it holds only glue, with its decisions in the core.
+# whole workspace: the menu-bar app's release build needs its web UI built first (app.yml
+# checks it), and it holds only glue, with its decisions in the core.
 test_package = ["ancient-protector-core", "ancient-protector"]
 exclude_globs = ["app/**"]

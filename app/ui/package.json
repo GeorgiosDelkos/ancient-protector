@@ -2,7 +2,6 @@
   "name": "ancient-protector-ui",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -22,5 +21,6 @@
     "vite": "8.3.5",
     "vite-plugin-solid": "2.11.14",
     "vitest": "4.1.12"
-  }
+  },
+  "packageManager": "pnpm@10.33.0"
 }

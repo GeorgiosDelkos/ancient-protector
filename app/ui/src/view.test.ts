@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Open, Target } from "./overview.ts";
-import { counts, newest, statusLine } from "./view.ts";
+import { counts, mostSevere, statusLine } from "./view.ts";
 
 const open = (key: string, severity: Open["severity"]): Open => ({
   key,
@@ -30,13 +30,13 @@ describe("counts", () => {
   });
 });
 
-describe("newest", () => {
+describe("mostSevere", () => {
   it("lists the most severe first across targets, up to the limit", () => {
     const targets = [
       target("mac", [open("a", "low"), open("b", "high")]),
       target("github:o/r", [open("c", "critical"), open("d", "medium")]),
     ];
-    expect(newest(targets, 3).map((o) => [o.target, o.key])).toEqual([
+    expect(mostSevere(targets, 3).map((o) => [o.target, o.key])).toEqual([
       ["github:o/r", "c"],
       ["mac", "b"],
       ["github:o/r", "d"],

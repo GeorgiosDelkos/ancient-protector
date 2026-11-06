@@ -1,6 +1,7 @@
-# The menu-bar app: its web UI (lint, format, types, tests, build) and then its Rust crate,
-# which embeds the built UI and so cannot be checked before it. The other workflows leave the
-# app out (it is not a default workspace member, and cargo-mutants skips it).
+# The menu-bar app: its web UI (lint, format, types, tests, build) and then its Rust crate in
+# the release configuration (`custom-protocol`), which embeds the built UI, the CSP and the
+# capabilities, so it is checked after the UI is built. The other workflows leave the app
+# out: it is not a default workspace member, and cargo-mutants skips it.
 permissions:
   contents: read
 on:
@@ -46,7 +47,9 @@ jobs:
           components: clippy
       - name: cargo clippy
         working-directory: .
-        run: cargo clippy --locked -p ancient-protector-app --all-targets -- -D warnings
+        run: >-
+          cargo clippy --locked -p ancient-protector-app --features custom-protocol
+          --all-targets -- -D warnings
       - name: cargo test
         working-directory: .
-        run: cargo test --locked -p ancient-protector-app
+        run: cargo test --locked -p ancient-protector-app --features custom-protocol

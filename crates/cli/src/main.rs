@@ -426,10 +426,7 @@ fn summary(config: &Config) -> String {
         || "none (set `agent` in config.toml)".to_owned(),
         |a| a.to_string(),
     );
-    let schedule = match config.schedule {
-        Schedule::Manual => "manual".to_owned(),
-        Schedule::EveryHours(h) => format!("every {h} h"),
-    };
+    let schedule = config.schedule.to_string();
     let history = match config.history {
         History::All => "all".to_owned(),
         History::Since(since) => format!("since {}", since.date()),

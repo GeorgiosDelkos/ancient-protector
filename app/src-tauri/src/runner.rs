@@ -1,19 +1,24 @@
 //! Runs sweeps off the UI thread, one at a time, and on the configured schedule.
 //!
-//! [`Runner::status`] is the one piece of shared state: a single lock (CON-1) that [`start`]
-//! takes to check and claim the sweeping state in one step, so two clicks, or a click and the
-//! schedule, cannot start two sweeps. The core's own lock on the sweeps folder still guards
-//! against a sweep from the CLI; that one surfaces as a failed sweep.
+//! [`Runner`] holds the one piece of shared state behind a single lock: the status, and when
+//! the app last started a sweep. [`start`] takes it to check and claim the sweeping state in
+//! one step, so two clicks, or a click and the schedule, cannot start two sweeps. The core's
+//! own lock on the sweeps folder still guards against a sweep from the CLI; that one surfaces
+//! as a failed sweep.
 
+use std::panic;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::PoisonError;
 use std::thread;
 use std::time::Duration;
 
 use ancient_protector_core::Config;
 use ancient_protector_core::DataDir;
+use ancient_protector_core::Progress;
 use ancient_protector_core::Report;
 use ancient_protector_core::Targets;
 use ancient_protector_core::alerts;
@@ -41,21 +46,31 @@ const ALERT_LINES: usize = 3;
 pub(crate) struct Runner {
     data_dir: DataDir,
     home: PathBuf,
-    status: Mutex<Status>,
+    shared: Mutex<Shared>,
+}
+
+#[derive(Debug)]
+struct Shared {
+    status: Status,
+    /// When the app last started a sweep. A sweep that fails before it writes its folder (no
+    /// agent configured, another sweep running) leaves no trace on disk, so the schedule
+    /// counts this too, and does not retry such a sweep every minute.
+    started: Option<Timestamp>,
 }
 
 /// What the sweep is doing, as the popover and the tray icon show it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum Status {
-    /// No sweep is running; the last one, if any, had a verdict for every target.
+    /// No sweep is running, and none has failed since the app started.
     Idle,
     /// A sweep is running.
     Sweeping {
         /// Its current step, one line.
         step: String,
     },
-    /// The last sweep stopped, or a target in it got no verdict.
+    /// The last sweep stopped, a target in it got no verdict, or the schedule could not be
+    /// checked.
     Failed {
         /// Why, one line.
         error: String,
@@ -67,7 +82,10 @@ impl Runner {
         Self {
             data_dir,
             home,
-            status: Mutex::new(Status::Idle),
+            shared: Mutex::new(Shared {
+                status: Status::Idle,
+                started: None,
+            }),
         }
     }
 
@@ -80,17 +98,17 @@ impl Runner {
     }
 
     pub(crate) fn status(&self) -> Status {
-        self.lock().clone()
+        self.lock().status.clone()
     }
 
     fn set(&self, status: Status) {
-        *self.lock() = status;
+        self.lock().status = status;
     }
 
-    /// The status holds no invariant a panic could break halfway, so a poisoned lock is
-    /// used as it is (CON-8).
-    fn lock(&self) -> std::sync::MutexGuard<'_, Status> {
-        self.status.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The state holds no invariant a panic could break halfway (each field is replaced
+    /// whole), so a poisoned lock is used as it is.
+    fn lock(&self) -> MutexGuard<'_, Shared> {
+        self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -102,27 +120,39 @@ impl Runner {
 pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
     let runner = app.state::<Runner>();
     {
-        let mut status = runner.lock();
-        if matches!(*status, Status::Sweeping { .. }) {
+        let mut shared = runner.lock();
+        if matches!(shared.status, Status::Sweeping { .. }) {
             return Err("a sweep is already running");
         }
-        *status = Status::Sweeping {
+        shared.status = Status::Sweeping {
             step: "starting".to_owned(),
         };
+        shared.started = Some(Timestamp::now());
     }
     changed(app);
     let app = app.clone();
-    thread::spawn(move || run(&app));
+    thread::spawn(move || {
+        // A panic in the sweep would otherwise leave the status at sweeping for good, and
+        // every later start would be refused.
+        let status = panic::catch_unwind(AssertUnwindSafe(|| run(&app))).unwrap_or_else(|_| {
+            Status::Failed {
+                error: "the sweep stopped unexpectedly; see the system log".to_owned(),
+            }
+        });
+        app.state::<Runner>().set(status);
+        changed(&app);
+    });
     Ok(())
 }
 
-fn run(app: &AppHandle) {
+/// Runs one sweep and returns the status it leaves.
+fn run(app: &AppHandle) -> Status {
     let runner = app.state::<Runner>();
     let config_path = runner.data_dir().config_file();
     let swept = Config::load(&config_path, runner.home())
         .map_err(|e| e.to_string())
         .and_then(|config| {
-            let mut progress = |p: ancient_protector_core::Progress<'_>| {
+            let mut progress = |p: Progress<'_>| {
                 runner.set(Status::Sweeping {
                     step: p.to_string(),
                 });
@@ -131,15 +161,16 @@ fn run(app: &AppHandle) {
             sweep(runner.data_dir(), &config, Targets::All, &mut progress)
                 .map_err(|e| e.to_string())
         });
-    let status = match swept {
+    match swept {
         Ok(reports) => {
-            notify(app, &alerts(&reports));
+            if let Some((title, body)) = notification(&alerts(&reports)) {
+                // Best effort: a notification the user turned off is not an error to show.
+                drop(app.notification().builder().title(title).body(body).show());
+            }
             verdicts(&reports)
         }
         Err(error) => Status::Failed { error },
-    };
-    runner.set(status);
-    changed(app);
+    }
 }
 
 /// Idle when every target got a verdict, otherwise the first that did not, and why.
@@ -155,32 +186,30 @@ fn verdicts(reports: &[Report]) -> Status {
         .unwrap_or(Status::Idle)
 }
 
-/// Raises one notification listing the new critical and high findings, if there are any.
-fn notify(app: &AppHandle, alerts: &[String]) {
-    if alerts.is_empty() {
-        return;
-    }
+/// The title and body of the notification for `alerts`, or `None` when there are none.
+fn notification(alerts: &[String]) -> Option<(String, String)> {
+    let title = match alerts.len() {
+        0 => return None,
+        1 => "1 new critical or high finding".to_owned(),
+        n => format!("{n} new critical or high findings"),
+    };
     let mut body = alerts[..alerts.len().min(ALERT_LINES)].join("\n");
     if alerts.len() > ALERT_LINES {
         body.push_str(&format!("\nand {} more", alerts.len() - ALERT_LINES));
     }
-    let title = match alerts.len() {
-        1 => "1 new critical or high finding".to_owned(),
-        n => format!("{n} new critical or high findings"),
-    };
-    // Best effort: a notification the user turned off is not an error worth showing.
-    drop(app.notification().builder().title(title).body(body).show());
+    Some((title, body))
 }
 
 /// Tells the popover to ask again, and updates the tray icon.
-fn changed(app: &AppHandle) {
+pub(crate) fn changed(app: &AppHandle) {
     // Best effort: no window may be listening yet.
     drop(app.emit("changed", ()));
     tray::refresh(app);
 }
 
 /// Checks every [`SCHEDULE_CHECK`] whether a scheduled sweep is due, and starts it. The
-/// config is read each time, so an edit to the schedule applies without a restart.
+/// config is read each time, so an edit to the schedule applies without a restart; a config
+/// that cannot be read is shown by the popover, and the check waits for it to be fixed.
 pub(crate) fn schedule(app: AppHandle) {
     thread::spawn(move || {
         loop {
@@ -189,13 +218,46 @@ pub(crate) fn schedule(app: AppHandle) {
             let Ok(config) = Config::load(&runner.data_dir().config_file(), runner.home()) else {
                 continue;
             };
-            let Ok(last) = last_sweep_started(runner.data_dir()) else {
-                continue;
+            let on_disk = match last_sweep_started(runner.data_dir()) {
+                Ok(on_disk) => on_disk,
+                Err(e) => {
+                    runner.set(Status::Failed {
+                        error: format!("cannot check the schedule: {e}"),
+                    });
+                    changed(&app);
+                    continue;
+                }
             };
+            let last = on_disk.max(runner.lock().started);
             if config.schedule.due(last, Timestamp::now()) {
-                // Already running (from a click): this check is simply skipped.
+                // Refused only when a sweep from a click is already running; this check is
+                // then skipped.
                 start(&app).ok();
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_notification_names_up_to_three_alerts() {
+        assert_eq!(notification(&[]), None);
+        let one = vec!["mac: CVE-1".to_owned()];
+        assert_eq!(
+            notification(&one),
+            Some((
+                "1 new critical or high finding".to_owned(),
+                "mac: CVE-1".to_owned()
+            ))
+        );
+        let five: Vec<String> = (1..=5).map(|n| format!("mac: CVE-{n}")).collect();
+        let (title, body) = notification(&five).unwrap();
+        assert_eq!(title, "5 new critical or high findings");
+        assert_eq!(body, "mac: CVE-1\nmac: CVE-2\nmac: CVE-3\nand 2 more");
+        let (_, body) = notification(&five[..3]).unwrap();
+        assert!(!body.contains("more"), "{body}");
+    }
 }

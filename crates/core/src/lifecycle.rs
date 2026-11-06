@@ -413,16 +413,18 @@ impl Saved {
 ///
 /// Fails when the sweeps folder cannot be read.
 pub fn last_sweep_started(data_dir: &DataDir) -> Result<Option<Timestamp>, StateError> {
-    let newest = newest_first(&data_dir.sweeps_dir())?.into_iter().next();
-    Ok(newest.and_then(|path| {
-        let name = path.file_name()?.to_str()?;
-        // `newest_first` keeps only names that start with `YYYYMMDDTHHMMSSZ`, in UTC.
-        let civil = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%S", name.get(..15)?).ok()?;
-        civil
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .ok()
-            .map(|z| z.timestamp())
-    }))
+    // `newest_first` checks only the shape `YYYYMMDDTHHMMSSZ`; a name that is not a real time
+    // (month 13) is skipped, not taken for "never swept", which would make a sweep due at once.
+    Ok(newest_first(&data_dir.sweeps_dir())?
+        .into_iter()
+        .find_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            let civil = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%S", name.get(..15)?).ok()?;
+            civil
+                .to_zoned(jiff::tz::TimeZone::UTC)
+                .ok()
+                .map(|z| z.timestamp())
+        }))
 }
 
 /// The sweep folders under `sweeps`, newest first. A folder is named by its start second,
@@ -825,6 +827,7 @@ mod tests {
             "20261106T090000Z-2",
             "20261106T090000Z",
             "notes",
+            "20261399T000000Z",
         ] {
             fs::create_dir_all(data_dir.sweeps_dir().join(name)).unwrap();
         }

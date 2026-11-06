@@ -412,8 +412,13 @@ Built in step 9a (2026-11-06):
 - Licenses: Tauri brings in MPL-2.0 crates (cssparser, selectors and others); MPL-2.0 was
   allowed for all crates by the owner on 2026-11-06. `cargo deny` checks only the macOS
   targets, so GTK and D-Bus crates (Linux only, with open advisories) are left out.
-- CI: `app.yml` builds the UI and then lints and tests the app crate; it is not a default
-  workspace member, and cargo-mutants skips it, since it builds only after the UI does.
+- CI: `app.yml` builds the UI and then lints and tests the app crate in the release
+  configuration (`--features custom-protocol`, which embeds the built UI); it is not a
+  default workspace member, and cargo-mutants skips it. Its decisions live in the core
+  (`Schedule::due`, `alerts`, `last_sweep_started`), where they are mutation-tested.
+- The schedule also counts when the app last started a sweep, so one that fails before it
+  writes its folder (no agent chosen, a CLI sweep running) is not retried every minute; a
+  sweep that panics leaves a failed status, not a stuck "sweeping".
 - Run it: `cargo tauri dev` from `app/src-tauri` (starts the UI dev server), or `cargo tauri
   build` for `Ancient Protector.app`.
 

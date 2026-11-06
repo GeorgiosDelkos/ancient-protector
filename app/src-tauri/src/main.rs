@@ -16,7 +16,6 @@ use std::process::Command;
 use ancient_protector_core::Config;
 use ancient_protector_core::DataDir;
 use ancient_protector_core::Latest;
-use ancient_protector_core::Schedule;
 use ancient_protector_core::latest;
 use serde::Serialize;
 use tauri::ActivationPolicy;
@@ -78,7 +77,8 @@ struct Overview {
     problem: Option<String>,
 }
 
-#[tauri::command]
+// Async: Tauri runs it off the main thread, so reading every report never stalls the UI.
+#[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
@@ -103,10 +103,7 @@ fn overview(runner: State<'_, Runner>) -> Overview {
         Ok(targets) => (targets, None),
         Err(e) => (Vec::new(), Some(e.to_string())),
     };
-    let schedule = match config.schedule {
-        Schedule::Manual => "manual".to_owned(),
-        Schedule::EveryHours(hours) => format!("every {hours} hours"),
-    };
+    let schedule = config.schedule.to_string();
     Overview {
         status,
         targets,
@@ -126,8 +123,9 @@ fn sweep_now(app: AppHandle) -> Result<(), String> {
     runner::start(&app).map_err(ToString::to_string)
 }
 
-/// Opens `config.toml` in the user's text editor, creating the default one first.
-#[tauri::command]
+/// Opens `config.toml` in the user's text editor, creating the default one first. Async, so
+/// waiting for `open` never stalls the UI.
+#[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
