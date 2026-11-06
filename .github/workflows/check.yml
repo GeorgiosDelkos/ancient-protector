@@ -90,6 +90,6 @@ jobs:
         with:
           toolchain: stable
       - name: cargo build --release
-        run: cargo build --locked --release --workspace
+        run: cargo build --locked --release
         env:
           CARGO_BUILD_WARNINGS: deny

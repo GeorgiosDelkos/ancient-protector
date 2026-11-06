@@ -31,3 +31,18 @@ updates:
         update-types:
           - "patch"
           - "minor"
+  # The menu-bar app's web UI.
+  - package-ecosystem: npm
+    directory: /app/ui
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm-bump:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
