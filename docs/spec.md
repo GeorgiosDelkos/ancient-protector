@@ -391,6 +391,32 @@ not an OSV ecosystem, so formulae go through NVD.
 - Plugins: notification, autostart, positioner (versions looked up at implementation time).
 - Scheduler: in-app interval timer; skip if a sweep is running; run once on wake if overdue.
 
+Built in step 9a (2026-11-06):
+
+- Settings are shown, not edited: the popover lists the agent and schedule, and "Edit settings"
+  opens `config.toml` in the user's text editor (decided 2026-11-06), so the file stays the one
+  source of truth for the app, the CLI and agents. The config is read again on every refresh.
+- The tray icon is a coloured dot: green (nothing open), yellow, orange or red (worst open
+  severity), blue (sweeping), grey (the last sweep failed or a target got no verdict).
+- The popover (the app's one window, hidden on blur) shows the status, each target's open
+  counts by severity, the six most severe open findings with their keys and fixes on hover,
+  Sweep now, Edit settings, Launch at login (the autostart plugin's LaunchAgent) and Quit. It
+  asks the app for an overview whenever it is shown and on every `changed` event.
+- One sweep at a time: the app checks and claims "sweeping" under one lock, and the core's
+  sweeps lock still covers a CLI sweep, which then shows as a failed sweep.
+- The schedule is checked every minute (`Schedule::due` against the newest sweep folder's
+  start, failed ones included, so a failing sweep is not retried at once); a Mac that wakes
+  after a missed sweep runs it within a minute.
+- A sweep that finds new, open, critical or high findings or issues raises one notification
+  listing up to three of them (`alerts`; on a target's first sweep every such one is new).
+- Licenses: Tauri brings in MPL-2.0 crates (cssparser, selectors and others); MPL-2.0 was
+  allowed for all crates by the owner on 2026-11-06. `cargo deny` checks only the macOS
+  targets, so GTK and D-Bus crates (Linux only, with open advisories) are left out.
+- CI: `app.yml` builds the UI and then lints and tests the app crate; it is not a default
+  workspace member, and cargo-mutants skips it, since it builds only after the UI does.
+- Run it: `cargo tauri dev` from `app/src-tauri` (starts the UI dev server), or `cargo tauri
+  build` for `Ancient Protector.app`.
+
 ### CLI
 
 `ancient-protector sweep [--target <id>]`, `findings [--json]`, `dismiss <key> --reason <text>`,
@@ -437,7 +463,8 @@ toml, reqwest, clap, zip) before adding them.
    Done when both merge.
 8. CLI: `findings` and `sweep --target` (PR 10); `dismiss`, `undismiss` and `fix` came with
    step 7.
-9. Tauri app: tray, popover, window, notifications, autostart, scheduler.
+9. Tauri app: tray, popover, notifications, autostart, scheduler (PR 11, 9a); finding details
+   and fix confirmation in a window (9b).
 10. Later: signing + notarization in CI once an Apple Developer account is available.
 
 ## Verification
