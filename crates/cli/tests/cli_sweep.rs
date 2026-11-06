@@ -5,11 +5,13 @@
 //! chosen by `FAKE_AGENT_MODE`; it counts its runs in `FAKE_AGENT_COUNTER`.
 
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+use std::process::Stdio;
 
 const FAKE_AGENT: &str = r#"#!/bin/sh
 echo "path: $PATH"
@@ -34,6 +36,10 @@ case "$FAKE_AGENT_MODE:$n" in
   retry:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
   silent:*) ;;
+  partial:*) echo '{"outcome": "partial", "summary": "half"}' > result.json ;;
+  fix:*)
+    echo '{"outcome": "fixed", "summary": "pinned the action",
+      "pull_request": "https://github.com/o/r/pull/7"}' > result.json ;;
   crash:*) exit 3 ;;
   late-crash:*) echo '{"findings": [], "issues": []}' > findings.json; exit 3 ;;
 esac
@@ -128,10 +134,38 @@ impl Sandbox {
     }
 
     fn sweep(&self, mode: &str) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+        self.command(mode)
+            .arg("sweep")
+            .output()
+            .expect("the test binary was built by cargo")
+    }
+
+    /// Runs `fix` with `args`, answering `answer` to its question.
+    fn fix(&self, args: &[&str], answer: &str) -> Output {
+        let mut child = self
+            .command("fix")
+            .arg("fix")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the test binary was built by cargo");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(answer.as_bytes())
+            .expect("the CLI reads its answer");
+        child.wait_with_output().expect("the CLI finishes")
+    }
+
+    /// The CLI with the sandbox's home, tools and data directory, the fake agent in `mode`.
+    fn command(&self, mode: &str) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ancient-protector"));
+        command
             .arg("--data-dir")
             .arg(self.path().join("data"))
-            .arg("sweep")
             .env("HOME", self.path())
             .env("PATH", self.bin())
             .env("SHELL", self.path().join("login-shell"))
@@ -142,9 +176,8 @@ impl Sandbox {
             .env_remove("HTTPS_PROXY")
             .env_remove("HTTP_PROXY")
             .env_remove("NO_PROXY")
-            .env_remove("no_proxy")
-            .output()
-            .expect("the test binary was built by cargo")
+            .env_remove("no_proxy");
+        command
     }
 
     /// Runs the CLI with `args` against the sandbox's data directory.
@@ -157,9 +190,8 @@ impl Sandbox {
             .expect("the test binary was built by cargo")
     }
 
-    /// `report.json` of `target` in the newest sweep folder. Folder names are start times,
-    /// then `-2` and so on within one second; by name alone `-10` would sort before `-9`.
-    fn newest_report(&self, target: &str) -> serde_json::Value {
+    /// The path of `report.json` of `target` in the newest sweep folder.
+    fn newest_report_path(&self, target: &str) -> PathBuf {
         let mut dirs: Vec<_> = fs::read_dir(self.path().join("data/sweeps"))
             .expect("a sweep wrote its folder")
             .filter_map(Result::ok)
@@ -181,11 +213,16 @@ impl Sandbox {
                 None => (name, 1),
             }
         });
-        let report = dirs
-            .last()
+        dirs.last()
             .expect("a sweep ran")
             .join(target)
-            .join("report.json");
+            .join("report.json")
+    }
+
+    /// `report.json` of `target` in the newest sweep folder. Folder names are start times,
+    /// then `-2` and so on within one second; by name alone `-10` would sort before `-9`.
+    fn newest_report(&self, target: &str) -> serde_json::Value {
+        let report = self.newest_report_path(target);
         serde_json::from_str(&fs::read_to_string(report).expect("the report was saved"))
             .expect("the report is JSON")
     }
@@ -522,5 +559,189 @@ fn dismissals_hold_across_sweeps_and_changes_are_counted() {
     assert!(
         problems.contains("dismissals, so dismissed findings show again: cannot read"),
         "{problems}"
+    );
+}
+
+#[test]
+fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    assert!(sandbox.sweep("issue").status.success());
+    let report = sandbox.newest_report("github-o--r");
+    let key = report["issues"][0]["key"].as_str().unwrap().to_owned();
+    let runs = sandbox.runs();
+
+    for answer in ["n\n", ""] {
+        let declined = sandbox.fix(&[&key], answer);
+        assert!(!declined.status.success(), "{answer:?} is not a yes");
+        let stdout = text(&declined.stdout);
+        assert!(
+            stdout.starts_with(&format!(
+                "Fix {key} on the GitHub repository o/r, as a pull request (found by the sweep of \
+                 {}): s\n",
+                report["started"].as_str().unwrap()
+            )),
+            "{stdout}"
+        );
+        let stderr = text(&declined.stderr);
+        assert!(stderr.contains("Run this fix now with claude, with full access? [y/N]"));
+        assert!(
+            stderr.contains("not confirmed; nothing was run"),
+            "{stderr}"
+        );
+    }
+    assert_eq!(sandbox.runs(), runs, "the agent did not run");
+    assert!(!sandbox.path().join("data/state/fixes.jsonl").exists());
+
+    let out = sandbox.fix(&[&key], "y\n");
+    let stdout = text(&out.stdout);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(stdout.contains("fixed: pinned the action"), "{stdout}");
+    assert!(
+        stdout.contains("pull request: https://github.com/o/r/pull/7"),
+        "{stdout}"
+    );
+
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(history.trim()).unwrap();
+    assert_eq!(record["key"], key.as_str());
+    assert_eq!(record["target"], "github:o/r");
+    assert_eq!(record["outcome"], "fixed");
+    assert_eq!(record["confirmed"], "asked");
+    let dir = PathBuf::from(record["dir"].as_str().unwrap());
+    assert!(
+        dir.starts_with(sandbox.path().join("data/fixes")),
+        "{}",
+        dir.display()
+    );
+    let log = fs::read_to_string(dir.join("agent.log")).unwrap();
+    assert!(log.contains("--permission-mode bypassPermissions"), "{log}");
+    let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap();
+    assert!(
+        prompt.contains(&format!("ancient-protector/fix-{key}")),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("{{"),
+        "every placeholder is filled: {prompt}"
+    );
+    let brief: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("fix.json")).unwrap()).unwrap();
+    assert_eq!(brief["subject"]["file"], "github/workflows/ci.yml");
+    assert!(
+        brief.get("evidence").is_none(),
+        "the sweep's prose stays out: {brief}"
+    );
+
+    // `--yes` asks nothing; a second run in the same second gets its own folder.
+    let again = sandbox.fix(&[&key, "--yes"], "");
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    assert!(!text(&again.stderr).contains("[y/N]"));
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    let dirs: Vec<String> = history
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["dir"].to_string())
+        .collect();
+    assert_eq!(dirs.len(), 2);
+    let last: serde_json::Value = serde_json::from_str(history.lines().last().unwrap()).unwrap();
+    assert_eq!(last["confirmed"], "yes_flag");
+    assert_ne!(dirs[0], dirs[1]);
+
+    let unknown = sandbox.fix(&["0123456789abcdef", "--yes"], "");
+    assert!(!unknown.status.success());
+    assert!(text(&unknown.stderr).contains("no report has finding 0123456789abcdef"));
+}
+
+#[test]
+fn only_a_current_undismissed_finding_is_fixed_and_a_silent_agent_fails() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    assert!(sandbox.sweep("issue").status.success());
+    let key = sandbox.newest_report("github-o--r")["issues"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let silent = sandbox
+        .command("silent")
+        .args(["fix", &key, "--yes"])
+        .output()
+        .unwrap();
+    assert!(!silent.status.success());
+    assert!(
+        text(&silent.stdout).contains("unknown: no result.json"),
+        "{}",
+        text(&silent.stdout)
+    );
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    assert!(history.contains(r#""outcome":"unknown""#), "{history}");
+    let partial = sandbox
+        .command("partial")
+        .args(["fix", &key, "--yes"])
+        .output()
+        .unwrap();
+    assert!(!partial.status.success(), "only fixed counts as done");
+    assert!(text(&partial.stderr).contains("the fix did not finish: partial, agent exit code 0"));
+
+    assert!(
+        sandbox
+            .run(&["dismiss", &key, "--reason", "accepted"])
+            .status
+            .success()
+    );
+    let dismissed = sandbox.fix(&[&key, "--yes"], "");
+    assert!(
+        text(&dismissed.stderr).contains(&format!("{key} is dismissed")),
+        "dismissed now, with no sweep since: {}",
+        text(&dismissed.stderr)
+    );
+    assert!(sandbox.run(&["undismiss", &key]).status.success());
+
+    // A report edited to carry the heredoc's end word is refused before anything runs.
+    let report = sandbox.newest_report_path("github-o--r");
+    let edited = fs::read_to_string(&report).unwrap().replace(
+        r#""commands": []"#,
+        r#""commands": ["ANCIENT_PROTECTOR_END"]"#,
+    );
+    fs::write(&report, &edited).unwrap();
+    let malformed = sandbox.fix(&[&key, "--yes"], "");
+    assert!(
+        text(&malformed.stderr).contains("ANCIENT_PROTECTOR_END is reserved"),
+        "{}",
+        text(&malformed.stderr)
+    );
+
+    // An agent that cannot start is still recorded.
+    assert!(sandbox.sweep("issue").status.success());
+    sandbox.script("agents/claude", "#!/no/such/interpreter\n");
+    let broken = sandbox.fix(&[&key, "--yes"], "");
+    assert!(!broken.status.success());
+    assert!(text(&broken.stdout).contains("unknown: the agent did not run: cannot start claude"));
+    sandbox.script("agents/claude", FAKE_AGENT);
+
+    // With no agent configured, nothing is asked.
+    fs::write(
+        sandbox.path().join("data/config.toml"),
+        "[github]\nrepos = [\"o/r\"]\n",
+    )
+    .unwrap();
+    let no_agent = sandbox.fix(&[&key], "y\n");
+    assert!(
+        text(&no_agent.stderr).contains("no agent chosen"),
+        "{}",
+        text(&no_agent.stderr)
+    );
+    assert!(!text(&no_agent.stderr).contains("[y/N]"));
+    fs::write(
+        sandbox.path().join("data/config.toml"),
+        "agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n",
+    )
+    .unwrap();
+
+    assert!(sandbox.sweep("ok").status.success());
+    let stale = sandbox.fix(&[&key, "--yes"], "");
+    assert!(!stale.status.success());
+    assert!(
+        text(&stale.stderr).contains(&format!("no longer found {key}; nothing to fix")),
+        "{}",
+        text(&stale.stderr)
     );
 }

@@ -160,11 +160,10 @@ pub fn undismiss(data_dir: &DataDir, key: FindingKey) -> Result<Dismissal, State
     })
 }
 
-/// Changes the dismissals under `state/.lock` and writes them back whole, unless `change`
-/// fails. Returns what `change` returned.
-fn update<T>(
+/// Runs `change` holding `state/.lock`, which every write to the state folder takes.
+pub(crate) fn locked<T>(
     data_dir: &DataDir,
-    change: impl FnOnce(&mut BTreeMap<FindingKey, Dismissal>) -> Result<T, StateError>,
+    change: impl FnOnce(&Path) -> Result<T, StateError>,
 ) -> Result<T, StateError> {
     let state = data_dir.state_dir();
     let write_err = |path: &Path| {
@@ -179,9 +178,28 @@ fn update<T>(
         .write(true)
         .open(&lock_path)
         .map_err(write_err(&lock_path))?;
-    // Blocks: the other holder is a dismiss or undismiss command, which takes milliseconds.
+    // Blocks: every holder writes one small file and lets go within milliseconds.
     lock.lock().map_err(write_err(&lock_path))?;
+    change(&state)
+}
 
+/// Changes the dismissals under `state/.lock` and writes them back whole, unless `change`
+/// fails. Returns what `change` returned.
+fn update<T>(
+    data_dir: &DataDir,
+    change: impl FnOnce(&mut BTreeMap<FindingKey, Dismissal>) -> Result<T, StateError>,
+) -> Result<T, StateError> {
+    locked(data_dir, |state| write_dismissals(state, change))
+}
+
+fn write_dismissals<T>(
+    state: &Path,
+    change: impl FnOnce(&mut BTreeMap<FindingKey, Dismissal>) -> Result<T, StateError>,
+) -> Result<T, StateError> {
+    let write_err = |path: &Path| {
+        let path = path.to_owned();
+        move |source| StateError::Write { path, source }
+    };
     let path = state.join(DISMISSALS);
     let mut all = read_dismissals(&path)?;
     let changed = change(&mut all)?;
@@ -195,7 +213,7 @@ fn update<T>(
         })
         .and_then(|()| fs::rename(&partial, &path))
         // Syncs the folder too, so a crash after this returns cannot undo the rename.
-        .and_then(|()| fs::File::open(&state)?.sync_all())
+        .and_then(|()| fs::File::open(state)?.sync_all())
         .map_err(write_err(&path))?;
     Ok(changed)
 }
@@ -236,45 +254,63 @@ impl Changes {
         active: &BTreeSet<FindingKey>,
         all: &BTreeSet<FindingKey>,
     ) -> Result<Option<Self>, StateError> {
-        for sweep in newest_first(sweeps)? {
-            let Some(last) = read_saved(&sweep.join(dir_name))? else {
-                continue;
-            };
-            if last.failure.is_some() {
-                continue;
-            }
-            let before: BTreeSet<FindingKey> = last
-                .entries()
-                .filter(|e| e.dismissed.is_none())
-                .map(|e| e.key)
-                .collect();
-            return Ok(Some(Self {
-                since: last.started,
-                new: active.difference(&before).copied().collect(),
-                resolved: before.difference(all).copied().collect(),
-            }));
-        }
-        Ok(None)
+        let Some((_, last)) = newest_verdict(sweeps, dir_name)? else {
+            return Ok(None);
+        };
+        let before: BTreeSet<FindingKey> = last
+            .entries()
+            .filter(|e| e.dismissed.is_none())
+            .map(|e| e.key)
+            .collect();
+        Ok(Some(Self {
+            since: last.started,
+            new: active.difference(&before).copied().collect(),
+            resolved: before.difference(all).copied().collect(),
+        }))
     }
+}
+
+/// The newest `<sweep>/<dir_name>/report.json` with a verdict, with its contents.
+pub(crate) fn newest_verdict(
+    sweeps: &Path,
+    dir_name: &str,
+) -> Result<Option<(PathBuf, Saved)>, StateError> {
+    for sweep in newest_first(sweeps)? {
+        let dir = sweep.join(dir_name);
+        let Some(saved) = read_saved(&dir)? else {
+            continue;
+        };
+        if saved.failure.is_none() {
+            return Ok(Some((dir.join("report.json"), saved)));
+        }
+    }
+    Ok(None)
 }
 
 /// What later sweeps and commands read back from a saved `report.json`.
 #[derive(Debug, Deserialize)]
-struct Saved {
-    started: Timestamp,
+pub(crate) struct Saved {
+    pub(crate) started: Timestamp,
     failure: Option<String>,
     findings: Vec<SavedEntry>,
     issues: Vec<SavedEntry>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-struct SavedEntry {
+pub(crate) struct SavedEntry {
     key: FindingKey,
     #[serde(default)]
     modified: Option<Timestamp>,
     /// Only whether it is there matters.
     #[serde(default)]
     dismissed: Option<IgnoredAny>,
+}
+
+impl SavedEntry {
+    /// Its advisory's `modified` time, as the report had it.
+    pub(crate) fn modified(&self) -> Option<Timestamp> {
+        self.modified
+    }
 }
 
 impl Saved {
@@ -349,13 +385,21 @@ fn folders(dir: &Path) -> Result<Vec<PathBuf>, StateError> {
 
 /// The entry for `key` in the newest report that has it.
 fn newest(sweeps: &Path, key: FindingKey) -> Result<Option<SavedEntry>, StateError> {
+    Ok(newest_report(sweeps, key)?.map(|(_, entry)| entry))
+}
+
+/// The newest `report.json` with a verdict that has `key`, with the entry.
+pub(crate) fn newest_report(
+    sweeps: &Path,
+    key: FindingKey,
+) -> Result<Option<(PathBuf, SavedEntry)>, StateError> {
     for sweep in newest_first(sweeps)? {
         for target in folders(&sweep)? {
-            let Some(saved) = read_saved(&target)? else {
+            let Some(saved) = read_saved(&target)?.filter(|s| s.failure.is_none()) else {
                 continue;
             };
             if let Some(entry) = saved.entries().find(|e| e.key == key) {
-                return Ok(Some(*entry));
+                return Ok(Some((target.join("report.json"), *entry)));
             }
         }
     }

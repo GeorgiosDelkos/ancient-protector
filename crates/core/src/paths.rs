@@ -43,6 +43,11 @@ impl DataDir {
         self.root.join("state")
     }
 
+    /// Returns the folder holding one subfolder per fix run.
+    pub(crate) fn fixes_dir(&self) -> PathBuf {
+        self.root.join("fixes")
+    }
+
     /// Returns the folder of user-editable prompt templates.
     pub(crate) fn prompts_dir(&self) -> PathBuf {
         self.root.join("prompts")

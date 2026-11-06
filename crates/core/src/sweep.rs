@@ -62,10 +62,11 @@ use crate::server;
 /// Which built-in prompt a target uses. Each is copied to the data directory's `prompts/`
 /// folder on first use, so the user can edit it.
 #[derive(Debug, Clone, Copy)]
-enum Prompt {
+pub(crate) enum Prompt {
     Mac,
     GitHub,
     Server,
+    Fix,
 }
 
 impl Prompt {
@@ -74,6 +75,7 @@ impl Prompt {
             Self::Mac => "sweep.md",
             Self::GitHub => "sweep-github.md",
             Self::Server => "sweep-server.md",
+            Self::Fix => "fix.md",
         }
     }
 
@@ -82,11 +84,12 @@ impl Prompt {
             Self::Mac => include_str!("prompts/sweep.md"),
             Self::GitHub => include_str!("prompts/sweep-github.md"),
             Self::Server => include_str!("prompts/sweep-server.md"),
+            Self::Fix => include_str!("prompts/fix.md"),
         }
     }
 }
 
-/// How many sweep folders may share one start second before the sweep gives up. Arbitrary:
+/// How many sweep or fix folders may share one start second before the run gives up. Arbitrary:
 /// sweeps run one at a time and each takes seconds at least, so two is already rare.
 const SAME_SECOND_LIMIT: u32 = 100;
 
@@ -605,15 +608,20 @@ fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey
 /// Creates `<sweeps>/<start time>`, or `<start time>-2` and so on when an earlier sweep
 /// started in the same second.
 fn create_sweep_dir(sweeps: &Path, started: Timestamp) -> Result<PathBuf, SweepError> {
-    let stamp = started.strftime("%Y%m%dT%H%M%SZ").to_string();
+    create_unique_dir(sweeps, &started.strftime("%Y%m%dT%H%M%SZ").to_string())
+}
+
+/// Creates `<parent>/<stamp>`, or `<stamp>-2` and so on when that exists: a run never reuses
+/// an earlier run's folder, whose files it would mix with its own.
+pub(crate) fn create_unique_dir(parent: &Path, stamp: &str) -> Result<PathBuf, SweepError> {
     let mut last = None;
     for n in 1..=SAME_SECOND_LIMIT {
         let name = if n == 1 {
-            stamp.clone()
+            stamp.to_owned()
         } else {
             format!("{stamp}-{n}")
         };
-        let path = sweeps.join(name);
+        let path = parent.join(name);
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some((path, e)),
@@ -860,7 +868,7 @@ fn target_name(inventory: &Inventory) -> String {
 
 /// The user's copy of `kind`'s prompt, created from the built-in one on first use, with the
 /// target filled in.
-fn prompt(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<String, SweepError> {
+pub(crate) fn prompt(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<String, SweepError> {
     let dir = data_dir.prompts_dir();
     let path = dir.join(kind.file_name());
     let template = match fs::read_to_string(&path) {
@@ -1149,7 +1157,7 @@ fn component_name(component: &Component) -> String {
 }
 
 /// Renders an error and its sources as `outer: inner`.
-fn error_chain(error: &impl std::error::Error) -> String {
+pub(crate) fn error_chain(error: &impl std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(e) = source {
@@ -1164,12 +1172,12 @@ fn error_chain(error: &impl std::error::Error) -> String {
 /// The file is never deleted: a sweep that deleted it could let the next one lock a new file of
 /// the same name while a third still holds the old one.
 #[derive(Debug)]
-struct Lock {
+pub(crate) struct Lock {
     _file: fs::File,
 }
 
 impl Lock {
-    fn acquire(sweeps: &Path) -> Result<Self, SweepError> {
+    pub(crate) fn acquire(sweeps: &Path) -> Result<Self, SweepError> {
         let path = sweeps.join(".lock");
         let write_err = |source| SweepError::Write {
             path: path.clone(),

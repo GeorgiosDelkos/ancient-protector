@@ -72,6 +72,7 @@ Core modules (one concept each):
   feeds/osv/<id>.json, feeds/nvd/<product>.json
   state/.lock, state/dismissals.json, state/fixes.jsonl
   sweeps/.lock
+  fixes/<utc-timestamp>-<key>/{PROMPT.md, fix.json, result.schema.json, agent.log, result.json}
   sweeps/<utc-timestamp>[-n]/<target>/{bundle/, agent-1.log, agent-2.log, report.json, report.md}
     (<target> is `mac`, `github-<owner>--<name>` or `server-<name>`)
 ```
@@ -113,7 +114,7 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   is a note. Accepted
   downside: a source that fails (OSV offline) makes its findings show as resolved; the report
   lists the failed source under "Not checked".
-- Fixes (PR 9): the fix in the sweep's finding is the plan the user confirms; there is no
+- Fixes: the fix in the sweep's finding is the plan the user confirms; there is no
   separate planning run. A confirmed fix is one agent run with full access and the `fix`
   prompt. A GitHub fix works in a fresh clone, on a new branch, and opens a pull request; a
   server fix may run ssh to that one server, with the sweep's ssh options. Each fix is appended
@@ -236,11 +237,44 @@ Issues on a server name a file (`server/listening.txt`); there are no settings.
 
 ### Fix flow
 
-Fix click -> the finding's fix (steps + exact commands) shown in the details window -> user
-confirms -> agent run with the `fix` prompt and the confirmed fix, full access -> result
+Fix click (or `ancient-protector fix <key>`) -> the finding's fix (steps + exact commands)
+from the newest report that has the key, shown in the details window -> user confirms (`--yes`
+for scripts that already showed it) -> agent run with the `fix` prompt, full access -> result
 appended to `state/fixes.jsonl` -> the next sweep checks the finding again. Decided 2026-11-06
 (see "Lifecycle"): no separate planning run; GitHub fixes open a pull request; server fixes may
 use ssh.
+
+- Before asking, everything that can be checked is: the key is in the newest report of its
+  target with a verdict (a newer sweep without it means it is gone, and an old fix could
+  downgrade a package), it is not dismissed, its fix passes the sweep's text checks again, the
+  target is still in `config.toml`, and the agent is installed. The question shows where the
+  fix runs (for a server, the exact ssh command) and when the sweep found it. A summary is
+  shown on one line, so it cannot pass for a command. Not confirming exits non-zero.
+- The agent gets `fix.json` with the key, target, severity, advisories or subject, the
+  installed component and the fix, not the sweep's evidence and explanation: those were
+  written from untrusted advisory text and files, and the user confirmed the fix, not them.
+  When a confirmed command fails, the agent may adapt it to reach the same goal (decided
+  2026-11-06 for servers: "so it can adapt when a command fails"), and the prompt forbids
+  anything the fix does not name.
+- Each run has a new folder `fixes/<utc-timestamp>-<key>[-n]/`: `PROMPT.md` (the user's
+  `prompts/fix.md` with the target and where to work filled in), `fix.json` (the report entry), the schema of
+  `result.json`, the agent's `agent.log`, and `result.json`, which the agent writes: `outcome`
+  (`fixed`, `partial`, `failed`), a one-line `summary`, and for a repository the
+  `pull_request` URL (`https://github.com/<owner>/<name>/pull/<number>` of that repository
+  only).
+- Where to work: this Mac; for a repository, a clone in the fix folder, a branch
+  `ancient-protector/fix-<key>`, and a pull request (never a push to the default branch); for a
+  server, every command through `ssh` with the sweep's options to that one host, carried to the
+  server's `sh -s` in a quoted heredoc, so a quote in a command cannot end the ssh line and run
+  the rest on the Mac. Accepted risk: a repository fix lets the full-access agent read the
+  clone, which may hold agent instruction files; the repositories are the user's own, and the
+  agent's project settings and hooks come from its working folder, the fix folder.
+- `state/fixes.jsonl` gets one line per run: key, target, agent, start and end, exit code,
+  outcome (`unknown` when `result.json` is missing or invalid or the agent did not start, with
+  why), summary, pull request, how it was confirmed (`asked` or `yes_flag`), folder. Appends
+  take `state/.lock`; a last line cut short by a crash is ended first. The CLI exits non-zero
+  unless the outcome is `fixed` and the agent exited 0.
+- A fix holds `sweeps/.lock`, so no sweep or other fix runs while it changes the target.
 
 ### Agent adapters
 
@@ -271,6 +305,13 @@ docs; every agent runs with the bundle folder as its working directory:
 
 `auto_edit` (gemini) and `workspace-write` (codex) allow edits anywhere in the bundle, not only
 `findings.json`; the bundle is the app's own copy, so that is accepted.
+
+A confirmed fix runs with full access, in its fix folder (flags checked 2026-11-06 in each CLI's
+`--help`; codex in its CLI reference): `claude -p <prompt> --permission-mode bypassPermissions`,
+`grok -p <prompt> --permission-mode bypassPermissions --cwd <dir>`, `codex exec
+--dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C <dir> <prompt>`, `gemini -p
+<prompt> --approval-mode yolo --skip-trust`, `opencode run --dangerously-skip-permissions --dir
+<dir> <prompt>` (rules the user's own opencode config denies stay denied).
 
 The prompt argument is one line pointing at `PROMPT.md` in the bundle, so the real prompt is a
 file the user can read and edit (`prompts/sweep.md` in the data dir, copied from the built-in
@@ -380,6 +421,7 @@ toml, reqwest, clap, zip) before adding them.
 5. GitHub target (deps, alerts, workflows, settings via `gh`).
 6. Server target (two-phase agent run).
 7. Lifecycle: dismissals and changes (PR 8); fix confirm/exec and fix history (PR 9).
+   Done when both merge.
 8. CLI.
 9. Tauri app: tray, popover, window, notifications, autostart, scheduler.
 10. Later: signing + notarization in CI once an Apple Developer account is available.

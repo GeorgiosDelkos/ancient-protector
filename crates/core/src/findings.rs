@@ -360,22 +360,27 @@ fn resolve(
 /// forge output, and fix commands go to the user for approval, where a bidirectional override
 /// could make a command read differently from what it runs.
 fn check_text(at: &str, evidence: &str, explanation: &str, fix: &Fix, problems: &mut Vec<String>) {
-    let prose = [
-        ("evidence", evidence),
-        ("explanation", explanation),
-        ("fix.summary", fix.summary.as_str()),
-    ];
-    for (field, value) in prose {
-        if value.trim().is_empty() {
-            problems.push(format!("{at}.{field} is empty"));
-        }
-        if value.chars().any(|c| is_forging(c) && c != '\n') {
-            problems.push(format!("{at}.{field} has control or invisible characters"));
-        }
+    for (field, value) in [("evidence", evidence), ("explanation", explanation)] {
+        check_prose(&format!("{at}.{field}"), value, problems);
     }
+    check_fix(&format!("{at}.fix"), fix, problems);
+}
+
+fn check_prose(at: &str, value: &str, problems: &mut Vec<String>) {
+    if value.trim().is_empty() {
+        problems.push(format!("{at} is empty"));
+    }
+    if value.chars().any(|c| is_forging(c) && c != '\n') {
+        problems.push(format!("{at} has control or invisible characters"));
+    }
+}
+
+/// Checks a fix as [`check_text`] does; also for a fix read back from a report to run it.
+pub(crate) fn check_fix(at: &str, fix: &Fix, problems: &mut Vec<String>) {
+    check_prose(&format!("{at}.summary"), &fix.summary, problems);
     if fix.steps.iter().any(|l| l.chars().any(is_forging)) {
         problems.push(format!(
-            "{at}.fix.steps: each step is one line, without control or invisible characters"
+            "{at}.steps: each step is one line, without control or invisible characters"
         ));
     }
     // Commands are what the user approves to run, so they are held to the strictest form: a
@@ -383,7 +388,7 @@ fn check_text(at: &str, evidence: &str, explanation: &str, fix: &Fix, problems: 
     let printable = |c: &String| c.bytes().all(|b| (b' '..=b'~').contains(&b));
     if !fix.commands.iter().all(printable) {
         problems.push(format!(
-            "{at}.fix.commands: each command is one line of printable ASCII"
+            "{at}.commands: each command is one line of printable ASCII"
         ));
     }
 }
