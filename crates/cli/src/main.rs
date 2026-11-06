@@ -18,7 +18,6 @@ use ancient_protector_core::Outcome;
 use ancient_protector_core::Package;
 use ancient_protector_core::Product;
 use ancient_protector_core::Progress;
-use ancient_protector_core::Schedule;
 use ancient_protector_core::SshConn;
 use ancient_protector_core::Targets;
 use ancient_protector_core::dismiss;

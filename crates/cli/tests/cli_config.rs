@@ -64,7 +64,7 @@ fn init_then_config_prints_summary() {
     assert_eq!(
         text(&out.stdout),
         "agent: codex\n\
-         schedule: every 12 h\n\
+         schedule: every 12 hours\n\
          history: since 2025-06-01\n\
          mac project dir: /Users/me/src\n\
          github repo: octo/app\n\
