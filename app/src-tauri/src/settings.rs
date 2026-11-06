@@ -98,13 +98,15 @@ impl ServerView {
     }
 }
 
-/// Detects the Mac and reads the config.
+/// Detects the Mac and reads the config, holding the popover open: detection can raise a
+/// macOS prompt (Documents access, the Keychain) that would otherwise hide it.
 #[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
-pub(crate) fn settings_data(runner: State<'_, Runner>) -> SettingsData {
+pub(crate) fn settings_data(app: AppHandle, runner: State<'_, Runner>) -> SettingsData {
+    let _held = tray::hold_popover(&app);
     let path = runner.data_dir().config_file();
     let (config, problem) = match Config::load_or_default(&path, runner.home()) {
         Ok(config) => (Some(Current::of(&config)), None),

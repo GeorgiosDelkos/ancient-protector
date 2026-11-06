@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
@@ -41,9 +41,11 @@ const CLICK_AFTER_BLUR: Duration = Duration::from_millis(300);
 #[derive(Debug, Default)]
 pub(crate) struct Popover {
     hidden_on_blur: Mutex<Option<Instant>>,
-    /// Set while a system dialog the popover opened (the folder picker) has the focus, which
-    /// would otherwise hide the popover and the view that asked for it.
-    held: AtomicBool,
+    /// How many holds are alive. Each covers a time a system dialog can take the focus, which
+    /// would otherwise hide the popover and the view that caused it: the folder picker, and
+    /// the privacy and Keychain prompts macOS shows while detection reads `~/Documents` and
+    /// runs `gh`. A count, since detection and the picker can overlap.
+    held: AtomicUsize,
 }
 
 /// Holds the popover open until dropped.
@@ -54,15 +56,15 @@ pub(crate) struct Held<'a> {
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        // Relaxed: the flag guards no other data; the next blur reads whatever is set by then.
-        self.popover.held.store(false, Ordering::Relaxed);
+        // Relaxed: the count guards no other data; the next blur reads whatever is set by then.
+        self.popover.held.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
 /// Keeps the popover open while the result lives, as a system dialog takes the focus.
 pub(crate) fn hold_popover(app: &AppHandle) -> Held<'_> {
     let popover = app.state::<Popover>();
-    popover.held.store(true, Ordering::Relaxed);
+    popover.held.fetch_add(1, Ordering::Relaxed);
     Held { popover }
 }
 
@@ -78,7 +80,7 @@ impl Popover {
 /// Hides the popover because it lost focus, as a menu closes.
 pub(crate) fn hide_on_blur(window: &Window) {
     let popover = window.state::<Popover>();
-    if popover.held.load(Ordering::Relaxed) {
+    if popover.held.load(Ordering::Relaxed) > 0 {
         return;
     }
     *popover.last_blur() = Some(Instant::now());
