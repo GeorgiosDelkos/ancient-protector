@@ -538,7 +538,7 @@ fn fetch_osv(
         let version = crowded.query.version.as_deref().unwrap_or("any version");
         problems.push(format!(
             "{} ({}) {version} matches {} OSV advisories; only the {} for a CVE in CISA KEV \
-             are in the bundle",
+             were kept",
             package.name,
             package.ecosystem.osv_name(),
             crowded.matched,
@@ -940,7 +940,7 @@ fn component_name(component: &Component) -> String {
 }
 
 /// Renders an error and its sources as `outer: inner`.
-pub(crate) fn error_chain(error: &impl std::error::Error) -> String {
+fn error_chain(error: &impl std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(e) = source {

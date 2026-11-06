@@ -20,11 +20,14 @@ You have no access to the server and need none.
   looked up in, and the running `kernel` (`uname -srm`). The kernel packages in the inventory
   are the installed ones; when the running kernel is older, a reboot is part of the fix.
 - `server/listening.txt`: listening TCP and UDP sockets (`ss -tulpn`), with process names
-  only for the login's own processes.
+  only for the login's own processes. Absent when the server could not list them; then say
+  nothing about sockets.
 - `server/docker-containers.jsonl`, `server/docker-images.jsonl`: running containers and the
   images on the server, when docker is installed and readable by the login.
-- `server/rpm-packages.txt`: on RPM distributions, the installed packages. They were not
-  looked up, so there are no advisories for them.
+- `server/rpm-packages.txt`, `server/dpkg-packages.txt`, `server/apk-packages.txt`: on a
+  distribution or release whose packages are not looked up (RPM distributions, Debian
+  testing, derivatives), the installed packages. There are no advisories for them, so name no
+  finding; mention in an issue on the file only what is plainly unsupported or end of life.
 - `findings.schema.json`: the exact shape of the file you write.
 
 ## What to do

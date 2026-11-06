@@ -165,26 +165,32 @@ instead and the agent only reads the bundle, as for GitHub.
 The app sends one fixed script, `server.sh`, on ssh's stdin and runs it with `sh -s -- <random
 marker> <dirs...>`. It only reads and never uses sudo. ssh runs with `BatchMode=yes` (a prompt
 fails the target), `StrictHostKeyChecking=yes` (the host key must already be in
-`known_hosts`), and agent, X11 and port forwarding off.
+`known_hosts`, which a sweep never updates), agent, X11 and port forwarding off, and no
+connection sharing. The marker and the folders travel on stdin, not on the server's process
+list. The Mac reads at most 256 MiB of the answer and decodes each part on its own.
 
 | Part | Read with | In the bundle as |
 |---|---|---|
 | OS release | `/etc/os-release` | `server/system.json` (`os_release`, `osv_ecosystem`); never in the prompt |
 | Kernel | `uname -srm` | `server/system.json` (`kernel`) |
 | OS packages | `/var/lib/dpkg/status` (Debian, Ubuntu), `/lib/apk/db/installed` (Alpine) | one component per source package and version in `inventory.jsonl`, `found_in` naming the installed packages |
-| RPM packages | `rpm -qa` | `server/rpm-packages.txt`, not looked up (noted in the report) |
+| Unlooked-up packages | `rpm -qa`; dpkg or apk on a release OSV is not asked about (Debian testing, derivatives) | `server/{rpm,dpkg,apk}-packages.txt`, not looked up (noted in the report) |
 | Listening sockets | `ss -tulpn` or `netstat -tulpn` | `server/listening.txt` |
 | Docker | `docker ps`, `docker images` | `server/docker-containers.jsonl`, `server/docker-images.jsonl` |
-| Lockfiles | `find` under each of the server's `dirs` (same names and skipped folders as the Mac walk, at most 200 files under 16 MiB) | components in `inventory.jsonl` |
+| Lockfiles | `find` under each of the server's `dirs` (same names and skipped folders as the Mac walk; at most 200 per folder, each under 16 MiB, 128 MiB in all; every one left out is noted) | components in `inventory.jsonl` |
 
 OS packages are looked up in OSV by release ecosystem (`Debian:12`, `Ubuntu:24.04:LTS`,
 `Alpine:v3.20`) and source package name, with the installed version: by name alone Debian 12's
 `openssl` matches 266 advisories and `linux` over 1000 (checked 2026-11-06), and OSV compares
 dpkg and apk versions as the distribution does. So OSV sees the versions of OS packages, unlike
 language packages. A query that still matches more than 200 advisories (the kernel) keeps only
-those for a CVE in CISA KEV, and the report says how many were left out. RPM distributions are
-not looked up: OSV's Rocky Linux and AlmaLinux records disagree on binary versus source names
-and on epochs.
+those for a CVE in CISA KEV, read from the advisory id (`DEBIAN-CVE-...`; grouped `DSA-` and
+`USN-` advisories of such a query are dropped), and the report says how many were left out.
+Kernel images built from `linux-signed*` source packages are looked up as the kernel's source
+package, which is where OSV files kernel advisories. RPM distributions are not looked up:
+OSV's Rocky Linux and AlmaLinux records disagree on binary versus source names and on epochs.
+Not handled yet: Ubuntu Pro (ESM) packages are looked up in the plain release, not
+`Ubuntu:Pro:...`.
 
 Issues on a server name a file (`server/listening.txt`); there are no settings.
 

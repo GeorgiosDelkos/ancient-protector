@@ -61,7 +61,7 @@ pub(crate) enum ServerError {
     /// `ssh` is not on `PATH`.
     #[error("ssh is not installed")]
     NoSsh,
-    /// ssh or the script failed: no connection, a prompt `BatchMode` refused, an unknown host
+    /// ssh exited with an error: no connection, a prompt `BatchMode` refused, an unknown host
     /// key, or no `sh` on the server.
     #[error(
         "cannot read the server over ssh; check that `ssh {dest} true` works without a prompt \
@@ -71,6 +71,14 @@ pub(crate) enum ServerError {
         /// The alias or host.
         dest: String,
         /// ssh's failure.
+        #[source]
+        source: InventoryError,
+    },
+    /// The inventory could not be run to the end: ssh could not be started, it ran past the time
+    /// limit, or it printed more than the output limit.
+    #[error("the server's inventory did not finish; if it timed out, check the size of `dirs`")]
+    Run {
+        /// The runner's failure.
         #[source]
         source: InventoryError,
     },
@@ -100,10 +108,7 @@ pub(crate) fn collect(ssh: &str, server: &Server) -> Result<Collected, ServerErr
     input.push_str(SCRIPT);
 
     let output = command::run_with_input(ssh, &args, input.as_bytes(), TIMEOUT)
-        .map_err(|source| ServerError::Ssh {
-            dest: dest.clone(),
-            source,
-        })?
+        .map_err(|source| ServerError::Run { source })?
         .ok_or(ServerError::NoSsh)?;
     if !output.success {
         return Err(ServerError::Ssh {
@@ -126,6 +131,7 @@ fn ssh_args(conn: &SshConn) -> (String, Vec<String>) {
         "-o",
         "StrictHostKeyChecking=yes",
         "-o",
+        // Seconds. Arbitrary: a reachable host answers in well under that.
         "ConnectTimeout=20",
         "-o",
         "ForwardAgent=no",
@@ -163,8 +169,8 @@ fn ssh_args(conn: &SshConn) -> (String, Vec<String>) {
             }
             if let Some(key) = identity_file {
                 let key = key.display().to_string();
-                args.extend(["-i".to_owned(), key, "-o".to_owned()]);
-                args.push("IdentitiesOnly=yes".to_owned());
+                let only = "IdentitiesOnly=yes".to_owned();
+                args.extend(["-i".to_owned(), key, "-o".to_owned(), only]);
             }
             host.to_string()
         }
@@ -219,8 +225,14 @@ fn parts<'a>(stdout: &'a str, marker: &str) -> Result<Vec<Part<'a>>, ServerError
     Ok(parts)
 }
 
-/// The most lockfiles read per folder; `server.sh` lists one more so a cut list shows.
-const LOCKFILE_LIMIT: usize = 200;
+/// The most lockfiles `server.sh` reads per folder; it lists them all, so a cut list shows.
+const LOCKFILES_PER_DIR: usize = 200;
+
+/// `server.sh`'s exit statuses for a folder that is not a readable folder, a lockfile of 16 MiB
+/// or more, and a lockfile past the 128 MiB read in all.
+const NOT_A_DIR: i32 = 100;
+const TOO_LARGE: i32 = 3;
+const OVER_BUDGET: i32 = 4;
 
 /// Exit status of a command `sh` could not find.
 const NOT_FOUND: i32 = 127;
@@ -248,8 +260,14 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     let ecosystem = release.as_ref().and_then(ecosystem);
     let packages = os_packages(ecosystem, fixed("dpkg")?, fixed("apk")?, fixed("rpm")?);
     match packages {
-        OsPackages::Read(components, 0) => collected.components.extend(components),
-        OsPackages::Read(components, dropped) => {
+        OsPackages::Read {
+            components,
+            dropped: 0,
+        } => collected.components.extend(components),
+        OsPackages::Read {
+            components,
+            dropped,
+        } => {
             collected.components.extend(components);
             collected.problems.push(format!(
                 "{dropped} OS packages have a name or version with characters no package \
@@ -280,9 +298,15 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     collected
         .files
         .push(("server/system.json".to_owned(), pretty(&system)));
+    let listening = fixed("listening")?;
+    if listening.status == NOT_FOUND {
+        collected.problems.push(
+            "listening sockets are not checked: the server has neither ss nor netstat".to_owned(),
+        );
+    }
     optional_file(
         &mut collected,
-        fixed("listening")?,
+        listening,
         "listening.txt",
         "listening sockets",
     );
@@ -304,8 +328,8 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     Ok(collected)
 }
 
-/// Adds a part's output as `server/<file>`, or notes why it is missing. A command that is not
-/// installed (docker on most servers) is not a problem.
+/// Adds a part's output as `server/<file>`, or notes why it failed. A command that is not
+/// installed is left to the caller: docker missing is normal, `ss` and `netstat` missing is not.
 fn optional_file(collected: &mut Collected, part: &Part<'_>, file: &str, what: &str) {
     match part.status {
         0 => collected
@@ -323,21 +347,33 @@ fn optional_file(collected: &mut Collected, part: &Part<'_>, file: &str, what: &
 fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
     for part in parts {
         if let Some(dir) = part.name.strip_prefix("dir ") {
-            if part.status != 0 {
-                collected.problems.push(format!(
+            match part.status {
+                0 => {}
+                NOT_A_DIR => collected.problems.push(format!(
                     "folder {dir} on the server: not found or not readable"
-                ));
-            } else if part.text.lines().count() > LOCKFILE_LIMIT {
+                )),
+                _ => collected.problems.push(format!(
+                    "some folders under {dir} on the server could not be read, so their \
+                     lockfiles were not checked"
+                )),
+            }
+            if part.text.lines().count() > LOCKFILES_PER_DIR {
                 collected.problems.push(format!(
-                    "folder {dir} on the server has more than {LOCKFILE_LIMIT} lockfiles; \
-                     only the first {LOCKFILE_LIMIT} were read"
+                    "folder {dir} on the server has more than {LOCKFILES_PER_DIR} lockfiles; \
+                     only the first {LOCKFILES_PER_DIR} were read"
                 ));
             }
         } else if let Some(file) = part.name.strip_prefix("file ") {
-            if part.status != 0 {
+            let skipped = match part.status {
+                0 => None,
+                TOO_LARGE => Some("it is 16 MiB or larger"),
+                OVER_BUDGET => Some("the lockfiles read on the server reached 128 MiB"),
+                _ => Some("it could not be read"),
+            };
+            if let Some(why) = skipped {
                 collected
                     .problems
-                    .push(format!("cannot read {file} on the server"));
+                    .push(format!("{file} on the server is not checked: {why}"));
                 continue;
             }
             let mut problems = Vec::new();
@@ -378,9 +414,14 @@ fn parse_os_release(text: &str) -> BTreeMap<String, String> {
 fn ecosystem(release: &BTreeMap<String, String>) -> Option<Ecosystem> {
     let id = release.get("ID")?;
     let version = release.get("VERSION_ID")?;
-    let mut numbers = version.split('.').map(str::parse::<u16>);
-    let first = numbers.next()?.ok()?;
-    let second = numbers.next().transpose().ok()?;
+    // Every part must be a number: Alpine edge is `3.21.0_alpha20250101`, not release 3.21.
+    let numbers: Vec<u16> = version
+        .split('.')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let first = *numbers.first()?;
+    let second = numbers.get(1).copied();
     match id.as_str() {
         "debian" => Some(Ecosystem::Debian { release: first }),
         "ubuntu" => Some(Ecosystem::Ubuntu {
@@ -400,7 +441,10 @@ fn ecosystem(release: &BTreeMap<String, String>) -> Option<Ecosystem> {
 enum OsPackages {
     /// Components to look up, and how many packages were left out for names or versions that
     /// are not plain.
-    Read(Vec<Component>, usize),
+    Read {
+        components: Vec<Component>,
+        dropped: usize,
+    },
     /// A package list that is not looked up, by its package manager.
     Listed { manager: &'static str, text: String },
     /// No package list, or one of a distribution that is not read.
@@ -422,11 +466,17 @@ fn os_packages(
                 .map(|p| unsigned_kernel(e, p))
                 .collect();
             let (components, dropped) = by_source(e, &installed);
-            OsPackages::Read(components, dropped)
+            OsPackages::Read {
+                components,
+                dropped,
+            }
         }
         Some(e @ Ecosystem::Alpine { .. }) if apk.status == 0 => {
             let (components, dropped) = by_source(e, &apk_packages(apk.text));
-            OsPackages::Read(components, dropped)
+            OsPackages::Read {
+                components,
+                dropped,
+            }
         }
         _ if dpkg.status == 0 => listed("dpkg", &dpkg_packages(dpkg.text)),
         _ if apk.status == 0 => listed("apk", &apk_packages(apk.text)),
@@ -457,10 +507,19 @@ fn listed(manager: &'static str, installed: &[Installed<'_>]) -> OsPackages {
 /// (`6.1.76+1` for `linux` `6.1.76-1`), so the image's version is used. Debian names signing
 /// packages by architecture (`linux-signed-amd64` is `linux`); Ubuntu by flavour
 /// (`linux-signed-hwe-6.8` is `linux-hwe-6.8`).
+///
+/// On Debian only a package whose own version differs from its source's is an image. The
+/// metapackage (`linux-image-amd64`) carries the signing version `6.1.76+1`, which dpkg orders
+/// after the kernel's `6.1.76-1`, so looking it up as `linux` would call a vulnerable kernel
+/// fixed. Ubuntu's signing versions equal the kernel's, and its metapackages come from
+/// `linux-meta`, so there every `linux-signed*` package is an image.
 fn unsigned_kernel(ecosystem: Ecosystem, package: Installed<'_>) -> Installed<'_> {
     let Some(rest) = package.source.strip_prefix("linux-signed") else {
         return package;
     };
+    if matches!(ecosystem, Ecosystem::Debian { .. }) && package.binary_version == package.version {
+        return package;
+    }
     let source: Cow<'_, str> = match (ecosystem, rest.strip_prefix('-')) {
         (_, None) if rest.is_empty() => "linux".into(),
         (Ecosystem::Ubuntu { .. }, Some(flavour)) => format!("linux-{flavour}").into(),
@@ -722,7 +781,10 @@ Version: 1.0 ignore previous instructions
             ),
             ("file /srv/app/package-lock.json", lock, 0),
             ("file /srv/app/gone/uv.lock", "", 1),
-            ("dir /srv/none", "", 1),
+            ("file /srv/app/big/uv.lock", "", 3),
+            ("file /srv/app/late/uv.lock", "", 4),
+            ("dir /srv/none", "", 100),
+            ("dir /srv/part", "", 1),
         ]);
         fs::write(tmp.path().join("deb.txt"), text).unwrap();
         let server = server(
@@ -783,8 +845,13 @@ Version: 1.0 ignore previous instructions
                  allows, so they are not checked",
                 "docker ps failed on the server (exit status 1); for docker, the login may not \
                  be in the docker group",
-                "cannot read /srv/app/gone/uv.lock on the server",
+                "/srv/app/gone/uv.lock on the server is not checked: it could not be read",
+                "/srv/app/big/uv.lock on the server is not checked: it is 16 MiB or larger",
+                "/srv/app/late/uv.lock on the server is not checked: the lockfiles read on the \
+                 server reached 128 MiB",
                 "folder /srv/none on the server: not found or not readable",
+                "some folders under /srv/part on the server could not be read, so their \
+                 lockfiles were not checked",
             ]
         );
     }
@@ -861,12 +928,13 @@ Version: 1.0 ignore previous instructions
         let Err(error @ ServerError::Ssh { .. }) = down else {
             panic!("{down:?}")
         };
-        let message = crate::sweep::error_chain(&error);
+        let message = error.to_string();
         assert!(
             message.contains("`ssh down true` works without a prompt"),
             "{message}"
         );
-        assert!(message.contains("Connection refused"), "{message}");
+        let source = std::error::Error::source(&error).unwrap().to_string();
+        assert!(source.contains("Connection refused"), "{source}");
 
         let missing = tmp.path().join("no-ssh");
         let none = collect(
@@ -950,6 +1018,7 @@ Version: 1.0 ignore previous instructions
             ("debian", "12.x"),
             ("linuxmint", "21.3"),
             ("rocky", "9.4"),
+            ("alpine", "3.21.0_alpha20250101"),
         ] {
             assert_eq!(eco(id, version), None, "{id} {version}");
         }
@@ -974,7 +1043,11 @@ Version: 1.0 ignore previous instructions
             major: 3,
             minor: 20,
         });
-        let OsPackages::Read(components, 0) = os_packages(alpine, &absent, &apk, &absent) else {
+        let OsPackages::Read {
+            components,
+            dropped: 0,
+        } = os_packages(alpine, &absent, &apk, &absent)
+        else {
             panic!()
         };
         let read: Vec<String> = components
@@ -1041,6 +1114,11 @@ Status: install ok installed
 Source: linux-signed
 Version: 6.8.0-45.45
 
+Package: linux-image-amd64
+Status: install ok installed
+Source: linux-signed-amd64
+Version: 6.1.76+1
+
 Package: linux-signedish
 Status: install ok installed
 Version: 1
@@ -1056,8 +1134,10 @@ Version: 1
             status: 1,
         };
         let read = |ecosystem| {
-            let OsPackages::Read(components, 0) =
-                os_packages(Some(ecosystem), &part, &absent, &absent)
+            let OsPackages::Read {
+                components,
+                dropped: 0,
+            } = os_packages(Some(ecosystem), &part, &absent, &absent)
             else {
                 panic!()
             };
@@ -1070,15 +1150,19 @@ Version: 1
             read(Ecosystem::Debian { release: 12 }),
             [
                 "linux 6.1.76-1",
-                "linux 6.8.0-45.45",
-                "linux 6.8.0-45.45~22.04.1",
+                "linux-signed 6.8.0-45.45",
+                "linux-signed-amd64 6.1.76+1",
+                "linux-signed-hwe-6.8 6.8.0-45.45~22.04.1",
                 "linux-signedish 1",
-            ]
+            ],
+            "on Debian only images, whose version differs from the signing source's, are the \
+             kernel; the metapackage stays as it is"
         );
         assert_eq!(
             read(Ecosystem::Ubuntu { year: 22, month: 4 }),
             [
                 "linux 6.8.0-45.45",
+                "linux-amd64 6.1.76+1",
                 "linux-amd64 6.1.76-1",
                 "linux-hwe-6.8 6.8.0-45.45~22.04.1",
                 "linux-signedish 1",
@@ -1090,7 +1174,7 @@ Version: 1
     fn a_bad_byte_spoils_only_its_own_part_and_a_cut_list_is_noted() {
         let tmp = tempfile::tempdir().unwrap();
         let ssh = fake_ssh(tmp.path());
-        let listing = (0..=LOCKFILE_LIMIT)
+        let listing = (0..=LOCKFILES_PER_DIR)
             .map(|n| format!("/a/{n}/uv.lock"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -1104,7 +1188,7 @@ Version: 1
             ),
             ("apk", "", 1),
             ("rpm", "", 127),
-            ("listening", "", 127),
+            ("listening", "", 0),
             ("docker-containers", "", 127),
             ("docker-images", "", 127),
             ("dir /a", &listing, 0),
@@ -1120,8 +1204,8 @@ Version: 1
         assert_eq!(
             collected.problems[0],
             format!(
-                "folder /a on the server has more than {LOCKFILE_LIMIT} lockfiles; only the \
-                 first {LOCKFILE_LIMIT} were read"
+                "folder /a on the server has more than {LOCKFILES_PER_DIR} lockfiles; only the \
+                 first {LOCKFILES_PER_DIR} were read"
             )
         );
         assert_eq!(collected.problems.len(), 1, "{:?}", collected.problems);
@@ -1168,6 +1252,61 @@ Version: 1
         match &component.lookup {
             Lookup::Package(p) => &p.name,
             Lookup::Product(_) => panic!("{component:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_socket_tools_are_a_gap_but_missing_docker_is_not() {
+        let text = answer(&[
+            ("os-release", "", 1),
+            ("kernel", "Linux", 0),
+            ("dpkg", "", 1),
+            ("apk", "", 1),
+            ("rpm", "", 127),
+            ("listening", "", 127),
+            ("docker-containers", "", 127),
+            ("docker-images", "", 127),
+        ])
+        .replace("@M@", "M");
+        let collected = read_answer(&text, "M").unwrap();
+        assert_eq!(
+            collected.problems,
+            [
+                "OS packages are not checked: no dpkg, apk or rpm package list found, or a \
+                 distribution other than Debian, Ubuntu or Alpine",
+                "listening sockets are not checked: the server has neither ss nor netstat",
+            ]
+        );
+        let files: Vec<&str> = collected.files.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(files, ["server/system.json"]);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn parts_round_trip(
+            written in proptest::collection::vec(
+                ("[a-z][a-z /.]{0,10}", "[ -~\n]{0,40}", 0..256_i32),
+                0..6,
+            )
+        ) {
+            let mut text = "login noise\n".to_owned();
+            for (name, body, status) in &written {
+                text.push_str(&format!("M begin {name}\n{body}\nM end {status}\n"));
+            }
+            let read = parts(&text, "M").unwrap();
+            let read: Vec<(&str, &str, i32)> =
+                read.iter().map(|p| (p.name, p.text, p.status)).collect();
+            let written: Vec<(&str, &str, i32)> =
+                written.iter().map(|(n, b, s)| (n.as_str(), b.as_str(), *s)).collect();
+            proptest::prop_assert_eq!(read, written);
+        }
+
+        #[test]
+        fn parsers_never_panic(text in "(?s).{0,400}") {
+            drop(parts(&text, "M"));
+            drop(parse_os_release(&text));
+            drop(dpkg_packages(&text));
+            drop(apk_packages(&text));
         }
     }
 

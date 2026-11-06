@@ -144,7 +144,7 @@ pub(crate) fn parse(
 
 /// The largest lockfile read, in bytes. Arbitrary: the biggest real lockfiles are a few MB, and
 /// a file far past that is not one, so it is reported instead of read into memory.
-pub(crate) const LOCKFILE_LIMIT: u64 = 64 * 1024 * 1024;
+const LOCKFILE_LIMIT: u64 = 64 * 1024 * 1024;
 
 fn read_lockfile(path: &Path) -> Result<String, InventoryError> {
     let len = fs::metadata(path)
@@ -339,6 +339,16 @@ mod tests {
                 Lookup::Product(p) => format!("{p} {}", c.version),
             })
             .collect()
+    }
+
+    #[test]
+    fn every_lockfile_name_has_a_parser() {
+        for name in NAMES {
+            let path = Path::new("/p").join(name);
+            assert!(parse(&path, "", &mut Vec::new()).is_some(), "{name}");
+            assert!(is_lockfile(&path), "{name}");
+        }
+        assert!(parse(Path::new("/p/Gemfile.lock"), "", &mut Vec::new()).is_none());
     }
 
     #[test]

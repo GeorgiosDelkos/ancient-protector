@@ -41,6 +41,14 @@ pub(super) fn fetch(
     kev: Option<&Kev>,
 ) -> Result<OsvAdvisories, FeedError> {
     let mut ids = query_ids(feeds, queries)?;
+    // querybatch's `modified` is the record's, and a record's `published` is never later, so
+    // this drops exactly what the window would drop after fetching, without fetching it, and
+    // before the crowded queries are counted.
+    ids.retain(|_, queried| {
+        queried
+            .modified
+            .is_none_or(|modified| in_window(None, Some(modified), history))
+    });
     let crowded = thin_crowded(&mut ids, kev);
     let mut advisories = Vec::with_capacity(ids.len());
     let mut failures = Vec::new();
@@ -75,11 +83,12 @@ pub(super) fn fetch(
     })
 }
 
-/// Keeps, for a query that matched more than [`CROWDED`] advisories, only those for a CVE in
-/// the KEV catalog (none without the catalog), and returns those queries. Only the kernel does
-/// this in practice: Debian 12's `linux` at one version matched over 1000 advisories
-/// (2026-11-06), far more than an agent can weigh, and the known-exploited ones are those that
-/// matter first.
+/// Keeps, for a versioned query (an OS package) that matched more than [`CROWDED`] advisories,
+/// only those for a CVE in the KEV catalog (none without the catalog), and returns those
+/// queries. Only the kernel does this in practice: Debian 12's `linux` at one version matched
+/// over 1000 advisories (2026-11-06), far more than an agent can weigh, and the known-exploited
+/// ones are those that matter first. Queries by name are never thinned: their advisories are
+/// named `GHSA-...` or `RUSTSEC-...`, so the CVE could not be read from the id.
 ///
 /// A record is not fetched to learn its CVE. The CVE is read from the id: OS advisories are
 /// named after it (`DEBIAN-CVE-2024-1086`, `UBUNTU-CVE-...`, `ALPINE-CVE-...`). Advisories that
@@ -93,7 +102,7 @@ fn thin_crowded(ids: &mut BTreeMap<String, Queried>, kev: Option<&Kev>) -> Vec<C
     }
     let crowded: BTreeSet<OsvQuery> = counts
         .into_iter()
-        .filter(|(_, n)| *n > CROWDED)
+        .filter(|(query, n)| query.version.is_some() && *n > CROWDED)
         .map(|(q, _)| q.clone())
         .collect();
     if crowded.is_empty() {
@@ -604,9 +613,36 @@ mod tests {
     }
 
     #[test]
-    fn a_query_at_the_crowded_limit_keeps_everything() {
+    fn records_modified_before_the_window_are_not_fetched() {
+        let server = osv_server(Arc::new(Mutex::new("2026-01-01T00:00:00Z".to_owned())));
+        let tmp = tempfile::tempdir().unwrap();
+        let since = History::Since(Since::new(jiff::civil::date(2026, 2, 1)).unwrap());
+        let osv = feeds(&server, tmp.path())
+            .osv(&[pkg("npm:lodash")], since, None)
+            .unwrap();
+        assert!(osv.advisories.is_empty());
+        assert_eq!(server.requests().len(), 1, "only the batch query");
+    }
+
+    #[test]
+    fn name_queries_are_never_thinned() {
         let mut ids: BTreeMap<String, Queried> = BTreeMap::new();
         let query = pkg("npm:a");
+        for n in 0..=CROWDED {
+            let queried = ids.entry(format!("GHSA-{n}")).or_default();
+            queried.queries.insert(query.clone());
+        }
+        assert!(thin_crowded(&mut ids, None).is_empty());
+        assert_eq!(ids.len(), CROWDED + 1);
+    }
+
+    #[test]
+    fn a_query_at_the_crowded_limit_keeps_everything() {
+        let mut ids: BTreeMap<String, Queried> = BTreeMap::new();
+        let query = OsvQuery {
+            version: Some("1".into()),
+            ..pkg("npm:a")
+        };
         for n in 0..CROWDED {
             let queried = ids.entry(format!("GHSA-{n}")).or_default();
             queried.queries.insert(query.clone());
