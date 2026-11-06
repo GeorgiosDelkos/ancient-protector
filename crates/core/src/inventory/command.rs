@@ -475,8 +475,9 @@ mod tests {
             fs::write(&probe, "").unwrap();
             fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        // SEARCH_PATH is the process's, and tests run in parallel: each path keeps /bin and
-        // /usr/bin, so `which("sh")` in the other test still resolves.
+        // SEARCH_PATH is the process's and is left set, and tests run in parallel: each path
+        // keeps /bin and /usr/bin, so every test that runs a tool by name (sh, echo, cat, ...)
+        // still finds it.
         let set = |dir: &Path| {
             use_search_path(
                 env::join_paths([dir, Path::new("/bin"), Path::new("/usr/bin")]).unwrap(),

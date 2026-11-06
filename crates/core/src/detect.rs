@@ -340,6 +340,8 @@ Host db-2 # the new database
   HostName 10.0.0.7 # behind the VPN
 Host db-3
   HostName=#none
+Match host db-3
+  HostName 10.9.9.9
 ";
         assert_eq!(
             ssh_hosts(config),

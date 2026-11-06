@@ -623,6 +623,20 @@ mod tests {
     }
 
     #[test]
+    fn a_save_that_cannot_lock_names_the_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("not-a-dir");
+        fs::write(&file, "").unwrap();
+        let data_dir = DataDir::new(&file);
+        assert!(data_dir.config_file().starts_with(&file));
+        let err = save(&data_dir, repo_added("o/r")).unwrap_err();
+        let SaveSettingError::Write { path, .. } = &err else {
+            panic!("{err:?}")
+        };
+        assert!(path.ends_with(".config.toml.lock"), "{err}");
+    }
+
+    #[test]
     fn changes_made_at_once_all_land() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path());
