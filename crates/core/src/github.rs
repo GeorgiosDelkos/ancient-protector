@@ -709,14 +709,16 @@ case "$last" in
   repos/o/limited/contents/.github/workflows) refuse 403 "Must have admin rights" ;;
   repos/o/limited/*) echo '{}' ;;
   orgs/lim) refuse 403 "Resource not accessible by personal access token" ;;
-  repos/o/many) echo '{"default_branch":"main","owner":{"type":"User"}}' ;;
+  repos/o/many) echo '{"default_branch":"main","owner":{"type":"Organization","login":"viewer"}}' ;;
+  orgs/viewer) echo '{"login":"viewer"}' ;;
+  orgs/hidden) refuse 404 "Not Found" ;;
   repos/o/many/dependency-graph/sbom) refuse 404 "Not Found" ;;
   repos/o/many/secret-scanning/alerts*) ok limit-alerts ;;
   repos/o/many/contents/.github/workflows) ok limit-workflows ;;
   repos/o/many/contents/.github/workflows/w0.yml) file "$@"; ok limit-file ;;
   repos/o/many/contents/.github/workflows/*) file "$@"; echo 'on: push' ;;
   repos/o/many/*) echo '[]' ;;
-  repos/o/over) echo '{"default_branch":"main","owner":{"type":"User"}}' ;;
+  repos/o/over) echo '{"default_branch":"main","owner":{"type":"Organization","login":"hidden"}}' ;;
   repos/o/over/contents/.github/workflows) ok many-workflows ;;
   repos/o/over/contents/.github/workflows/*) file "$@"; echo 'on: push' ;;
   repos/o/over/*) echo '[]' ;;
@@ -993,6 +995,11 @@ esac
             serde_json::from_str(file(&repo, "github/secret-scanning-alerts.json")).unwrap();
         assert_eq!(alerts.as_array().unwrap().len(), ALERT_LIMIT);
         assert_eq!(repo.problems.len(), 1, "{:?}", repo.problems);
+        assert_eq!(
+            settings(&repo)[TWO_FACTOR],
+            NOT_VISIBLE,
+            "an org that hides the field"
+        );
         assert!(
             repo.problems[0].contains("(404: Not Found)")
                 && repo.problems[0]
@@ -1002,6 +1009,12 @@ esac
         );
 
         let repo = collect(&gh, &slug("o/over")).unwrap();
+        let refusal = json!({"status": 404, "message": "Not Found"});
+        assert_eq!(
+            settings(&repo)[TWO_FACTOR],
+            refusal,
+            "an org this login cannot see"
+        );
         let workflows = repo
             .files
             .iter()
@@ -1098,6 +1111,14 @@ esac
         );
         assert_eq!(percent_decode("a%2"), "a%2");
         assert_eq!(percent_decode("%zz%41"), "%zzA");
+    }
+
+    #[test]
+    fn prompt_names_every_value_it_must_explain() {
+        let prompt = include_str!("prompts/sweep-github.md");
+        for value in [NOT_VISIBLE, NOT_COLLECTED] {
+            assert!(prompt.contains(&format!("`\"{value}\"`")), "{value}");
+        }
     }
 
     #[test]
