@@ -10,7 +10,7 @@
 
 pub(crate) mod command;
 mod homebrew;
-mod lockfiles;
+pub(crate) mod lockfiles;
 mod toolchains;
 
 use std::path::Path;
@@ -153,6 +153,12 @@ pub enum FoundIn {
         /// The lockfile's path.
         path: PathBuf,
     },
+    /// OS packages built from one source package, by their installed names (`libssl3`,
+    /// `openssl`). The component's name is the source package's, as OSV names it.
+    OsPackage {
+        /// The installed (binary) packages.
+        packages: Vec<String>,
+    },
     /// A GitHub repository's dependency graph, on its default branch.
     DependencyGraph {
         /// The repository, `owner/name`.
@@ -175,6 +181,7 @@ impl std::fmt::Display for FoundIn {
             Self::UvTool => f.write_str("uv tools"),
             Self::Pipx => f.write_str("pipx"),
             Self::Lockfile { path } => write!(f, "lockfile {}", path.display()),
+            Self::OsPackage { packages } => write!(f, "OS packages {}", packages.join(", ")),
             Self::DependencyGraph { repo } => write!(f, "the dependency graph of {repo}"),
         }
     }
@@ -326,6 +333,16 @@ mod tests {
                     path: "/p/Cargo.lock".into(),
                 },
                 "lockfile /p/Cargo.lock",
+            ),
+            (
+                FoundIn::OsPackage {
+                    packages: vec!["libssl3".into(), "openssl".into()],
+                },
+                "OS packages libssl3, openssl",
+            ),
+            (
+                FoundIn::DependencyGraph { repo: "o/r".into() },
+                "the dependency graph of o/r",
             ),
         ];
         for (found_in, text) in cases {

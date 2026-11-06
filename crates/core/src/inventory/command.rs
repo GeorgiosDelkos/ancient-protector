@@ -7,6 +7,8 @@
 
 use std::env;
 use std::io;
+use std::io::Read as _;
+use std::io::Write as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -27,6 +29,11 @@ const STDERR_LIMIT: usize = 300;
 /// How long one listing command may run. Arbitrary: `brew info --installed` takes a few
 /// seconds with a hundred formulae; a minute means the tool is stuck.
 const TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The most bytes read from a command's stdout or stderr. Arbitrary: far above any listing seen
+/// (`brew info` prints a few MB, a server's inventory tens), and low enough that a command
+/// printing without end, such as a compromised server, cannot exhaust memory.
+const OUTPUT_LIMIT: u64 = 256 * 1024 * 1024;
 
 /// How often a running command is checked for having exited. Arbitrary; short enough that
 /// fast commands return promptly.
@@ -66,25 +73,68 @@ pub(crate) fn run_any_status(
     program: &str,
     args: &[&str],
 ) -> Result<Option<Output>, InventoryError> {
-    run_within(program, args, TIMEOUT)
+    let Some(raw) = run_raw(program, args, b"", TIMEOUT)? else {
+        return Ok(None);
+    };
+    let stdout =
+        String::from_utf8(raw.stdout).map_err(|e| InventoryError::parse(&raw.command, &e))?;
+    Ok(Some(Output {
+        success: raw.success,
+        stdout,
+        detail: raw.detail,
+        command: raw.command,
+    }))
 }
 
-fn run_within(
+/// Runs `program` with `input` on stdin and returns its output whatever the exit status, or
+/// `None` when it is not installed. Waits up to `timeout`.
+///
+/// Stdout is decoded lossily: the caller reads output that mixes many files (a server's
+/// inventory), where one file's bad byte must not discard the rest.
+pub(crate) fn run_with_input(
     program: &str,
     args: &[&str],
+    input: &[u8],
     timeout: Duration,
 ) -> Result<Option<Output>, InventoryError> {
+    let Some(raw) = run_raw(program, args, input, timeout)? else {
+        return Ok(None);
+    };
+    Ok(Some(Output {
+        success: raw.success,
+        stdout: String::from_utf8_lossy(&raw.stdout).into_owned(),
+        detail: raw.detail,
+        command: raw.command,
+    }))
+}
+
+/// [`Output`] before stdout is decoded.
+struct RawOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    detail: String,
+    command: String,
+}
+
+/// Runs `program` with `input` on stdin, which is closed once it is written (at once when
+/// `input` is empty).
+fn run_raw(
+    program: &str,
+    args: &[&str],
+    input: &[u8],
+    timeout: Duration,
+) -> Result<Option<RawOutput>, InventoryError> {
     let command = command_line(program, args);
     let child = Command::new(program)
         .args(args)
         .current_dir("/")
         // Its own process group, so a timeout can stop the helpers it starts as well.
         .process_group(0)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
-    let child = match child {
+    let mut child = match child {
         Ok(child) => child,
         // A script whose interpreter is gone also fails with NotFound; only a program that is
         // nowhere on PATH is "not installed".
@@ -93,14 +143,23 @@ fn run_within(
         }
         Err(source) => return Err(InventoryError::Spawn { command, source }),
     };
+    // Written on its own thread, so a program that answers before reading all of its input
+    // cannot stall on a full stdout pipe while this side blocks on a full stdin pipe. A write
+    // error means the program exited or closed stdin early, which its exit status reports.
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    if input.is_empty() {
+        drop(stdin);
+    } else {
+        let input = input.to_vec();
+        thread::spawn(move || drop(stdin.write_all(&input)));
+    }
     let (status, stdout, stderr) = wait(child, &command, timeout)?;
 
-    let stdout = String::from_utf8(stdout).map_err(|e| InventoryError::parse(&command, &e))?;
     let stderr: String = String::from_utf8_lossy(&stderr)
         .chars()
         .take(STDERR_LIMIT)
         .collect();
-    Ok(Some(Output {
+    Ok(Some(RawOutput {
         success: status.success(),
         stdout,
         detail: format!("{status}: {}", stderr.trim()),
@@ -125,7 +184,15 @@ fn wait(
         thread::spawn(move || {
             let mut bytes = Vec::new();
             let read = match pipe {
-                Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+                // Past the limit the pipe is dropped, so the program gets SIGPIPE or EPIPE on
+                // its next write instead of filling memory here.
+                Some(pipe) => match pipe.take(OUTPUT_LIMIT + 1).read_to_end(&mut bytes) {
+                    Ok(_) if bytes.len() as u64 > OUTPUT_LIMIT => Err(io::Error::other(format!(
+                        "printed more than {OUTPUT_LIMIT} bytes"
+                    ))),
+                    Ok(_) => Ok(bytes),
+                    Err(e) => Err(e),
+                },
                 None => Ok(bytes),
             };
             // The receiver is gone only when the command was already abandoned.
@@ -227,6 +294,41 @@ mod tests {
     }
 
     #[test]
+    fn output_past_the_limit_fails_instead_of_filling_memory() {
+        let over = (OUTPUT_LIMIT + 1).to_string();
+        let script = format!("head -c {over} /dev/zero");
+        let err = run_with_input("sh", &["-c", &script], b"", Duration::from_secs(60)).unwrap_err();
+        let InventoryError::Spawn { source, .. } = err else {
+            panic!("{err:?}")
+        };
+        assert!(source.to_string().contains("printed more than"), "{source}");
+
+        // The limit's reason: a server inventory of tens of MB must fit.
+        let large = run_with_input(
+            "sh",
+            &["-c", "head -c 67108864 /dev/zero"],
+            b"",
+            Duration::from_secs(60),
+        );
+        assert_eq!(large.unwrap().unwrap().stdout.len(), 64 << 20);
+
+        let at = format!("head -c {OUTPUT_LIMIT} /dev/zero");
+        let output = run_with_input("sh", &["-c", &at], b"", Duration::from_secs(60));
+        assert_eq!(output.unwrap().unwrap().stdout.len() as u64, OUTPUT_LIMIT);
+    }
+
+    #[test]
+    fn input_reaches_stdin_and_stdout_is_decoded_lossily() {
+        let output = run_with_input("sh", &["-s"], b"printf 'a\\377b'", Duration::from_secs(5));
+        assert_eq!(output.unwrap().unwrap().stdout, "a\u{fffd}b");
+        let strict = run_any_status("printf", &["a\\377b"]);
+        assert!(
+            matches!(strict, Err(InventoryError::Parse { .. })),
+            "{strict:?}"
+        );
+    }
+
+    #[test]
     fn returns_stdout() {
         assert_eq!(run("echo", &["a", "b"]).unwrap().as_deref(), Some("a b\n"));
     }
@@ -269,7 +371,7 @@ mod tests {
 
     #[test]
     fn hung_command_is_stopped() {
-        let err = run_within("sleep", &["30"], Duration::from_millis(200)).unwrap_err();
+        let err = run_with_input("sleep", &["30"], b"", Duration::from_millis(200)).unwrap_err();
         assert!(err.to_string().contains("still running"), "{err}");
     }
 
@@ -279,7 +381,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pidfile = tmp.path().join("pid");
         let script = format!("sleep 30 & echo $! > '{}'; echo done", pidfile.display());
-        let err = run_within("sh", &["-c", &script], Duration::from_secs(5)).unwrap_err();
+        let err = run_with_input("sh", &["-c", &script], b"", Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("kept its output open"), "{err}");
 
         // The helper was in the tool's process group, so the group kill reached it.

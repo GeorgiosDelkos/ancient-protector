@@ -101,11 +101,14 @@ impl Feeds {
         }
     }
 
-    /// Returns every OSV advisory for `packages` in the `history` window, malicious-package
+    /// Returns every OSV advisory for `queries` in the `history` window, malicious-package
     /// reports included, in id order without duplicates.
     ///
-    /// Sends the package names, not versions, to OSV. Fetches only records that are new or
-    /// changed since they were cached.
+    /// Sends a version only for queries that carry one (OS packages). Fetches only records that
+    /// are new or changed since they were cached. A query matching more than 200 advisories
+    /// keeps only those in `kev` (none without the catalog) and is listed in
+    /// [`OsvAdvisories::crowded`]. OS advisories list their CVE as `upstream`, which is
+    /// returned among the aliases.
     ///
     /// A record that cannot be fetched (a network error, an unsafe id) is reported in
     /// [`OsvAdvisories::failures`] and the rest are still returned.
@@ -113,8 +116,13 @@ impl Feeds {
     /// # Errors
     ///
     /// Fails when the id query itself fails, since then no advisory is known.
-    pub fn osv(&self, packages: &[Package], history: History) -> Result<OsvAdvisories, FeedError> {
-        osv::fetch(self, packages, history)
+    pub fn osv(
+        &self,
+        queries: &[OsvQuery],
+        history: History,
+        kev: Option<&Kev>,
+    ) -> Result<OsvAdvisories, FeedError> {
+        osv::fetch(self, queries, history, kev)
     }
 
     /// Returns every NVD CVE whose configurations name `product` (any vendor) in the
@@ -161,6 +169,41 @@ pub struct OsvAdvisories {
     pub advisories: Vec<OsvAdvisory>,
     /// One error per record that could not be fetched or cached.
     pub failures: Vec<FeedError>,
+    /// Queries that matched so many advisories that only the known-exploited ones were kept.
+    pub crowded: Vec<Crowded>,
+}
+
+/// One OSV lookup: a package, and the installed version for packages whose ecosystem is
+/// [queried by version](crate::Ecosystem::queried_by_version).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OsvQuery {
+    /// The package.
+    pub package: Package,
+    /// The version OSV is asked about, or `None` for every advisory under the name.
+    pub version: Option<String>,
+}
+
+impl OsvQuery {
+    /// The query for `package` installed at `version`: with the version when its ecosystem is
+    /// queried by version, by name otherwise.
+    pub fn new(package: Package, version: &str) -> Self {
+        let version = package
+            .ecosystem
+            .queried_by_version()
+            .then(|| version.to_owned());
+        Self { package, version }
+    }
+}
+
+/// A query that matched too many advisories, and how many of them were kept.
+#[derive(Debug)]
+pub struct Crowded {
+    /// The query.
+    pub query: OsvQuery,
+    /// How many advisories OSV matched.
+    pub matched: usize,
+    /// How many were kept: those for a CVE in the KEV catalog.
+    pub kept: usize,
 }
 
 /// An OSV advisory and the packages whose query returned it.
@@ -168,8 +211,8 @@ pub struct OsvAdvisories {
 pub struct OsvAdvisory {
     /// The advisory.
     pub advisory: Advisory,
-    /// The queried packages OSV matched it to, in order.
-    pub packages: Vec<Package>,
+    /// The queries OSV matched it to, in order.
+    pub queries: Vec<OsvQuery>,
 }
 
 /// Which database an [`Advisory`] came from.

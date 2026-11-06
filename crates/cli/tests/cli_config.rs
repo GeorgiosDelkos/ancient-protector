@@ -48,6 +48,7 @@ fn init_then_config_prints_summary() {
         [[servers]]
         name = "prod"
         ssh = "prod"
+        dirs = ["/srv/app"]
 
         [[servers]]
         name = "db"
@@ -68,6 +69,7 @@ fn init_then_config_prints_summary() {
          mac project dir: /Users/me/src\n\
          github repo: octo/app\n\
          server: prod (ssh alias prod)\n\
+         server prod dir: /srv/app\n\
          server: db (host 10.0.0.5, user deploy, port 2222, key /Users/me/.ssh/id)\n"
     );
 }
