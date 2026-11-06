@@ -41,9 +41,10 @@ pub(super) fn fetch(
     kev: Option<&Kev>,
 ) -> Result<OsvAdvisories, FeedError> {
     let mut ids = query_ids(feeds, queries)?;
-    // querybatch's `modified` is the record's, and a record's `published` is never later, so
-    // this drops exactly what the window would drop after fetching, without fetching it, and
-    // before the crowded queries are counted.
+    // querybatch's `modified` is the record's. OSV records are modified no earlier than they
+    // are published (the schema calls `modified` the time of the last change), so this drops
+    // what the window would drop after fetching, without fetching it, and before the crowded
+    // queries are counted.
     ids.retain(|_, queried| {
         queried
             .modified
@@ -102,7 +103,7 @@ fn thin_crowded(ids: &mut BTreeMap<String, Queried>, kev: Option<&Kev>) -> Vec<C
     }
     let crowded: BTreeSet<OsvQuery> = counts
         .into_iter()
-        .filter(|(query, n)| query.version.is_some() && *n > CROWDED)
+        .filter(|(query, n)| query.package.ecosystem.queried_by_version() && *n > CROWDED)
         .map(|(q, _)| q.clone())
         .collect();
     if crowded.is_empty() {
@@ -639,10 +640,11 @@ mod tests {
     #[test]
     fn a_query_at_the_crowded_limit_keeps_everything() {
         let mut ids: BTreeMap<String, Queried> = BTreeMap::new();
-        let query = OsvQuery {
-            version: Some("1".into()),
-            ..pkg("npm:a")
+        let package = Package {
+            ecosystem: crate::package::Ecosystem::Debian { release: 12 },
+            name: "linux".to_owned(),
         };
+        let query = OsvQuery::new(package, "6.1");
         for n in 0..CROWDED {
             let queried = ids.entry(format!("GHSA-{n}")).or_default();
             queried.queries.insert(query.clone());

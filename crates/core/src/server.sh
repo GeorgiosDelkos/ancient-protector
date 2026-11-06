@@ -46,9 +46,10 @@ lockfiles() {
 }
 
 # Prints one lockfile. Exit status 3: 16 MiB or larger; 4: it would take the files read past
-# 128 MiB in all, which keeps the answer under the app's 256 MiB limit. The type is checked
-# again, since the file may have been replaced by a symlink or a FIFO since the listing (a FIFO
-# would block); a swap in the moment between this check and the read is not caught.
+# 128 MiB in all, which leaves room under the app's 256 MiB limit for the other parts. The type
+# is checked again, since the file may have been replaced by a symlink or a FIFO since the
+# listing (a FIFO would block); a swap in the moment between this check and the read is not
+# caught.
 # shellcheck disable=SC2329 # called through part
 lockfile() {
   { [ -f "$1" ] && [ ! -L "$1" ]; } || return 1

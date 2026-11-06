@@ -228,8 +228,8 @@ fn parts<'a>(stdout: &'a str, marker: &str) -> Result<Vec<Part<'a>>, ServerError
 /// The most lockfiles `server.sh` reads per folder; it lists them all, so a cut list shows.
 const LOCKFILES_PER_DIR: usize = 200;
 
-/// `server.sh`'s exit statuses for a folder that is not a readable folder, a lockfile of 16 MiB
-/// or more, and a lockfile past the 128 MiB read in all.
+// `server.sh`'s exit statuses (pinned by a test) for a folder that is not a readable folder, a
+// lockfile of 16 MiB or more, and a lockfile past the 128 MiB read in all.
 const NOT_A_DIR: i32 = 100;
 const TOO_LARGE: i32 = 3;
 const OVER_BUDGET: i32 = 4;
@@ -301,7 +301,8 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     let listening = fixed("listening")?;
     if listening.status == NOT_FOUND {
         collected.problems.push(
-            "listening sockets are not checked: the server has neither ss nor netstat".to_owned(),
+            "listening sockets are not checked: neither ss nor netstat ran on the server"
+                .to_owned(),
         );
     }
     optional_file(
@@ -1228,6 +1229,11 @@ Version: 1
             }
         }
         fs::write(root.join("p/other.lock"), "").unwrap();
+        // Sparse, so the test writes no 16 MiB; the script stops at its size.
+        let big = root.join("big/uv.lock");
+        fs::create_dir_all(big.parent().unwrap()).unwrap();
+        fs::File::create(&big).unwrap().set_len(16 << 20).unwrap();
+        expected.push(big.display().to_string());
         expected.sort();
         let dir = root.display().to_string();
         let input = format!("marker=M\nset -- '{dir}'\n{SCRIPT}");
@@ -1241,11 +1247,35 @@ Version: 1
         let mut listed: Vec<&str> = listed.text.lines().collect();
         listed.sort_unstable();
         assert_eq!(listed, expected);
-        let read: Vec<&str> = parts
+        let read: Vec<(&str, i32)> = parts
             .iter()
-            .filter_map(|p| p.name.strip_prefix("file "))
+            .filter_map(|p| Some((p.name.strip_prefix("file ")?, p.status)))
             .collect();
         assert_eq!(read.len(), expected.len());
+        for (file, status) in read {
+            let want = if Path::new(file) == big { TOO_LARGE } else { 0 };
+            assert_eq!(status, want, "{file}");
+        }
+    }
+
+    #[test]
+    fn the_rust_side_names_the_script_statuses() {
+        assert!(SCRIPT.contains(&format!("status={NOT_A_DIR}\n")));
+        assert!(SCRIPT.contains(&format!("|| return {TOO_LARGE}\n")));
+        assert!(SCRIPT.contains(&format!("|| return {OVER_BUDGET}\n")));
+        assert!(SCRIPT.contains(&format!("-lt {}", 16 << 20)));
+        assert!(SCRIPT.contains(&format!("-le {}", 128 << 20)));
+    }
+
+    #[test]
+    fn an_ssh_that_cannot_start_is_a_run_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ssh = tmp.path().join("not-executable");
+        fs::write(&ssh, "").unwrap();
+        let server = server("[[servers]]\nname = \"r\"\nssh = \"x\"\n");
+        let err = collect(ssh.to_str().unwrap(), &server).unwrap_err();
+        assert!(matches!(err, ServerError::Run { .. }), "{err:?}");
+        assert!(err.to_string().contains("did not finish"), "{err}");
     }
 
     fn component_name(component: &Component) -> &str {
@@ -1274,7 +1304,7 @@ Version: 1
             [
                 "OS packages are not checked: no dpkg, apk or rpm package list found, or a \
                  distribution other than Debian, Ubuntu or Alpine",
-                "listening sockets are not checked: the server has neither ss nor netstat",
+                "listening sockets are not checked: neither ss nor netstat ran on the server",
             ]
         );
         let files: Vec<&str> = collected.files.iter().map(|f| f.0.as_str()).collect();
