@@ -303,6 +303,15 @@ mod tests {
         };
         assert!(source.to_string().contains("printed more than"), "{source}");
 
+        // The limit's reason: a server inventory of tens of MB must fit.
+        let large = run_with_input(
+            "sh",
+            &["-c", "head -c 67108864 /dev/zero"],
+            b"",
+            Duration::from_secs(60),
+        );
+        assert_eq!(large.unwrap().unwrap().stdout.len(), 64 << 20);
+
         let at = format!("head -c {OUTPUT_LIMIT} /dev/zero");
         let output = run_with_input("sh", &["-c", &at], b"", Duration::from_secs(60));
         assert_eq!(output.unwrap().unwrap().stdout.len() as u64, OUTPUT_LIMIT);
