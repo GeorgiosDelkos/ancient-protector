@@ -65,7 +65,6 @@ dependencies = [
  "flate2",
  "jiff",
  "proptest",
- "security-framework",
  "serde",
  "serde_json",
  "tempfile",

@@ -39,8 +39,6 @@ use crate::runner::Status;
 
 fn main() {
     let home = std::env::home_dir().expect("a Mac user has a home directory");
-    // macOS starts an app with a minimal PATH; tools are found as in the user's terminal.
-    ancient_protector_core::use_login_shell_path();
     let data_dir = DataDir::for_home(&home);
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -191,7 +189,8 @@ fn overview(runner: State<'_, Runner>) -> Overview {
     }
 }
 
-#[tauri::command]
+/// Async, so reading the config to list the targets never stalls the UI.
+#[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
@@ -276,11 +275,11 @@ fn fix_preview(runner: State<'_, Runner>, key: String) -> Result<FixPreview, Str
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
-fn fix(app: AppHandle, key: String, title: String) -> Result<(), String> {
+fn fix(app: AppHandle, key: String) -> Result<(), String> {
     let key: FindingKey = key
         .parse()
         .map_err(|e: ParseFindingKeyError| e.to_string())?;
-    runner::start_fix(&app, key, title).map_err(ToString::to_string)
+    runner::start_fix(&app, key)
 }
 
 /// Dismisses `key` for `reason`; it shows again when its advisory changes.

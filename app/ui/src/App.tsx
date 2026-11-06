@@ -344,9 +344,7 @@ function Detail(props: {
       .catch((e: unknown) => props.onError(String(e)));
   };
   const runFix = () => {
-    invoke("fix", { key: props.item.key, title: props.item.title }).catch((e: unknown) =>
-      props.onError(String(e)),
-    );
+    invoke("fix", { key: props.item.key }).catch((e: unknown) => props.onError(String(e)));
   };
   const dismiss = (event: SubmitEvent) => {
     event.preventDefault();

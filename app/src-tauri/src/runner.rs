@@ -20,7 +20,7 @@ use ancient_protector_core::Config;
 use ancient_protector_core::Confirmed;
 use ancient_protector_core::DataDir;
 use ancient_protector_core::FindingKey;
-use ancient_protector_core::FixRecord;
+use ancient_protector_core::FixPlan;
 use ancient_protector_core::Progress;
 use ancient_protector_core::Report;
 use ancient_protector_core::Targets;
@@ -238,22 +238,23 @@ pub(crate) struct FixDone {
 
 /// Runs the confirmed fix of `key` on its own thread, and tells the popover how it ended with
 /// a `fix-done` event. The fix is planned again here, so a sweep that landed since the
-/// preview is caught.
+/// preview is caught, and the status shows the plan's own summary.
 ///
 /// # Errors
 ///
-/// Fails when a sweep or another fix is running.
-pub(crate) fn start_fix(
-    app: &AppHandle,
-    key: FindingKey,
-    title: String,
-) -> Result<(), &'static str> {
+/// Fails when the fix cannot be planned, or a sweep or another fix is running.
+pub(crate) fn start_fix(app: &AppHandle, key: FindingKey) -> Result<(), String> {
+    let plan = plan(app, key)?;
+    let title = plan.fix().summary.clone();
     app.state::<Runner>().claim(Status::Fixing { title })?;
     changed(app);
     let app = app.clone();
     thread::spawn(move || {
-        let done = panic::catch_unwind(AssertUnwindSafe(|| fix(&app, key)))
-            .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
+        let done = panic::catch_unwind(AssertUnwindSafe(|| {
+            let runner = app.state::<Runner>();
+            run_fix(runner.data_dir(), &plan, Confirmed::Asked).map_err(|e| e.to_string())
+        }))
+        .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
         let event = match done {
             Ok(record) => FixDone {
                 key: key.to_string(),
@@ -275,12 +276,11 @@ pub(crate) fn start_fix(
     Ok(())
 }
 
-fn fix(app: &AppHandle, key: FindingKey) -> Result<FixRecord, String> {
+fn plan(app: &AppHandle, key: FindingKey) -> Result<FixPlan, String> {
     let runner = app.state::<Runner>();
     let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
         .map_err(|e| e.to_string())?;
-    let plan = plan_fix(runner.data_dir(), &config, key).map_err(|e| e.to_string())?;
-    run_fix(runner.data_dir(), &plan, Confirmed::Asked).map_err(|e| e.to_string())
+    plan_fix(runner.data_dir(), &config, key).map_err(|e| e.to_string())
 }
 
 /// Idle when every target got a verdict, otherwise the first that did not, and why.

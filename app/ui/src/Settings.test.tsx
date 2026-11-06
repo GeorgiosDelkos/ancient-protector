@@ -407,3 +407,29 @@ describe("inputs", () => {
     expect(screen.getByText("In Keychain").className).toBe("state right ok");
   });
 });
+
+describe("quick changes", () => {
+  it("show the reply to the newest one, even when an older reply comes later", async () => {
+    const replies: ((view: SettingsView) => void)[] = [];
+    invoke.mockImplementation((command: string) =>
+      command === "settings_data"
+        ? Promise.resolve(settingsView())
+        : new Promise<SettingsView>((resolve) => replies.push(resolve)),
+    );
+    open("github");
+    fireEvent.click(await screen.findByText("me/site"));
+    fireEvent.click(screen.getByText("me/app"));
+    const newer = settingsView({
+      repos: [
+        { repo: "me/app", private: true, chosen: false },
+        { repo: "me/site", private: false, chosen: true },
+      ],
+    });
+    replies[1]?.(newer);
+    await screen.findByText("Saved");
+    replies[0]?.(settingsView());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(within((await row("me/app")) as HTMLElement).getByText("Not swept")).toBeTruthy();
+    expect(within(await row("me/site")).getByText("Swept")).toBeTruthy();
+  });
+});

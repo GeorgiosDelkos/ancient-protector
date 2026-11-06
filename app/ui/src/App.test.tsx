@@ -161,7 +161,7 @@ describe("a finding", () => {
     expect(within(confirm).getByText("this Mac")).toBeTruthy();
     expect(invoke).not.toHaveBeenCalledWith("fix", expect.anything());
     fireEvent.click(screen.getByText("Run fix"));
-    expect(invoke).toHaveBeenCalledWith("fix", { key: "a", title: "title a" });
+    expect(invoke).toHaveBeenCalledWith("fix", { key: "a" });
   });
 
   it("is dismissed with the reason given", async () => {

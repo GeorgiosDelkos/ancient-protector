@@ -15,7 +15,6 @@ use ancient_protector_core::latest;
 use tauri::AppHandle;
 use tauri::Emitter as _;
 use tauri::Manager as _;
-use tauri::State;
 use tauri::Window;
 use tauri::image::Image;
 use tauri::tray::MouseButton;
@@ -51,21 +50,35 @@ pub(crate) struct Popover {
 /// Holds the popover open until dropped.
 #[derive(Debug)]
 pub(crate) struct Held<'a> {
-    popover: State<'a, Popover>,
+    app: &'a AppHandle,
 }
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
         // Relaxed: the count guards no other data; the next blur reads whatever is set by then.
-        self.popover.held.fetch_sub(1, Ordering::Relaxed);
+        let last = self
+            .app
+            .state::<Popover>()
+            .held
+            .fetch_sub(1, Ordering::Relaxed)
+            == 1;
+        // A blur while held was ignored, so the last hold closes a popover that lost the focus
+        // meanwhile (the user clicked elsewhere, or a prompt kept it), as that blur would have.
+        // Best effort: a popover left open closes on the next click elsewhere or on the icon.
+        if let Some(window) = self.app.get_webview_window(POPOVER)
+            && last
+            && window.is_visible().unwrap_or(false)
+            && !window.is_focused().unwrap_or(true)
+        {
+            drop(window.hide());
+        }
     }
 }
 
 /// Keeps the popover open while the result lives, as a system dialog takes the focus.
 pub(crate) fn hold_popover(app: &AppHandle) -> Held<'_> {
-    let popover = app.state::<Popover>();
-    popover.held.fetch_add(1, Ordering::Relaxed);
-    Held { popover }
+    app.state::<Popover>().held.fetch_add(1, Ordering::Relaxed);
+    Held { app }
 }
 
 impl Popover {

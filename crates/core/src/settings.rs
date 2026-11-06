@@ -10,6 +10,9 @@ use std::io;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 
 use serde::Deserialize;
 use toml_edit::Array;
@@ -25,6 +28,10 @@ use crate::config::DEFAULT_CONFIG;
 use crate::config::LoadConfigError;
 use crate::config::expand_home;
 use crate::paths::DataDir;
+
+/// Held while a change is read, applied and written, so changes in this process apply one
+/// after another.
+static SAVING: Mutex<()> = Mutex::new(());
 
 /// One change to the config.
 #[derive(Debug, Deserialize)]
@@ -90,6 +97,10 @@ pub fn save_setting(
     home: &Path,
     setting: &Setting,
 ) -> Result<Config, SaveSettingError> {
+    // Read, edit and write are one step: two changes at once (two quick clicks) would each
+    // edit the same text, and the later write would drop the earlier change. A poisoned lock
+    // guards no data, so it is used as it is.
+    let _saving = SAVING.lock().unwrap_or_else(PoisonError::into_inner);
     let path = data_dir.config_file();
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -100,14 +111,19 @@ pub fn save_setting(
         path: path.clone(),
         source,
     })?;
-    apply(&mut doc, setting, home);
+    apply(&mut doc, setting, home).map_err(|table| SaveSettingError::Inline {
+        path: path.clone(),
+        table,
+    })?;
     let changed = doc.to_string();
     let config = Config::from_text(&path, &changed, home)?;
     write(&path, &changed)?;
     Ok(config)
 }
 
-fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) {
+/// Applies `setting` to `doc`. Fails with the table's name when the file writes it inline
+/// (`github = { repos = [...] }`), which this does not edit.
+fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), &'static str> {
     match setting {
         Setting::Agent { agent: Some(agent) } => {
             let fresh = !doc.contains_key("agent");
@@ -117,24 +133,25 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) {
             }
         }
         Setting::Agent { agent: None } => {
+            restore_opening_comments(doc, "agent");
             doc.remove("agent");
         }
         Setting::Schedule { every_hours } => {
-            let schedule = table(doc, "schedule");
+            let schedule = table(doc, "schedule")?;
             match every_hours {
                 Some(hours) => schedule["every_hours"] = value(i64::from(*hours)),
                 None => drop(schedule.remove("every_hours")),
             }
         }
         Setting::History { since } => {
-            table(doc, "history")["since"] = value(since.as_str());
+            table(doc, "history")?["since"] = value(since.as_str());
         }
         Setting::AddFolder { dir } => {
             let same = |entry: &str| expand_home(entry, home) == expand_home(dir, home);
-            add(array(table(doc, "mac"), "project_dirs"), dir, same);
+            add(array(table(doc, "mac")?, "project_dirs"), dir, same);
         }
         Setting::RemoveFolder { dir } => {
-            let dirs = array(table(doc, "mac"), "project_dirs");
+            let dirs = array(table(doc, "mac")?, "project_dirs");
             dirs.retain(|v| {
                 v.as_str()
                     .is_none_or(|e| expand_home(e, home) != expand_home(dir, home))
@@ -142,27 +159,58 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) {
         }
         Setting::AddRepo { repo } => {
             let repo = repo.trim();
-            add(array(table(doc, "github"), "repos"), repo, |e| {
+            add(array(table(doc, "github")?, "repos"), repo, |e| {
                 e.eq_ignore_ascii_case(repo)
             });
         }
         Setting::RemoveRepo { repo } => {
-            let repos = array(table(doc, "github"), "repos");
+            let repos = array(table(doc, "github")?, "repos");
             repos.retain(|v| v.as_str().is_none_or(|e| !e.eq_ignore_ascii_case(repo)));
         }
         Setting::AddServer { ssh } => {
             let mut server = Table::new();
             server["name"] = value(ssh.as_str());
             server["ssh"] = value(ssh.as_str());
-            servers(doc).push(server);
+            servers(doc)?.push(server);
         }
         Setting::RemoveServer { name } => {
-            servers(doc).retain(|t| t.get("name").and_then(Item::as_str) != Some(name));
-            if servers(doc).is_empty() {
+            let servers = servers(doc)?;
+            servers.retain(|t| t.get("name").and_then(Item::as_str) != Some(name));
+            if servers.is_empty() {
                 doc.remove("servers");
             }
         }
     }
+    Ok(())
+}
+
+/// Undoes [`keep_opening_comments_on_top`] before `key` is removed: the opening comments it
+/// moved onto the key go back above the first table, so removing the key keeps them.
+fn restore_opening_comments(doc: &mut DocumentMut, key: &str) {
+    let Some(opening) = doc
+        .as_table()
+        .key(key)
+        .and_then(|k| k.leaf_decor().prefix())
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.trim().is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(first) = doc
+        .as_table_mut()
+        .iter_mut()
+        .find_map(|(_, item)| item.as_table_mut())
+    else {
+        return;
+    };
+    let own = first
+        .decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    first.decor_mut().set_prefix(format!("{opening}{own}"));
 }
 
 /// A new top-level key goes above every table, so above the file's opening comments, which
@@ -196,18 +244,18 @@ fn keep_opening_comments_on_top(doc: &mut DocumentMut, key: &str) {
     }
 }
 
-/// The table `name`, created when missing. One that is not a table (a hand-edited `mac = 1`)
-/// is replaced; the checks before writing would have refused that file anyway.
-fn table<'a>(doc: &'a mut DocumentMut, name: &str) -> &'a mut Table {
-    let item = doc.entry(name).or_insert_with(|| Item::Table(Table::new()));
-    if !item.is_table() {
-        *item = Item::Table(Table::new());
-    }
-    item.as_table_mut().expect("made a table just above")
+/// The table `name`, created when missing. Anything else under that name (an inline table, or
+/// a hand-edited `mac = 1`) is refused, not replaced: an inline table is valid, and replacing
+/// it would drop the user's values.
+fn table<'a>(doc: &'a mut DocumentMut, name: &'static str) -> Result<&'a mut Table, &'static str> {
+    doc.entry(name)
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or(name)
 }
 
-/// The array `name` in `table`, created when missing. One that is not an array is replaced, as
-/// in [`table`].
+/// The array `name` in `table`, created when missing. One that is not an array (`repos = 1`)
+/// is replaced; the checks before writing refuse that file anyway, so nothing is lost.
 fn array<'a>(table: &'a mut Table, name: &str) -> &'a mut Array {
     let item = table.entry(name).or_insert_with(|| value(Array::new()));
     if !item.is_array() {
@@ -223,15 +271,13 @@ fn add(array: &mut Array, entry: &str, same: impl Fn(&str) -> bool) {
     }
 }
 
-fn servers(doc: &mut DocumentMut) -> &mut ArrayOfTables {
-    let item = doc
-        .entry("servers")
-        .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
-    if !item.is_array_of_tables() {
-        *item = Item::ArrayOfTables(ArrayOfTables::new());
-    }
-    item.as_array_of_tables_mut()
-        .expect("made an array of tables just above")
+/// The `[[servers]]` tables, created when missing; refused when the file writes them another
+/// way (`servers = [{ ... }]`), as in [`table`].
+fn servers(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, &'static str> {
+    doc.entry("servers")
+        .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()))
+        .as_array_of_tables_mut()
+        .ok_or("servers")
 }
 
 /// Writes `text` to a temporary name, syncs it, and renames it over `path`, so neither a
@@ -243,7 +289,9 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
     };
     let dir = path.parent().expect("the config file has a folder");
     fs::create_dir_all(dir).map_err(write_err)?;
-    let partial = dir.join(".config.toml.partial");
+    // Named per process, so a CLI or a second app saving at the same moment never writes into
+    // this file; within a process, `SAVING` keeps saves apart.
+    let partial = dir.join(format!(".config.toml.{}.partial", process::id()));
     fs::File::create(&partial)
         .and_then(|mut file| {
             file.write_all(text.as_bytes())?;
@@ -273,6 +321,17 @@ pub enum SaveSettingError {
         /// The parser's error, with line and column.
         #[source]
         source: toml_edit::TomlError,
+    },
+    /// The table the change edits is written inline; nothing was written.
+    #[error(
+        "{} writes {table} inline; change it there by hand, or rewrite it as a [{table}] section",
+        path.display()
+    )]
+    Inline {
+        /// The file.
+        path: PathBuf,
+        /// The table.
+        table: &'static str,
     },
     /// The change would make the config invalid; nothing was written.
     #[error(transparent)]
@@ -440,6 +499,86 @@ mod tests {
         .unwrap();
         let repos: Vec<String> = config.repos.iter().map(ToString::to_string).collect();
         assert_eq!(repos, ["o/s"]);
+    }
+
+    #[test]
+    fn unsetting_the_agent_keeps_the_opening_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let agent = Some(AgentKind::Claude);
+        save(&data_dir, Setting::Agent { agent }).unwrap();
+        save(&data_dir, Setting::Agent { agent: None }).unwrap();
+        let text = fs::read_to_string(data_dir.config_file()).unwrap();
+        assert!(
+            text.starts_with("# Ancient Protector configuration."),
+            "{text}"
+        );
+        assert!(text.contains("# The coding agent"), "{text}");
+        save(&data_dir, Setting::Agent { agent }).unwrap();
+        let again = fs::read_to_string(data_dir.config_file()).unwrap();
+        assert!(
+            again.starts_with("# Ancient Protector configuration."),
+            "{again}"
+        );
+    }
+
+    #[test]
+    fn inline_tables_are_refused_not_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let inline = "github = { repos = [\"a/b\"] }\nmac = { project_dirs = [\"/x\"] }\n\
+                      schedule = { every_hours = 2 }\nservers = [{ name = \"web\", ssh = \"web\" }]\n";
+        fs::create_dir_all(data_dir.config_file().parent().unwrap()).unwrap();
+        fs::write(data_dir.config_file(), inline).unwrap();
+        for (change, table) in [
+            (repo_added("c/d"), "github"),
+            (
+                Setting::AddFolder {
+                    dir: "/y".to_owned(),
+                },
+                "mac",
+            ),
+            (Setting::Schedule { every_hours: None }, "schedule"),
+            (
+                Setting::AddServer {
+                    ssh: "db".to_owned(),
+                },
+                "servers",
+            ),
+            (
+                Setting::RemoveServer {
+                    name: "web".to_owned(),
+                },
+                "servers",
+            ),
+        ] {
+            let err = save(&data_dir, change).unwrap_err();
+            assert!(
+                matches!(err, SaveSettingError::Inline { table: t, .. } if t == table),
+                "{err:?}"
+            );
+        }
+        assert_eq!(fs::read_to_string(data_dir.config_file()).unwrap(), inline);
+    }
+
+    #[test]
+    fn changes_made_at_once_all_land() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let data_dir = &data_dir;
+                scope.spawn(move || save(data_dir, repo_added(&format!("o/r{i}"))).unwrap());
+            }
+        });
+        let config = Config::load_or_default(&data_dir.config_file(), Path::new("/home")).unwrap();
+        assert_eq!(config.repos.len(), 8, "no change overwrote another");
+        let leftovers: Vec<_> = fs::read_dir(data_dir.config_file().parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".partial"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]

@@ -3,8 +3,9 @@
 //! are chosen.
 //!
 //! Folders are shown as people write them (`~/code`) and compared after `~/` expansion;
-//! repositories are compared ignoring case, as GitHub does. A choice already in the config is
-//! listed once, first, whether or not detection found it too.
+//! repositories are compared ignoring case, as GitHub does. Folders and repositories in the
+//! config are listed once each: chosen folders first, then suggested ones; repositories the
+//! user typed that gh does not list first, then gh's list in its order, chosen or not.
 
 use std::path::Path;
 use std::path::PathBuf;

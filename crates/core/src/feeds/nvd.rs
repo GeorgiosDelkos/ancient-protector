@@ -12,7 +12,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Write as _;
 use std::process::Command;
+use std::process::Stdio;
 use std::str::FromStr;
 use std::thread;
 use std::time::Instant;
@@ -86,27 +88,58 @@ impl NvdAccess {
     }
 
     /// Stores `key` as the NVD API key in the login Keychain, replacing any earlier one.
-    /// Through the Security framework, not `security add-generic-password -w`, which would put
-    /// the key on a command line other processes can read.
+    ///
+    /// Through `/usr/bin/security`, the same program [`NvdAccess::from_keychain`] reads with, so
+    /// the item's access list trusts the reader and a sweep is not prompted. The command goes
+    /// to `security -i` on stdin: `security add-generic-password -w <key>` as arguments would
+    /// put the key on a command line other processes can read.
     ///
     /// # Errors
     ///
-    /// Fails when the key is not one line of printable ASCII (NVD's keys are UUIDs), or the
-    /// Keychain refuses it.
+    /// Fails when the key is not an NVD key (letters, digits and dashes), or the Keychain
+    /// refuses it.
     pub fn save_to_keychain(key: &str) -> Result<(), KeychainError> {
-        let key = key.trim();
-        // NVD keys are 36 characters; the bound only keeps out what is plainly not a key.
-        let plain = (1..=128).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_graphic());
-        if !plain {
-            return Err(KeychainError::NotAKey);
+        let script = keychain_script(key).ok_or(KeychainError::NotAKey)?;
+        let mut child = Command::new("/usr/bin/security")
+            .arg("-i")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(KeychainError::Run)?;
+        child
+            .stdin
+            .take()
+            .expect("stdin was piped above")
+            .write_all(script.as_bytes())
+            .map_err(KeychainError::Run)?;
+        let output = child.wait_with_output().map_err(KeychainError::Run)?;
+        // `security -i` reports a failed command on stderr; the text is not shown, since it
+        // could quote the command and with it the key.
+        if output.status.success() && output.stderr.is_empty() {
+            Ok(())
+        } else {
+            Err(KeychainError::Save(format!(
+                "security exited with {}",
+                output.status
+            )))
         }
-        security_framework::passwords::set_generic_password(
-            KEYCHAIN_SERVICE,
-            KEYCHAIN_ACCOUNT,
-            key.as_bytes(),
-        )
-        .map_err(|e| KeychainError::Save(e.to_string()))
     }
+}
+
+/// The `security -i` command that stores `key`, or `None` when `key` is not an NVD key. NVD's
+/// keys are UUIDs; accepting only letters, digits and inner dashes means the key needs no
+/// quoting and cannot end the command or start an option.
+fn keychain_script(key: &str) -> Option<String> {
+    let key = key.trim();
+    // 128 is arbitrary: NVD keys are 36 characters, and the bound only keeps out what is
+    // plainly not a key.
+    let plain = (1..=128).contains(&key.len())
+        && !key.starts_with('-')
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    plain.then(|| {
+        format!("add-generic-password -U -s {KEYCHAIN_SERVICE} -a {KEYCHAIN_ACCOUNT} -w {key}\n")
+    })
 }
 
 /// The key is a secret: it never appears in `Debug` output or logs.
@@ -154,7 +187,7 @@ pub enum KeychainError {
     #[error("an NVD API key is one line of letters, digits and dashes; paste it again")]
     NotAKey,
     /// The Keychain refused to store the key.
-    #[error("the Keychain refused the key: {0}")]
+    #[error("the Keychain refused the key ({0}); allow access in Keychain Access and try again")]
     Save(String),
 }
 
@@ -523,6 +556,20 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn only_an_nvd_key_reaches_the_keychain_command() {
+        let key = "1a2b3c4d-0000-4000-8000-0123456789ab";
+        assert_eq!(
+            keychain_script(&format!(" {key}\n")).unwrap(),
+            format!(
+                "add-generic-password -U -s {KEYCHAIN_SERVICE} -a {KEYCHAIN_ACCOUNT} -w {key}\n"
+            )
+        );
+        for bad in ["", "-U", "a b", "a\nb", "a\"b", "key;rm", &"a".repeat(129)] {
+            assert_eq!(keychain_script(bad), None, "{bad:?}");
+        }
+    }
     use crate::feeds::Endpoints;
     use crate::feeds::test_server::Request;
     use crate::feeds::test_server::TestServer;

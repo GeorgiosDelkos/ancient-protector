@@ -13,13 +13,18 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
   const [saved, setSaved] = createSignal(false);
   const [looking, setLooking] = createSignal(false);
 
+  // Rust applies changes one at a time, but replies can arrive out of order; only the reply
+  // to the newest command is shown, so an older view never replaces a newer one.
+  let newest = 0;
   /** Runs a command that returns the new settings, and shows them. */
   const update = (command: Promise<SettingsView | null>) => {
+    newest += 1;
+    const asked = newest;
     setError(null);
     setSaved(false);
     command
       .then((next) => {
-        if (next !== null) {
+        if (next !== null && asked === newest) {
           mutate(next);
           setSaved(true);
         }

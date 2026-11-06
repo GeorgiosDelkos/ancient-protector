@@ -125,8 +125,6 @@ struct RawOutput {
     command: String,
 }
 
-/// Runs `program` with `input` on stdin, which is closed once it is written (at once when
-/// `input` is empty).
 /// The login shell's `PATH`, when the app set it.
 static SEARCH_PATH: OnceLock<OsString> = OnceLock::new();
 
@@ -143,6 +141,8 @@ fn search_path() -> Option<OsString> {
     SEARCH_PATH.get().cloned().or_else(|| env::var_os("PATH"))
 }
 
+/// Runs `program` with `input` on stdin, which is closed once it is written (at once when
+/// `input` is empty).
 fn run_raw(
     program: &str,
     args: &[&str],

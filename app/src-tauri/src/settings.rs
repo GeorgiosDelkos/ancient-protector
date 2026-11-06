@@ -3,9 +3,11 @@
 //! shows a change without asking again.
 //!
 //! Detection takes about two seconds (the login shell and `gh` twice), so it runs once, when
-//! the app starts, and again only when the user asks; every view reuses it. A missing config
-//! reads as the default one, which the first change writes. The commands marked `async` are
-//! plain blocking functions that Tauri runs off the main thread; none of them is a future.
+//! the app starts, and again only when the user asks; every view reuses it. It runs outside
+//! the lock, so a change never waits for it; a view asked for before the first detection
+//! finishes runs its own. A missing config reads as the default one, which the first change
+//! writes. The commands marked `async` are plain blocking functions that Tauri runs off the
+//! main thread; none of them is a future.
 
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -48,10 +50,16 @@ enum Fresh {
     Now,
 }
 
-/// Runs detection in the background as the app starts, so the settings open at once. Any
-/// macOS prompt it raises (Documents access, the Keychain) shows before the popover opens.
+/// As the app starts, in the background: finds tools on the login shell's `PATH` from now on
+/// (macOS starts an app with a minimal one), then runs detection, so the settings open at
+/// once. Any macOS prompt detection raises (Documents access, the Keychain) shows before the
+/// popover opens. Off the main thread, so a slow login profile never delays the tray icon.
 pub(crate) fn detect_at_start(app: AppHandle) {
-    thread::spawn(move || drop(detected(&app, Fresh::IfMissing)));
+    thread::spawn(move || {
+        ancient_protector_core::use_login_shell_path();
+        let found = detect(app.state::<Runner>().home());
+        app.state::<Detection>().lock().get_or_insert(found);
+    });
 }
 
 /// The settings as they are now.
@@ -148,23 +156,25 @@ fn apply(app: &AppHandle, setting: &Setting) -> Result<Config, String> {
     Ok(config)
 }
 
+/// The view of `config` with what detection found, detecting first when `fresh` says so or
+/// it has not run yet.
 fn view(app: &AppHandle, config: &Config, fresh: Fresh) -> SettingsView {
-    let found = detected(app, fresh);
-    let found = found.as_ref().expect("detected() leaves a value");
-    settings_view(config, found, app.state::<Runner>().home())
-}
-
-/// What detection found, detecting first when `fresh` says so. The lock is held while
-/// detecting, so a view asked for while detection runs waits for it instead of running a
-/// second one.
-fn detected(app: &AppHandle, fresh: Fresh) -> MutexGuard<'_, Option<Detected>> {
-    let mut found = app.state::<Detection>().inner().lock();
-    if found.is_none() || matches!(fresh, Fresh::Now) {
+    let runner = app.state::<Runner>();
+    let home = runner.home();
+    let detection = app.state::<Detection>();
+    if matches!(fresh, Fresh::IfMissing)
+        && let Some(found) = detection.lock().as_ref()
+    {
+        return settings_view(config, found, home);
+    }
+    let found = {
         // A prompt detection raises would take the focus and hide the popover.
         let _held = tray::hold_popover(app);
-        *found = Some(detect(app.state::<Runner>().home()));
-    }
-    found
+        detect(home)
+    };
+    let view = settings_view(config, &found, home);
+    *detection.lock() = Some(found);
+    view
 }
 
 /// An error and its sources as one line, `outer: inner`.
