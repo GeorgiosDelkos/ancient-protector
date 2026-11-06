@@ -92,17 +92,24 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
 ### Lifecycle (decided 2026-11-06)
 
 - `FindingKey`: 16 hex digits, FNV-1a (64 bit, fixed across builds) of the target, the primary
-  advisory, the component's lookup and where it was found; an issue's of the target and its
-  subject. The version is left out, so a finding keeps its key until it is fixed. The primary
-  advisory is the bundle advisory the agent's first listed id resolves to, not the listed id:
-  an agent may list a GHSA's CVE first in one sweep and the GHSA in the next.
+  advisory, the component's lookup and where it was found (an OS package by its source
+  package alone, since its binary packages change with installs and renames); an issue's of
+  the target and its subject, which names one issue per report. The version is left out, so
+  a finding keeps its key until it is fixed, except where two findings would share a key (two
+  versions of one package in one lockfile): those get the version too. The primary advisory
+  is the smallest id among the bundle advisories the agent's listed ids resolve to, so it does
+  not depend on their order or on whether the agent listed the GHSA or its CVE.
 - Dismissals: `state/dismissals.json`, key -> reason, time, and the advisory's `modified` time
   as the newest report had it. A dismissed finding shows again when that time changes; an
   issue stays dismissed until `undismiss`. Writes take `state/.lock` and replace the file
   whole. Reports keep dismissed entries, marked, and `report.md` lists them under "Dismissed".
   A dismissals file that cannot be read is a note in every report, and nothing is dismissed.
-- Changes: each target's report has `changes`: the keys new and resolved since that target's
-  newest earlier report with a verdict. A report without a verdict has none. Accepted
+- Changes: each target's report has `changes`, against that target's newest earlier report
+  with a verdict: new is what is shown now and was not shown then (absent, or dismissed and
+  shown again), resolved is what was shown then and is gone now; a key dismissed since is
+  neither. Only `<sweep>/<target>/report.json` is read, newest sweep first, stopping at the
+  first with a verdict. A report without a verdict has none, and a report that cannot be read
+  is a note. Accepted
   downside: a source that fails (OSV offline) makes its findings show as resolved; the report
   lists the failed source under "Not checked".
 - Fixes (PR 9): the fix in the sweep's finding is the plan the user confirms; there is no

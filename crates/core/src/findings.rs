@@ -167,9 +167,10 @@ pub(crate) struct Verdict {
     pub(crate) issues: Vec<Issue>,
 }
 
-/// A finding that passed validation, with the index of its component and the bundle advisory
-/// its first listed id resolved to. That advisory, not the listed id, keys the finding: an
-/// agent may list a GHSA's CVE first in one sweep and the GHSA in the next.
+/// A finding that passed validation, with the index of its component and its primary advisory:
+/// the smallest id of the bundle advisories its listed ids resolved to. That advisory keys the
+/// finding, so it does not depend on what the agent listed first: a GHSA's CVE in one sweep,
+/// the GHSA in the next.
 #[derive(Debug)]
 pub(crate) struct Valid {
     pub(crate) finding: Finding,
@@ -185,8 +186,16 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Verdict, Vec<String>
 
     let mut problems = Vec::new();
     let valid = check_findings(findings.findings, known, &mut problems);
+    let mut subjects = BTreeSet::new();
     for (i, issue) in findings.issues.iter().enumerate() {
         let at = format!("issues[{i}]");
+        // The subject keys the issue across sweeps (see `lifecycle`), so it names one issue.
+        if !subjects.insert(plain_subject(&issue.subject)) {
+            problems.push(format!(
+                "{at}.subject: {} is already an issue; merge them",
+                plain_subject(&issue.subject)
+            ));
+        }
         let known_subject = match &issue.subject {
             Subject::Setting(key) => known.settings.contains(key),
             Subject::File(path) => known.files.contains(path),
@@ -259,7 +268,7 @@ fn check_findings(findings: Vec<Finding>, known: &Known, problems: &mut Vec<Stri
         }
         let advisory = advisories
             .into_iter()
-            .next()
+            .min()
             .expect("a finding without problems resolved at least one advisory");
         valid.push(Valid {
             finding,
@@ -511,6 +520,13 @@ mod tests {
             let text = json!({"findings": [], "issues": [issue(&subject)]});
             assert!(validate(&text.to_string(), &known).is_err());
         }
+        let ci = json!({"file": "github/workflows/ci.yml"});
+        let text = json!({"findings": [], "issues": [issue(&ci), issue(&ci)]});
+        assert_eq!(
+            validate(&text.to_string(), &known).unwrap_err(),
+            ["issues[1].subject: file \"github/workflows/ci.yml\" is already an issue; merge them"]
+        );
+
         let older = validate(r#"{"findings": []}"#, &known).unwrap();
         assert!(
             older.issues.is_empty(),
@@ -529,8 +545,20 @@ mod tests {
         .unwrap();
         assert_eq!(valid[0].component, 0);
         assert_eq!(valid[0].finding.severity, Severity::Medium);
+        assert_eq!(valid[0].advisory, "GHSA-1");
         let valid = check(&[finding(&["CVE-1"], "c1", "low", false)], &kev).unwrap();
         assert_eq!(valid.len(), 1, "an alias alone names its advisory");
+        assert_eq!(
+            valid[0].advisory, "GHSA-1",
+            "the primary is a bundle advisory"
+        );
+        for listed in [["CVE-KEV", "CVE-2"], ["CVE-2", "CVE-KEV"]] {
+            let valid = check(&[finding(&listed, "c2", "low", false)], &kev).unwrap();
+            assert_eq!(
+                valid[0].advisory, "CVE-2",
+                "the smallest, whatever the order"
+            );
+        }
         let valid = check(&[finding(&["CVE-1"], "c2", "low", false)], &kev).unwrap();
         assert_eq!(
             valid[0].component, 1,

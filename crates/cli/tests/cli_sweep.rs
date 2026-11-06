@@ -487,11 +487,26 @@ fn dismissals_hold_across_sweeps_and_changes_are_counted() {
         "{stdout}"
     );
 
-    assert!(sandbox.sweep("ok").status.success());
-    let third = sandbox.newest_report("github-o--r");
-    assert_eq!(third["changes"]["resolved"], serde_json::json!([key]));
-
     assert!(sandbox.run(&["undismiss", &key]).status.success());
     let again = sandbox.run(&["undismiss", &key]);
     assert!(text(&again.stderr).contains(&format!("finding {key} is not dismissed")));
+    assert!(sandbox.sweep("issue").status.success());
+    let third = sandbox.newest_report("github-o--r");
+    assert_eq!(
+        third["changes"]["new"],
+        serde_json::json!([key]),
+        "shown again"
+    );
+
+    assert!(sandbox.sweep("ok").status.success());
+    let fourth = sandbox.newest_report("github-o--r");
+    assert_eq!(fourth["changes"]["resolved"], serde_json::json!([key]));
+
+    fs::write(sandbox.path().join("data/state/dismissals.json"), "{").unwrap();
+    assert!(sandbox.sweep("ok").status.success());
+    let problems = sandbox.newest_report("mac")["problems"].to_string();
+    assert!(
+        problems.contains("dismissals, so dismissed findings show again: cannot read"),
+        "{problems}"
+    );
 }

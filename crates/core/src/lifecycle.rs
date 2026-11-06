@@ -21,6 +21,7 @@ use std::str::FromStr;
 use jiff::Timestamp;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::IgnoredAny;
 
 use crate::findings::is_forging;
 use crate::paths::DataDir;
@@ -63,9 +64,10 @@ impl FromStr for FindingKey {
         let error = || ParseFindingKeyError {
             input: s.to_owned(),
         };
-        hex.then(|| u64::from_str_radix(s, 16).map_err(|_| error()))
-            .ok_or_else(error)?
-            .map(Self)
+        if !hex {
+            return Err(error());
+        }
+        u64::from_str_radix(s, 16).map(Self).map_err(|_| error())
     }
 }
 
@@ -134,7 +136,7 @@ pub fn dismiss(data_dir: &DataDir, key: FindingKey, reason: &str) -> Result<Dism
     if reason.is_empty() || reason.chars().any(is_forging) {
         return Err(StateError::Reason);
     }
-    let newest = newest(&data_dir.sweeps_dir(), key).ok_or(StateError::UnknownKey { key })?;
+    let newest = newest(&data_dir.sweeps_dir(), key)?.ok_or(StateError::UnknownKey { key })?;
     let dismissal = Dismissal {
         reason: reason.to_owned(),
         at: Timestamp::now(),
@@ -183,7 +185,8 @@ fn update<T>(
     let path = state.join(DISMISSALS);
     let mut all = read_dismissals(&path)?;
     let changed = change(&mut all)?;
-    let json = serde_json::to_string_pretty(&all).expect("dismissals serialize");
+    let json = serde_json::to_string_pretty(&all)
+        .expect("string keys and plain structs always serialize to JSON");
     let partial = state.join(format!(".{DISMISSALS}.partial"));
     fs::File::create(&partial)
         .and_then(|mut file| {
@@ -191,6 +194,8 @@ fn update<T>(
             file.sync_data()
         })
         .and_then(|()| fs::rename(&partial, &path))
+        // Syncs the folder too, so a crash after this returns cannot undo the rename.
+        .and_then(|()| fs::File::open(&state)?.sync_all())
         .map_err(write_err(&path))?;
     Ok(changed)
 }
@@ -220,22 +225,36 @@ pub struct Changes {
 }
 
 impl Changes {
-    /// Compares `keys`, the current verdict's, with the newest earlier report of `target` in
-    /// `sweeps` that has a verdict. `None` when there is none.
+    /// Compares the current verdict with the newest earlier report in `<sweep>/<dir_name>`
+    /// that has a verdict: `active` holds the keys not dismissed now, `all` every key now.
+    /// New is what is active now and was not active then (absent, or dismissed and shown
+    /// again); resolved is what was active then and is gone now. A key dismissed since is
+    /// neither. `None` when no earlier report has a verdict.
     pub(crate) fn since_last(
         sweeps: &Path,
-        target: &str,
-        keys: &BTreeSet<FindingKey>,
-    ) -> Option<Self> {
-        let last = saved_reports(sweeps)
-            .filter(|r| r.target == target && r.failure.is_none())
-            .max_by_key(|r| r.started)?;
-        let before: BTreeSet<FindingKey> = last.keys().collect();
-        Some(Self {
-            since: last.started,
-            new: keys.difference(&before).copied().collect(),
-            resolved: before.difference(keys).copied().collect(),
-        })
+        dir_name: &str,
+        active: &BTreeSet<FindingKey>,
+        all: &BTreeSet<FindingKey>,
+    ) -> Result<Option<Self>, StateError> {
+        for sweep in newest_first(sweeps)? {
+            let Some(last) = read_saved(&sweep.join(dir_name))? else {
+                continue;
+            };
+            if last.failure.is_some() {
+                continue;
+            }
+            let before: BTreeSet<FindingKey> = last
+                .entries()
+                .filter(|e| e.dismissed.is_none())
+                .map(|e| e.key)
+                .collect();
+            return Ok(Some(Self {
+                since: last.started,
+                new: active.difference(&before).copied().collect(),
+                resolved: before.difference(all).copied().collect(),
+            }));
+        }
+        Ok(None)
     }
 }
 
@@ -243,7 +262,6 @@ impl Changes {
 #[derive(Debug, Deserialize)]
 struct Saved {
     started: Timestamp,
-    target: String,
     failure: Option<String>,
     findings: Vec<SavedEntry>,
     issues: Vec<SavedEntry>,
@@ -254,42 +272,86 @@ struct SavedEntry {
     key: FindingKey,
     #[serde(default)]
     modified: Option<Timestamp>,
+    /// Only whether it is there matters.
+    #[serde(default)]
+    dismissed: Option<IgnoredAny>,
 }
 
 impl Saved {
-    fn keys(&self) -> impl Iterator<Item = FindingKey> {
-        self.findings.iter().chain(&self.issues).map(|e| e.key)
+    fn entries(&self) -> impl Iterator<Item = &SavedEntry> {
+        self.findings.iter().chain(&self.issues)
     }
 }
 
-/// Every `<sweep>/<target>/report.json` under `sweeps` that parses. Reports written before
-/// finding keys existed do not, and are skipped, as are unreadable ones: they hold no key to
-/// compare with or dismiss.
-fn saved_reports(sweeps: &Path) -> impl Iterator<Item = Saved> {
-    let dirs = |dir: &Path| {
-        fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .collect::<Vec<PathBuf>>()
+/// The sweep folders under `sweeps`, newest first. A folder is named by its start second,
+/// `20261106T101500Z`, with `-2`, `-3` and so on for later sweeps that started in the same
+/// second; other names are not sweeps. Sorting by name alone would put `-10` before `-2`.
+fn newest_first(sweeps: &Path) -> Result<Vec<PathBuf>, StateError> {
+    let entries = match fs::read_dir(sweeps) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(StateError::Read {
+                path: sweeps.to_owned(),
+                source,
+            });
+        }
     };
-    dirs(sweeps)
-        .into_iter()
-        .flat_map(move |sweep| dirs(&sweep))
-        .filter_map(|target| fs::read_to_string(target.join("report.json")).ok())
-        .filter_map(|text| serde_json::from_str(&text).ok())
+    let mut found: Vec<((String, u32), PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let (stamp, n) = match name.split_once('-') {
+                Some((stamp, n)) => (stamp, n.parse().ok()?),
+                None => (name.as_str(), 1),
+            };
+            let is_stamp = stamp.len() == 16
+                && stamp.bytes().enumerate().all(|(i, b)| match i {
+                    8 => b == b'T',
+                    15 => b == b'Z',
+                    _ => b.is_ascii_digit(),
+                });
+            is_stamp.then(|| ((stamp.to_owned(), n), e.path()))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(found.into_iter().map(|(_, path)| path).collect())
 }
 
-/// `key` as its newest report has it, when one does.
-fn newest(sweeps: &Path, key: FindingKey) -> Option<SavedEntry> {
-    saved_reports(sweeps)
-        .filter_map(|r| {
-            let entry = r.findings.iter().chain(&r.issues).find(|e| e.key == key)?;
-            Some((r.started, *entry))
-        })
-        .max_by_key(|(started, _)| *started)
-        .map(|(_, entry)| entry)
+/// Reads `<target dir>/report.json`; `None` when the target was not in that sweep.
+fn read_saved(target_dir: &Path) -> Result<Option<Saved>, StateError> {
+    let path = target_dir.join("report.json");
+    let read_err = |source| StateError::Read {
+        path: path.clone(),
+        source,
+    };
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(read_err(e)),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| read_err(io::Error::new(io::ErrorKind::InvalidData, e)))
+}
+
+/// `key` as the newest report that has it has it, when one does.
+fn newest(sweeps: &Path, key: FindingKey) -> Result<Option<SavedEntry>, StateError> {
+    for sweep in newest_first(sweeps)? {
+        let targets = fs::read_dir(&sweep).map_err(|source| StateError::Read {
+            path: sweep.clone(),
+            source,
+        })?;
+        for target in targets.filter_map(Result::ok).map(|e| e.path()) {
+            let Some(saved) = read_saved(&target)? else {
+                continue;
+            };
+            if let Some(entry) = saved.entries().find(|e| e.key == key) {
+                return Ok(Some(*entry));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Error from reading or changing the lifecycle state.
@@ -397,7 +459,7 @@ mod tests {
         let at = "2026-11-01T00:00:00Z";
         save(
             &data_dir.sweeps_dir(),
-            "s1/mac",
+            "20261105T000000Z/mac",
             &report("2026-11-05T00:00:00Z", None, &[kept], at),
         );
 
@@ -442,7 +504,12 @@ mod tests {
             Dismissals::load(&data_dir).unwrap().0.is_empty(),
             "no file is no dismissals"
         );
-        fs::create_dir_all(data_dir.state_dir()).unwrap();
+        fs::create_dir_all(data_dir.state_dir().join(DISMISSALS)).unwrap();
+        assert!(
+            matches!(Dismissals::load(&data_dir), Err(StateError::Read { .. })),
+            "a folder in its place is not an empty file"
+        );
+        fs::remove_dir(data_dir.state_dir().join(DISMISSALS)).unwrap();
         fs::write(data_dir.state_dir().join(DISMISSALS), "{").unwrap();
         assert!(matches!(
             Dismissals::load(&data_dir),
@@ -454,43 +521,57 @@ mod tests {
     fn changes_compare_with_the_newest_report_that_has_a_verdict() {
         let tmp = tempfile::tempdir().unwrap();
         let sweeps = tmp.path();
-        let [a, b, c] = [FindingKey(1), FindingKey(2), FindingKey(3)];
+        let [kept, gone, added, again, hidden] = [1, 2, 3, 4, 5].map(FindingKey);
         let at = "2026-11-01T00:00:00Z";
-        assert!(
-            Changes::since_last(sweeps, "mac", &[a].into()).is_none(),
-            "no sweeps yet"
+        let since = |active: &[FindingKey], all: &[FindingKey]| {
+            let set = |keys: &[FindingKey]| keys.iter().copied().collect::<BTreeSet<_>>();
+            Changes::since_last(sweeps, "mac", &set(active), &set(all)).unwrap()
+        };
+        assert!(since(&[kept], &[kept]).is_none(), "no sweeps yet");
+
+        // By name `-10` sorts before `-2`; it is the newer sweep.
+        let mut last = report("2026-11-04T00:00:00Z", None, &[kept, gone, again], at);
+        last["findings"][2]["dismissed"] = json!({"reason": "x", "at": at, "modified": at});
+        save(sweeps, "20261104T000000Z-10/mac", &last);
+        save(
+            sweeps,
+            "20261104T000000Z-2/mac",
+            &report("2026-11-03T00:00:00Z", None, &[hidden], at),
+        );
+        let failed = report("2026-11-05T00:00:00Z", Some("agent"), &[], at);
+        save(sweeps, "20261105T000000Z/mac", &failed);
+        save(
+            sweeps,
+            "20261106T000000Z/github-o--r",
+            &report("2026-11-06T00:00:00Z", None, &[], at),
+        );
+        save(
+            sweeps,
+            "not-a-sweep/mac",
+            &report("2026-11-07T00:00:00Z", None, &[], at),
         );
 
-        save(
-            sweeps,
-            "old/mac",
-            &report("2026-11-03T00:00:00Z", None, &[c], at),
-        );
-        save(
-            sweeps,
-            "last/mac",
-            &report("2026-11-04T00:00:00Z", None, &[a, b], at),
-        );
-        save(
-            sweeps,
-            "failed/mac",
-            &report("2026-11-05T00:00:00Z", Some("agent"), &[], at),
-        );
-        save(
-            sweeps,
-            "keyless/mac",
-            &json!({"started": "2026-11-06T00:00:00Z", "target": "mac"}),
-        );
-        let mut github = report("2026-11-06T00:00:00Z", None, &[], at);
-        github["target"] = json!("github:o/r");
-        save(sweeps, "other/github-o--r", &github);
-
-        let changes = Changes::since_last(sweeps, "mac", &[a, c].into()).unwrap();
+        // Now: one kept, one gone, one added, one shown again, and one dismissed while new.
+        let changes = since(&[kept, added, again], &[kept, added, again, hidden]).unwrap();
         assert_eq!(
             changes.since,
             "2026-11-04T00:00:00Z".parse::<Timestamp>().unwrap()
         );
-        assert_eq!(changes.new, [c]);
-        assert_eq!(changes.resolved, [b]);
+        assert_eq!(changes.new, [added, again]);
+        assert_eq!(changes.resolved, [gone]);
+
+        let changes = since(&[], &[kept, gone]).unwrap();
+        assert_eq!(
+            (changes.new, changes.resolved),
+            (vec![], vec![]),
+            "dismissed since"
+        );
+
+        let broken = sweeps.join("20261104T000000Z-10/mac/report.json");
+        fs::write(&broken, "{").unwrap();
+        assert!(matches!(
+            Changes::since_last(sweeps, "mac", &BTreeSet::new(), &BTreeSet::new()),
+            Err(StateError::Read { path, .. }) if path == broken
+        ));
     }
 }

@@ -453,28 +453,67 @@ impl Shared<'_> {
             Ok(verdict) => (verdict, None),
             Err(failure) => (Verdict::default(), Some(plain(&failure))),
         };
+        let (findings, issues) =
+            self.keyed(&collected.target, &collected.components, verdict, &fetched);
+        let changes = if failure.is_some() {
+            None
+        } else {
+            let entries = || {
+                let findings = findings.iter().map(|f| (f.key, f.dismissed.is_some()));
+                findings.chain(issues.iter().map(|i| (i.key, i.dismissed.is_some())))
+            };
+            let all = entries().map(|(key, _)| key).collect();
+            let active = entries().filter(|(_, d)| !d).map(|(key, _)| key).collect();
+            let sweeps = self.data_dir.sweeps_dir();
+            Changes::since_last(&sweeps, &collected.dir_name, &active, &all).unwrap_or_else(|e| {
+                problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
+                None
+            })
+        };
+
+        let mut report = Report::new(started, collected.target, self.agent, dir.clone());
+        report.components = collected.components.len();
+        report.advisories = entries.len();
+        report.findings = findings;
+        report.issues = issues;
+        report.changes = changes;
+        report.problems = problems.iter().map(|p| plain(p)).collect();
+        report.failure = failure;
+        save_report(&dir, &mut report);
+        Ok(report)
+    }
+}
+
+impl Shared<'_> {
+    /// Keys the verdict's findings and issues, marks the dismissed ones, and sorts each list
+    /// most severe first.
+    fn keyed(
+        &self,
+        target: &str,
+        components: &[Component],
+        verdict: Verdict,
+        fetched: &[(Advisory, BTreeSet<usize>)],
+    ) -> (Vec<ReportFinding>, Vec<ReportIssue>) {
         let modified: BTreeMap<&str, Option<Timestamp>> = fetched
             .iter()
             .map(|(a, _)| (a.id.as_str(), a.modified))
             .collect();
-        let target = collected.target.as_str();
+        let primaries: Vec<(&str, &Component)> = verdict
+            .findings
+            .iter()
+            .map(|v| (v.advisory.as_str(), &components[v.component]))
+            .collect();
+        let keys = finding_keys(target, &primaries);
         let mut findings: Vec<ReportFinding> = verdict
             .findings
             .into_iter()
-            .map(|valid| {
-                let installed = collected.components[valid.component].clone();
-                let found_in = installed.found_in.to_string();
-                let key = FindingKey::new(&[
-                    target,
-                    &valid.advisory,
-                    &component_name(&installed),
-                    &found_in,
-                ]);
+            .zip(keys)
+            .map(|(valid, key)| {
                 let modified = modified.get(valid.advisory.as_str()).copied().flatten();
                 ReportFinding {
                     key,
                     finding: valid.finding,
-                    installed,
+                    installed: components[valid.component].clone(),
                     modified,
                     dismissed: self.dismissals.get(key, modified).cloned(),
                 }
@@ -494,25 +533,53 @@ impl Shared<'_> {
             })
             .collect();
         issues.sort_by_key(|i| i.issue.severity);
-        let changes = failure.is_none().then(|| {
-            let keys = findings
-                .iter()
-                .map(|f| f.key)
-                .chain(issues.iter().map(|i| i.key));
-            Changes::since_last(&self.data_dir.sweeps_dir(), target, &keys.collect())
-        });
-
-        let mut report = Report::new(started, collected.target, self.agent, dir.clone());
-        report.components = collected.components.len();
-        report.advisories = entries.len();
-        report.findings = findings;
-        report.issues = issues;
-        report.changes = changes.flatten();
-        report.problems = problems.iter().map(|p| plain(p)).collect();
-        report.failure = failure;
-        save_report(&dir, &mut report);
-        Ok(report)
+        (findings, issues)
     }
+}
+
+/// The key of each finding, given as its primary advisory and component: the target, the
+/// advisory, the component's lookup and where it was found. These parts come from data, not
+/// display text, so rewording a message keeps every key. An OS package is keyed by its source
+/// package alone: the binary packages built from it change with installs and renames
+/// (`libssl3` became `libssl3t64`) while the finding stays. Findings that would share a key
+/// (two versions of one package in one lockfile, both affected) get the version too, so each
+/// has its own; a fix of one then changes the other's key, which is accepted.
+fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey> {
+    let parts: Vec<[String; 3]> = findings
+        .iter()
+        .map(|(advisory, c)| {
+            let lookup = match &c.lookup {
+                Lookup::Package(p) => format!("{}:{}", p.ecosystem.osv_name(), p.name),
+                Lookup::Product(p) => format!("product:{p}"),
+            };
+            let found_in = match &c.found_in {
+                FoundIn::OsPackage { .. } => "os_package".to_owned(),
+                other => serde_json::to_string(other).expect("FoundIn serializes"),
+            };
+            [(*advisory).to_owned(), lookup, found_in]
+        })
+        .collect();
+    let mut counts: BTreeMap<&[String; 3], usize> = BTreeMap::new();
+    for p in &parts {
+        *counts.entry(p).or_default() += 1;
+    }
+    parts
+        .iter()
+        .zip(findings)
+        .map(|(p, (_, c))| {
+            let [advisory, lookup, found_in] = p;
+            let mut key = vec![
+                target,
+                advisory.as_str(),
+                lookup.as_str(),
+                found_in.as_str(),
+            ];
+            if counts[p] > 1 {
+                key.push(&c.version);
+            }
+            FindingKey::new(&key)
+        })
+        .collect()
 }
 
 /// Creates `<sweeps>/<start time>`, or `<start time>-2` and so on when an earlier sweep
@@ -889,17 +956,26 @@ pub fn report_markdown(report: &Report) -> String {
                 component_name(&f.installed),
                 f.installed.found_in
             );
-            (f.key, f.finding.severity, what, f.dismissed.as_ref())
+            let reason = &f
+                .dismissed
+                .as_ref()
+                .expect("partitioned on dismissed")
+                .reason;
+            (f.key, f.finding.severity, what, reason)
         })
         .chain(dismissed_issues.iter().map(|i| {
             let what = i.issue.subject.to_string();
-            (i.key, i.issue.severity, what, i.dismissed.as_ref())
+            let reason = &i
+                .dismissed
+                .as_ref()
+                .expect("partitioned on dismissed")
+                .reason;
+            (i.key, i.issue.severity, what, reason)
         }));
     let mut dismissed = dismissed.peekable();
     if dismissed.peek().is_some() {
         out.push_str("## Dismissed\n\n");
-        for (key, severity, what, dismissal) in dismissed {
-            let reason = dismissal.map_or("", |d| d.reason.as_str());
+        for (key, severity, what, reason) in dismissed {
             out.push_str(&format!(
                 "- {severity} {} (key {key}): {}\n",
                 escape(&what),
@@ -1157,6 +1233,8 @@ mod tests {
     use crate::feeds::Endpoints;
     use crate::feeds::test_server::Request;
     use crate::feeds::test_server::TestServer;
+    use crate::package::Ecosystem;
+    use crate::package::Package;
 
     fn component(lookup: &str, version: &str) -> Component {
         let lookup = if lookup.contains(':') {
@@ -1279,6 +1357,58 @@ mod tests {
         );
         assert!(seen[0].contains("packages: 2, products: 2"), "{seen:?}");
         assert!(seen[1].contains("done: 1, total: 2"), "{seen:?}");
+    }
+
+    #[test]
+    fn finding_keys_survive_upgrades_and_package_lists_but_not_collisions() {
+        let os = |version: &str, packages: &[&str]| Component {
+            found_in: FoundIn::OsPackage {
+                packages: packages.iter().map(|p| (*p).to_owned()).collect(),
+            },
+            lookup: Lookup::Package(Package {
+                ecosystem: Ecosystem::Debian { release: 12 },
+                name: "openssl".to_owned(),
+            }),
+            version: version.to_owned(),
+        };
+        let before = finding_keys("server:web", &[("DSA-1", &os("3.0.1", &["libssl3"]))]);
+        let after = finding_keys(
+            "server:web",
+            &[("DSA-1", &os("3.0.2", &["libssl3t64", "openssl"]))],
+        );
+        assert_eq!(
+            before, after,
+            "a version bump or a renamed binary package keeps the key"
+        );
+        assert_ne!(
+            before,
+            finding_keys("server:db", &[("DSA-1", &os("3.0.1", &[]))])
+        );
+        assert_ne!(
+            before,
+            finding_keys("server:web", &[("DSA-2", &os("3.0.1", &[]))])
+        );
+
+        let lock = |version: &str, path: &str| Component {
+            found_in: FoundIn::Lockfile {
+                path: PathBuf::from(path),
+            },
+            ..component("crates.io:syn", version)
+        };
+        let (one, two) = (
+            lock("1.0.109", "/p/Cargo.lock"),
+            lock("2.0.1", "/p/Cargo.lock"),
+        );
+        let keys = finding_keys("mac", &[("GHSA-1", &one), ("GHSA-1", &two)]);
+        assert_ne!(keys[0], keys[1], "two versions in one lockfile");
+        let other = lock("1.0.109", "/q/Cargo.lock");
+        let keys = finding_keys("mac", &[("GHSA-1", &one), ("GHSA-1", &other)]);
+        assert_ne!(keys[0], keys[1], "one version in two lockfiles");
+        assert_eq!(
+            keys[0],
+            finding_keys("mac", &[("GHSA-1", &one)])[0],
+            "no collision, no version"
+        );
     }
 
     fn report_finding(id: &str, severity: &str, kev: bool, lookup: &str) -> ReportFinding {
