@@ -855,6 +855,36 @@ mod tests {
     }
 
     #[test]
+    fn first_seen_comes_from_the_newest_verdict_or_its_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path();
+        assert!(
+            first_seen(sweeps, "mac").unwrap().is_empty(),
+            "no sweeps yet"
+        );
+        let [old, unseen] = [1, 2].map(FindingKey);
+        let entry = |key: FindingKey| json!({"key": key, "severity": "low", "title": "t"});
+        let mut seen = entry(old);
+        seen["first_seen"] = json!("2026-10-01T00:00:00Z");
+        let report = json!({
+            "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
+            "findings": [seen], "issues": [entry(unseen)],
+        });
+        save(sweeps, "20261105T000000Z/mac", &report);
+        let failed = json!({"started": "2026-11-06T00:00:00Z", "target": "mac",
+            "failure": "agent", "findings": [], "issues": []});
+        save(sweeps, "20261106T000000Z/mac", &failed);
+        let first = first_seen(sweeps, "mac").unwrap();
+        let at = |s: &str| s.parse::<Timestamp>().unwrap();
+        assert_eq!(first.get(&old), Some(&at("2026-10-01T00:00:00Z")));
+        assert_eq!(
+            first.get(&unseen),
+            Some(&at("2026-11-05T00:00:00Z")),
+            "saved before the field: the report's start; the failed sweep after it is skipped"
+        );
+    }
+
+    #[test]
     fn latest_lists_open_entries_worst_first_with_state_dismissals_and_plain_text() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path().join("data"));

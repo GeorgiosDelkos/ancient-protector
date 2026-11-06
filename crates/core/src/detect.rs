@@ -8,6 +8,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -116,7 +117,13 @@ pub struct SshHost {
 /// user's terminal and as the settings show it: the menu-bar app starts with macOS's minimal
 /// one. When the shell gives no answer, the `PATH` in use stays.
 pub fn detect(home: &Path) -> Detected {
-    let answer = login_shell();
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
+    detect_with(&shell, home, crate::feeds::NvdAccess::has_keychain_key)
+}
+
+/// [`detect`] with the login shell and the Keychain check given, so tests use stand-ins.
+fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Detected {
+    let answer = login_shell(shell);
     if let Some(answer) = &answer {
         command::use_search_path(answer.path.clone());
     }
@@ -140,13 +147,8 @@ pub fn detect(home: &Path) -> Detected {
         _ => Vec::new(),
     };
     let ssh_hosts = fs::read_to_string(home.join(".ssh/config"))
-        .map(|text| ssh_hosts(&text))
-        .unwrap_or_default();
-    let folders = PROJECT_FOLDERS
-        .iter()
-        .map(|f| home.join(f))
-        .filter(|p| p.is_dir())
-        .collect();
+        .map_or_else(|_| Vec::new(), |text| ssh_hosts(&text));
+    let folders = project_folders(home);
     Detected {
         agents,
         tools,
@@ -154,8 +156,26 @@ pub fn detect(home: &Path) -> Detected {
         repos,
         ssh_hosts,
         folders,
-        nvd_key: crate::feeds::NvdAccess::has_keychain_key(),
+        nvd_key: nvd_key(),
     }
+}
+
+/// The usual project folders that exist, each once. The default macOS file system ignores
+/// case, so `code` and `Code` can be one folder; folders are told apart by device and inode.
+fn project_folders(home: &Path) -> Vec<PathBuf> {
+    let mut seen = Vec::new();
+    let mut folders = Vec::new();
+    for folder in PROJECT_FOLDERS.iter().map(|f| home.join(f)) {
+        let Ok(meta) = fs::metadata(&folder) else {
+            continue;
+        };
+        let id = (meta.dev(), meta.ino());
+        if meta.is_dir() && !seen.contains(&id) {
+            seen.push(id);
+            folders.push(folder);
+        }
+    }
+    folders
 }
 
 /// The login shell's answer: its `PATH`, and each program it found.
@@ -174,8 +194,7 @@ impl Answer {
     }
 }
 
-fn login_shell() -> Option<Answer> {
-    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
+fn login_shell(shell: &str) -> Option<Answer> {
     let names: Vec<&str> = AGENTS
         .iter()
         .map(|a| a.binary())
@@ -187,7 +206,7 @@ fn login_shell() -> Option<Answer> {
          \"$b\" \"$(command -v \"$b\")\"; done; printf '%s\\n' {END_MARK}",
         names.join(" ")
     );
-    let output = command::run_any_status(&shell, &["-lc", &script]).ok()??;
+    let output = command::run_any_status(shell, &["-lc", &script]).ok()??;
     parse_answer(&output.stdout)
 }
 
@@ -216,7 +235,13 @@ fn parse_answer(stdout: &str) -> Option<Answer> {
 fn gh_login(gh: &Path) -> Option<String> {
     let gh = gh.to_str()?;
     let login = command::run(gh, &["api", "user", "--jq", ".login"]).ok()??;
-    let login = login.trim();
+    plain_login(&login)
+}
+
+/// `gh`'s answer as a GitHub login, which is letters, digits and dashes; anything else (an
+/// error page, a prompt) is no login.
+fn plain_login(answer: &str) -> Option<String> {
+    let login = answer.trim();
     let plain = !login.is_empty()
         && login
             .bytes()
@@ -318,6 +343,101 @@ mod tests {
         assert!(parse_answer("nothing marked\n").is_none());
     }
 
+    /// Writes an executable shell script.
+    fn script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn detection_reads_the_login_shell_gh_ssh_and_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(home.join(".ssh")).unwrap();
+        fs::create_dir_all(home.join("code")).unwrap();
+        fs::write(home.join("Projects"), "").unwrap();
+        fs::write(home.join(".ssh/config"), "Host web\n  HostName 10.0.0.5\n").unwrap();
+        let gh = bin.join("gh");
+        script(
+            &gh,
+            "case \"$1\" in\n\
+             api) echo me-1 ;;\n\
+             repo) echo '[{\"nameWithOwner\":\"me-1/app\",\"isPrivate\":true}]' ;;\n\
+             esac\n",
+        );
+        // The answer's PATH keeps /bin and /usr/bin: detection makes it the process's search
+        // path, and other tests running at the same time run tools by name.
+        let shell = bin.join("shell");
+        script(
+            &shell,
+            &format!(
+                "printf '%s\\n' {PATH_MARK} '/bin:/usr/bin'\n\
+                 printf '{BIN_MARK}claude\\t/opt/claude\\n{BIN_MARK}gh\\t{}\\n'\n\
+                 printf '%s\\n' {END_MARK}\n",
+                gh.display()
+            ),
+        );
+        let found = detect_with(shell.to_str().unwrap(), &home, || true);
+        assert_eq!(
+            found.agents[0],
+            (AgentKind::Claude, Some(PathBuf::from("/opt/claude")))
+        );
+        assert_eq!(found.agents[1], (AgentKind::Grok, None));
+        let gh_tool = found.tools.iter().find(|t| t.program == "gh").unwrap();
+        assert_eq!(gh_tool.path.as_deref(), Some(gh.as_path()));
+        assert_eq!(found.gh_login.as_deref(), Some("me-1"));
+        assert_eq!(found.repos.len(), 1);
+        assert_eq!(found.repos[0].name_with_owner, "me-1/app");
+        assert!(found.repos[0].is_private);
+        assert_eq!(found.ssh_hosts[0].alias, "web");
+        assert_eq!(
+            found.folders,
+            [home.join("code")],
+            "Projects is a file, and Code is code on a disk that ignores case"
+        );
+        assert!(found.nvd_key);
+
+        let nothing = detect_with("/nonexistent/shell", &tmp.path().join("none"), || false);
+        assert!(nothing.agents.iter().all(|(_, path)| path.is_none()));
+        assert_eq!(nothing.gh_login, None);
+        assert!(nothing.repos.is_empty() && nothing.ssh_hosts.is_empty());
+        assert!(!nothing.nvd_key);
+    }
+
+    #[test]
+    fn without_a_gh_login_no_repositories_are_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = tmp.path().join("gh");
+        script(
+            &gh,
+            "case \"$1\" in api) echo 'not logged in: run gh auth login' ;; *) echo '[{\"nameWithOwner\":\"o/r\",\"isPrivate\":false}]' ;; esac\n",
+        );
+        let shell = tmp.path().join("shell");
+        script(
+            &shell,
+            &format!(
+                "printf '%s\\n' {PATH_MARK} '/bin:/usr/bin'\n\
+                 printf '{BIN_MARK}gh\\t{}\\n%s\\n' {END_MARK}\n",
+                gh.display()
+            ),
+        );
+        let found = detect_with(shell.to_str().unwrap(), tmp.path(), || false);
+        assert_eq!(found.gh_login, None);
+        assert!(found.repos.is_empty());
+    }
+
+    #[test]
+    fn a_login_is_letters_digits_and_dashes() {
+        assert_eq!(plain_login("  me-1\n").as_deref(), Some("me-1"));
+        assert_eq!(plain_login(""), None);
+        assert_eq!(plain_login("\n"), None);
+        assert_eq!(plain_login("not logged in"), None);
+        assert_eq!(plain_login("a_b"), None);
+    }
+
     #[test]
     fn ssh_hosts_are_the_concrete_aliases_with_their_host_names() {
         let config = "\
@@ -329,6 +449,8 @@ Host web web-alias
   User ops
 host db-1
   hostname=db.internal
+Host spaced
+  HostName = 10.0.0.8
 Host *.corp !gate
   User me
 Match host staging
@@ -357,6 +479,10 @@ Match host db-3
                 SshHost {
                     alias: "db-1".to_owned(),
                     host_name: Some("db.internal".to_owned())
+                },
+                SshHost {
+                    alias: "spaced".to_owned(),
+                    host_name: Some("10.0.0.8".to_owned())
                 },
                 SshHost {
                     alias: "db-2".to_owned(),

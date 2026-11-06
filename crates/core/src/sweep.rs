@@ -1462,6 +1462,18 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn target_names_list_the_mac_then_repositories_then_servers() {
+        let text = "[github]\nrepos = [\"o/a\", \"o/b\"]\n\
+                    [[servers]]\nname = \"web\"\nssh = \"web\"\n";
+        let config =
+            Config::from_text(Path::new("/c/config.toml"), text, Path::new("/home")).unwrap();
+        assert_eq!(
+            target_names(&config),
+            ["mac", "github:o/a", "github:o/b", "server:web"]
+        );
+    }
     use crate::feeds::Endpoints;
     use crate::feeds::test_server::Request;
     use crate::feeds::test_server::TestServer;

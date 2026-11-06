@@ -637,6 +637,15 @@ mod tests {
     }
 
     #[test]
+    fn a_config_that_cannot_be_read_is_an_error_not_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        fs::create_dir_all(data_dir.config_file()).unwrap();
+        let err = save(&data_dir, repo_added("o/r")).unwrap_err();
+        assert!(matches!(err, SaveSettingError::Read { .. }), "{err:?}");
+    }
+
+    #[test]
     fn changes_made_at_once_all_land() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path());
