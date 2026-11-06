@@ -24,6 +24,10 @@ pub(crate) const SCHEMA: &str = include_str!("findings.schema.json");
 #[serde(deny_unknown_fields)]
 struct Findings {
     findings: Vec<Finding>,
+    /// Optional, unlike in the schema: a prompt copied to the data directory before issues
+    /// existed asks for `{"findings": []}`, and a Mac sweep has no issues.
+    #[serde(default)]
+    issues: Vec<Issue>,
 }
 
 /// One advisory that affects one installed component.
@@ -46,6 +50,41 @@ pub struct Finding {
     pub explanation: String,
     /// How to fix it. Never run during a sweep.
     pub fix: Fix,
+}
+
+/// A risky setting or file that no advisory names: no branch protection, an unpinned action.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Issue {
+    /// What the issue is about.
+    pub subject: Subject,
+    /// How bad it is for this target.
+    pub severity: Severity,
+    /// What the agent checked.
+    pub evidence: String,
+    /// What the issue means for the user, in plain language.
+    pub explanation: String,
+    /// How to fix it. Never run during a sweep.
+    pub fix: Fix,
+}
+
+/// What an [`Issue`] is about: a key of the bundle's `github/settings.json`, or a bundle file.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub enum Subject {
+    /// A setting, by its key in `github/settings.json`.
+    Setting(String),
+    /// A file, by its path in the bundle (`github/workflows/ci.yml`).
+    File(String),
+}
+
+impl fmt::Display for Subject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Setting(key) => write!(f, "setting {key}"),
+            Self::File(path) => write!(f, "file {path}"),
+        }
+    }
 }
 
 /// A suggested fix.
@@ -115,6 +154,17 @@ pub(crate) struct Known {
     pub(crate) aliases: BTreeMap<String, BTreeSet<String>>,
     /// The advisory ids in the CISA KEV catalog, or `None` when it could not be read.
     pub(crate) exploited: Option<BTreeSet<String>>,
+    /// The setting keys an issue may name.
+    pub(crate) settings: BTreeSet<String>,
+    /// The bundle files an issue may name, by path in the bundle.
+    pub(crate) files: BTreeSet<String>,
+}
+
+/// A `findings.json` that passed validation.
+#[derive(Debug, Default)]
+pub(crate) struct Verdict {
+    pub(crate) findings: Vec<Valid>,
+    pub(crate) issues: Vec<Issue>,
 }
 
 /// A finding that passed validation, with the index of its component.
@@ -126,18 +176,60 @@ pub(crate) struct Valid {
 
 /// Parses and checks `findings.json` against what the bundle offered, and sets
 /// known-exploited from the catalog. Every problem is reported, not only the first.
-pub(crate) fn validate(text: &str, known: &Known) -> Result<Vec<Valid>, Vec<String>> {
+pub(crate) fn validate(text: &str, known: &Known) -> Result<Verdict, Vec<String>> {
     let findings: Findings =
         serde_json::from_str(text).map_err(|e| vec![format!("findings.json: {e}")])?;
 
     let mut problems = Vec::new();
+    let valid = check_findings(findings.findings, known, &mut problems);
+    for (i, issue) in findings.issues.iter().enumerate() {
+        let at = format!("issues[{i}]");
+        let known_subject = match &issue.subject {
+            Subject::Setting(key) => known.settings.contains(key),
+            Subject::File(path) => known.files.contains(path),
+        };
+        if !known_subject {
+            problems.push(format!(
+                "{at}.subject: {} is not in this bundle (settings are the keys of \
+                 github/settings.json, files are bundle paths such as github/workflows/ci.yml)",
+                plain_subject(&issue.subject)
+            ));
+        }
+        check_text(
+            &at,
+            &issue.evidence,
+            &issue.explanation,
+            &issue.fix,
+            &mut problems,
+        );
+    }
+    if problems.is_empty() {
+        Ok(Verdict {
+            findings: valid,
+            issues: findings.issues,
+        })
+    } else {
+        Err(problems)
+    }
+}
+
+/// The subject quoted, so an agent's text cannot shape the message.
+fn plain_subject(subject: &Subject) -> String {
+    match subject {
+        Subject::Setting(key) => format!("setting {key:?}"),
+        Subject::File(path) => format!("file {path:?}"),
+    }
+}
+
+/// Checks the advisory findings, adding every problem, and returns the valid ones.
+fn check_findings(findings: Vec<Finding>, known: &Known, problems: &mut Vec<String>) -> Vec<Valid> {
     let mut valid = Vec::new();
     let mut seen = BTreeSet::new();
-    for (i, mut finding) in findings.findings.into_iter().enumerate() {
+    for (i, mut finding) in findings.into_iter().enumerate() {
         let at = format!("findings[{i}]");
         let before = problems.len();
-        let component = component_index(&at, &finding.component, known, &mut problems);
-        let advisories = resolve(&at, &finding.advisories, component, known, &mut problems);
+        let component = component_index(&at, &finding.component, known, problems);
+        let advisories = resolve(&at, &finding.advisories, component, known, problems);
         if let Some(component) = component {
             for advisory in &advisories {
                 if !seen.insert((advisory.clone(), component)) {
@@ -148,7 +240,8 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Vec<Valid>, Vec<Stri
                 }
             }
         }
-        check_text(&at, &finding, &mut problems);
+        let fix = &finding.fix;
+        check_text(&at, &finding.evidence, &finding.explanation, fix, problems);
         let Some(component) = component.filter(|_| problems.len() == before) else {
             continue;
         };
@@ -163,11 +256,7 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Vec<Valid>, Vec<Stri
         }
         valid.push(Valid { finding, component });
     }
-    if problems.is_empty() {
-        Ok(valid)
-    } else {
-        Err(problems)
-    }
+    valid
 }
 
 /// Parses `c<n>` into the component's index, reporting an id not in the inventory.
@@ -250,11 +339,11 @@ fn resolve(
 /// shown in a terminal and in Markdown, where an escape sequence or a stray line break could
 /// forge output, and fix commands go to the user for approval, where a bidirectional override
 /// could make a command read differently from what it runs.
-fn check_text(at: &str, finding: &Finding, problems: &mut Vec<String>) {
+fn check_text(at: &str, evidence: &str, explanation: &str, fix: &Fix, problems: &mut Vec<String>) {
     let prose = [
-        ("evidence", &finding.evidence),
-        ("explanation", &finding.explanation),
-        ("fix.summary", &finding.fix.summary),
+        ("evidence", evidence),
+        ("explanation", explanation),
+        ("fix.summary", fix.summary.as_str()),
     ];
     for (field, value) in prose {
         if value.trim().is_empty() {
@@ -264,7 +353,7 @@ fn check_text(at: &str, finding: &Finding, problems: &mut Vec<String>) {
             problems.push(format!("{at}.{field} has control or invisible characters"));
         }
     }
-    if finding.fix.steps.iter().any(|l| l.chars().any(is_forging)) {
+    if fix.steps.iter().any(|l| l.chars().any(is_forging)) {
         problems.push(format!(
             "{at}.fix.steps: each step is one line, without control or invisible characters"
         ));
@@ -272,7 +361,7 @@ fn check_text(at: &str, finding: &Finding, problems: &mut Vec<String>) {
     // Commands are what the user approves to run, so they are held to the strictest form: a
     // look-alike or joiner character would make `lo\u{2060}dash` read as `lodash`.
     let printable = |c: &String| c.bytes().all(|b| (b' '..=b'~').contains(&b));
-    if !finding.fix.commands.iter().all(printable) {
+    if !fix.commands.iter().all(printable) {
         problems.push(format!(
             "{at}.fix.commands: each command is one line of printable ASCII"
         ));
@@ -332,6 +421,8 @@ mod tests {
             .into(),
             aliases: [("CVE-1".to_owned(), ["GHSA-1".to_owned()].into())].into(),
             exploited: kev.map(|ids| ids.iter().map(|id| (*id).to_owned()).collect()),
+            settings: ["default_branch_protection".to_owned()].into(),
+            files: ["github/workflows/ci.yml".to_owned()].into(),
         }
     }
 
@@ -354,7 +445,67 @@ mod tests {
     }
 
     fn check(findings: &[serde_json::Value], known: &Known) -> Result<Vec<Valid>, Vec<String>> {
-        validate(&json!({ "findings": findings }).to_string(), known)
+        let text = json!({ "findings": findings, "issues": [] }).to_string();
+        validate(&text, known).map(|verdict| verdict.findings)
+    }
+
+    fn issue(subject: &serde_json::Value) -> serde_json::Value {
+        json!({
+            "subject": subject,
+            "severity": "medium",
+            "evidence": "main is not protected",
+            "explanation": "Anyone with push access can rewrite it.",
+            "fix": {"summary": "Protect main", "steps": [], "commands": []}
+        })
+    }
+
+    #[test]
+    fn issues_name_a_setting_or_a_bundle_file() {
+        let known = known(None);
+        let text = json!({
+            "findings": [],
+            "issues": [
+                issue(&json!({"setting": "default_branch_protection"})),
+                issue(&json!({"file": "github/workflows/ci.yml"}))
+            ]
+        });
+        let verdict = validate(&text.to_string(), &known).unwrap();
+        assert_eq!(verdict.issues.len(), 2);
+        assert!(matches!(
+            &verdict.issues[0].subject,
+            Subject::Setting(key) if key == "default_branch_protection"
+        ));
+
+        let mut bad = issue(&json!({"file": "../etc/passwd"}));
+        bad["explanation"] = json!("x\u{1b}[2J");
+        let text = json!({
+            "findings": [],
+            "issues": [issue(&json!({"setting": "made_up"})), bad]
+        });
+        let problems = validate(&text.to_string(), &known).unwrap_err();
+        assert_eq!(
+            problems,
+            [
+                "issues[0].subject: setting \"made_up\" is not in this bundle (settings are the \
+                 keys of github/settings.json, files are bundle paths such as \
+                 github/workflows/ci.yml)",
+                "issues[1].subject: file \"../etc/passwd\" is not in this bundle (settings are \
+                 the keys of github/settings.json, files are bundle paths such as \
+                 github/workflows/ci.yml)",
+                "issues[1].explanation has control or invisible characters",
+            ]
+        );
+
+        for subject in [json!({"both": 1}), json!({"setting": "a", "file": "b"})] {
+            let text = json!({"findings": [], "issues": [issue(&subject)]});
+            assert!(validate(&text.to_string(), &known).is_err());
+        }
+        let older = validate(r#"{"findings": []}"#, &known).unwrap();
+        assert!(
+            older.issues.is_empty(),
+            "a prompt from before issues still works"
+        );
+        assert_eq!(Subject::File("a".into()).to_string(), "file a");
     }
 
     #[test]

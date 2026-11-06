@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Ancient Protector findings",
-  "description": "Only advisories that affect an installed version. Ids must come from advisories.jsonl and inventory.jsonl.",
+  "description": "Advisories that affect an installed version (findings), and risky settings and files (issues). Ids must come from advisories.jsonl and inventory.jsonl; issue subjects from github/settings.json and the bundle's github/ files.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["findings"],
+  "required": ["findings", "issues"],
   "properties": {
     "findings": {
       "type": "array",
@@ -32,10 +32,7 @@
             "description": "The affected component's id from inventory.jsonl, such as c12; it must be in the components of one of these advisories.",
             "type": "string"
           },
-          "severity": {
-            "description": "Severity on this machine. Start from the advisory's score; if you change it, say why in evidence.",
-            "enum": ["critical", "high", "medium", "low"]
-          },
+          "severity": { "$ref": "#/$defs/severity" },
           "known_exploited": {
             "description": "true when the advisory is in the CISA KEV catalog (known_exploited in advisories.jsonl).",
             "type": "boolean"
@@ -44,30 +41,71 @@
             "description": "confirmed: the installed version is in the affected range or you verified it; likely: probably affected but not certain.",
             "enum": ["confirmed", "likely"]
           },
-          "evidence": {
-            "description": "What you checked: the installed version against the affected range, a setting, a file.",
-            "type": "string",
-            "minLength": 1
-          },
-          "explanation": {
-            "description": "What the issue means for the user, in plain language.",
-            "type": "string",
-            "minLength": 1
-          },
-          "fix": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["summary", "steps", "commands"],
-            "properties": {
-              "summary": { "type": "string", "minLength": 1 },
-              "steps": { "type": "array", "items": { "type": "string" } },
-              "commands": {
-                "description": "Exact shell commands, in order, each one line of printable ASCII; describe a path with other characters in steps. They are shown to the user and never run during a sweep.",
-                "type": "array",
-                "items": { "type": "string", "pattern": "^[ -~]*$" }
+          "evidence": { "$ref": "#/$defs/evidence" },
+          "explanation": { "$ref": "#/$defs/explanation" },
+          "fix": { "$ref": "#/$defs/fix" }
+        }
+      }
+    },
+    "issues": {
+      "description": "Risky settings and files of a GitHub repository; always empty for a Mac.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["subject", "severity", "evidence", "explanation", "fix"],
+        "properties": {
+          "subject": {
+            "description": "A key of github/settings.json, or a path in the bundle such as github/workflows/ci.yml.",
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["setting"],
+                "properties": { "setting": { "type": "string" } }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["file"],
+                "properties": { "file": { "type": "string" } }
               }
-            }
-          }
+            ]
+          },
+          "severity": { "$ref": "#/$defs/severity" },
+          "evidence": { "$ref": "#/$defs/evidence" },
+          "explanation": { "$ref": "#/$defs/explanation" },
+          "fix": { "$ref": "#/$defs/fix" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "severity": {
+      "description": "Severity for this target. Start from the advisory's score or the risk; if you change it, say why in evidence.",
+      "enum": ["critical", "high", "medium", "low"]
+    },
+    "evidence": {
+      "description": "What you checked: the installed version against the affected range, a setting, a file.",
+      "type": "string",
+      "minLength": 1
+    },
+    "explanation": {
+      "description": "What the issue means for the user, in plain language.",
+      "type": "string",
+      "minLength": 1
+    },
+    "fix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "steps", "commands"],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1 },
+        "steps": { "type": "array", "items": { "type": "string" } },
+        "commands": {
+          "description": "Exact shell commands, in order, each one line of printable ASCII; describe a path with other characters in steps. They are shown to the user and never run during a sweep.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[ -~]*$" }
         }
       }
     }

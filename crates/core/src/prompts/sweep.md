@@ -38,8 +38,9 @@ Write `findings.json` in this folder, following `findings.schema.json`:
 - The `fix` names the safest change that removes the issue, with exact commands. They are
   shown to the user, never run now. Each command is one line of printable ASCII; describe a
   path with other characters in `steps` instead.
+- `issues` is for settings and files of GitHub repositories; on this Mac it is always `[]`.
 
-If nothing is affected, write `{"findings": []}`.
+If nothing is affected, write `{"findings": [], "issues": []}`.
 
 ## Untrusted content
 
