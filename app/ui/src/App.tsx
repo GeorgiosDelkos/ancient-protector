@@ -96,7 +96,7 @@ export function App() {
               <Busy status={o().status} now={now()} />
             </Match>
             <Match when={o().problem !== null && o().targets.length === 0}>
-              <Problem text={o().problem ?? ""} onEdit={() => run(() => invoke("open_config"))} />
+              <Problem text={o().problem ?? ""} onEdit={() => run(() => invoke("open_settings"))} />
             </Match>
             <Match when={listed().length === 0 && lastSwept(o().targets) !== null}>
               <AllClear overview={o()} now={now()} />
@@ -554,10 +554,10 @@ function AllClear(props: { overview: Overview; now: Date }) {
 function Problem(props: { text: string; onEdit: () => void }) {
   return (
     <section class="clear">
-      <h1>Settings need a look</h1>
+      <h1>Set up Ancient Protector</h1>
       <p>{props.text}</p>
       <button type="button" class="btn primary" onClick={() => props.onEdit()}>
-        Edit settings
+        Open settings
       </button>
     </section>
   );
@@ -613,10 +613,10 @@ function Footer(props: {
               role="menuitem"
               onClick={() => {
                 setMenu(false);
-                invoke("open_config").catch((e: unknown) => props.onError(String(e)));
+                invoke("open_settings").catch((e: unknown) => props.onError(String(e)));
               }}
             >
-              Edit settings…
+              Settings…
             </button>
             <label class="menuitem">
               <input id="login" type="checkbox" checked={login()} onChange={toggleLogin} />

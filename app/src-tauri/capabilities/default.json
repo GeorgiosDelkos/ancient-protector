@@ -1,14 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The popover: app commands, events, launch at login.",
+  "description": "The popover and settings: app commands, events, launch at login, the folder picker.",
   "windows": [
-    "popover"
+    "popover",
+    "settings"
   ],
   "permissions": [
     "core:default",
     "autostart:allow-enable",
     "autostart:allow-disable",
-    "autostart:allow-is-enabled"
+    "autostart:allow-is-enabled",
+    "dialog:allow-open"
   ]
 }

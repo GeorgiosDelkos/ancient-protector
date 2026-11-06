@@ -8,6 +8,7 @@
 //! 2026-11-06), so the file stays the one source of truth that the CLI and agents also edit.
 
 mod runner;
+mod settings;
 mod tray;
 
 use std::path::PathBuf;
@@ -34,6 +35,8 @@ use crate::runner::Status;
 
 fn main() {
     let home = std::env::home_dir().expect("a Mac user has a home directory");
+    // macOS starts an app with a minimal PATH; tools are found as in the user's terminal.
+    ancient_protector_core::use_login_shell_path();
     let data_dir = DataDir::for_home(&home);
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -42,6 +45,7 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Runner::new(data_dir, home))
         .manage(tray::Popover::default())
         .invoke_handler(tauri::generate_handler![
@@ -51,7 +55,11 @@ fn main() {
             quit,
             fix_preview,
             fix,
-            dismiss
+            dismiss,
+            settings::settings_data,
+            settings::save,
+            settings::set_nvd_key,
+            settings::open_settings
         ])
         .setup(|app| {
             // A menu-bar app: no Dock icon and no app menu (LSUIElement).
@@ -61,8 +69,10 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // The popover closes when it loses focus, like a menu.
-            if let WindowEvent::Focused(false) = event {
+            // The popover closes when it loses focus, like a menu; settings is a window.
+            if window.label() == tray::POPOVER
+                && let WindowEvent::Focused(false) = event
+            {
                 tray::hide_on_blur(window);
             }
         })

@@ -26,7 +26,7 @@ use crate::runner::Runner;
 use crate::runner::Status;
 
 const TRAY_ID: &str = "main";
-const POPOVER: &str = "popover";
+pub(crate) const POPOVER: &str = "popover";
 
 /// How soon after the popover hid on losing focus a tray click counts as the same gesture.
 /// Clicking the icon while the popover is open first takes focus from it, which hides it,
