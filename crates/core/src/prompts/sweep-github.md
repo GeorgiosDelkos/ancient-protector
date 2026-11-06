@@ -22,6 +22,8 @@ and need none.
   - `{"status": 403 or 404, "message": ...}`: the feature is off or not visible to the
     user's login ("Dependabot alerts are disabled", "Branch not protected", "no analysis
     found"); read the message to tell which;
+  - `"not visible to this login (admins or owners only)"`: GitHub hides it from the
+    user's login, so say nothing about it;
   - `"not collected; see the problems in the report"`: the app could not read it, so say
     nothing about it;
   - an alert setting's `{"open": n}`: how many alerts are open.

@@ -4,13 +4,15 @@
 //! part that fails is a problem, so one refused endpoint never hides the rest. GitHub answers a
 //! feature that is off (Dependabot alerts disabled, no code scanning, an unprotected branch)
 //! with a 403 or 404 and a message; that answer is recorded as the setting's value in
-//! `settings.json`, for the agent to judge, not as a failure. A rate limit or a token that may
-//! not read the endpoint also answers 403, and is a failure (see [`is_failure`]).
+//! `settings.json`, for the agent to judge, not as a failure; so is a 403 for a login without
+//! the rights. A rate limit, bad credentials, or a token whose scopes do not cover the
+//! endpoint also answers 403, and is a failure (see [`is_failure`]).
 //!
-//! Values in `settings.json` take one of four shapes, which the GitHub prompt explains: the
+//! Values in `settings.json` take one of five shapes, which the GitHub prompt explains: the
 //! answer itself; `{"status": 204}` for an empty success (vulnerability alerts on); `{"status",
-//! "message"}` for GitHub's refusal; and [`NOT_COLLECTED`] for a part that failed, whose
-//! reason is a problem in the report.
+//! "message"}` for GitHub's refusal; [`NOT_VISIBLE`] for a field GitHub leaves out for this
+//! login; and [`NOT_COLLECTED`] for a part that failed, whose reason is a problem in the
+//! report.
 //!
 //! Everything here is untrusted: package names come from the repository's manifests and
 //! workflow files are the repository's own text. Nothing is run; names that cannot be file
@@ -46,6 +48,13 @@ const ALERT_LIMIT: usize = 500;
 
 /// The value of a setting that could not be collected; the reason is a problem in the report.
 const NOT_COLLECTED: &str = "not collected; see the problems in the report";
+
+/// The `settings.json` key of the organization's 2FA requirement.
+const TWO_FACTOR: &str = "organization_two_factor_requirement";
+
+/// The value of a setting GitHub shows only to the repository's admins or the organization's
+/// owners.
+const NOT_VISIBLE: &str = "not visible to this login (admins or owners only)";
 
 /// A collected repository: its components and the files that go into its bundle.
 #[derive(Debug, Default)]
@@ -155,10 +164,10 @@ impl Repo {
                 return;
             }
         };
-        let names: Vec<&str> = entries
+        let names: Vec<(&str, Option<u64>)> = entries
             .iter()
             .filter(|e| e["type"] == "file")
-            .filter_map(|e| e["name"].as_str())
+            .filter_map(|e| Some((e["name"].as_str()?, e["size"].as_u64())))
             .collect();
         if names.len() > WORKFLOW_LIMIT {
             self.problems.push(format!(
@@ -169,7 +178,7 @@ impl Repo {
         // macOS file names ignore case, so `CI.yml` would overwrite `ci.yml` in the bundle and
         // one of them would go unread.
         let mut seen = BTreeSet::new();
-        for name in names.into_iter().take(WORKFLOW_LIMIT) {
+        for (name, size) in names.into_iter().take(WORKFLOW_LIMIT) {
             if cache_key(name).is_err() {
                 self.problems.push(format!(
                     "workflows: {name:?} is not a safe file name; not read"
@@ -179,6 +188,14 @@ impl Repo {
             if !seen.insert(name.to_ascii_lowercase()) {
                 self.problems.push(format!(
                     "workflows: {name:?} differs from another file only in case; not read"
+                ));
+                continue;
+            }
+            // The listing gives each size, so a file over the limit is not even downloaded.
+            if let Some(size) = size.filter(|s| *s > WORKFLOW_SIZE_LIMIT as u64) {
+                self.problems.push(format!(
+                    "workflow {name}: {size} bytes, over the {WORKFLOW_SIZE_LIMIT}-byte limit; \
+                     not read"
                 ));
                 continue;
             }
@@ -213,15 +230,18 @@ impl Repo {
     /// The organization's 2FA requirement. Only its owners see the field; a refusal or a
     /// failure stays as it is.
     fn two_factor(&mut self, gh: &str, login: &str) -> Value {
-        let key = "organization_two_factor_requirement";
-        let org = self.setting(gh, key, &format!("orgs/{}", path_segment(login)));
-        let refusal = org.get("status").is_some() && org.get("message").is_some();
-        if !org.is_object() || refusal {
-            return org;
+        let path = format!("orgs/{}", path_segment(login));
+        match api(gh, &path, Paging::Single) {
+            Ok(Answer::Ok(org)) => org
+                .get("two_factor_requirement_enabled")
+                .cloned()
+                .unwrap_or_else(|| json!(NOT_VISIBLE)),
+            Ok(Answer::Refused { status, message }) => refused(status, &message),
+            Err(e) => {
+                self.problems.push(format!("setting {TWO_FACTOR}: {e}"));
+                json!(NOT_COLLECTED)
+            }
         }
-        org.get("two_factor_requirement_enabled")
-            .cloned()
-            .unwrap_or_else(|| json!("not visible to this login (organization owners only)"))
     }
 }
 
@@ -302,10 +322,12 @@ pub(crate) fn collect(gh: &str, repo: &RepoSlug) -> Result<Repo, GitHubError> {
     };
     let mut out = Repo::default();
     let mut settings = BTreeMap::new();
-    settings.insert(
-        "security_and_analysis".to_owned(),
-        meta["security_and_analysis"].clone(),
-    );
+    // GitHub leaves the field out for a login without admin rights on the repository.
+    let security = match meta.get("security_and_analysis") {
+        Some(value) if !value.is_null() => value.clone(),
+        _ => json!(NOT_VISIBLE),
+    };
+    settings.insert("security_and_analysis".to_owned(), security);
     out.files.push((
         "github/repository.json".to_owned(),
         pretty(&repository_summary(&meta)),
@@ -357,7 +379,7 @@ pub(crate) fn collect(gh: &str, repo: &RepoSlug) -> Result<Repo, GitHubError> {
         && let Some(login) = meta["owner"]["login"].as_str()
     {
         let value = out.two_factor(gh, login);
-        settings.insert("organization_two_factor_requirement".to_owned(), value);
+        settings.insert(TWO_FACTOR.to_owned(), value);
     }
 
     out.settings = settings.keys().cloned().collect();
@@ -475,9 +497,27 @@ fn api(gh: &str, path: &str, paging: Paging) -> Result<Answer, GitHubError> {
             body => body,
         }));
     }
-    // A failed request prints GitHub's error body, wrapped in a list under `--slurp`; a body
-    // that is not JSON (an HTML error page) leaves gh's own message to explain.
-    let body: Value = serde_json::from_str(&output.stdout).unwrap_or(Value::Null);
+    match error_body(&output.stdout) {
+        Some((status @ (403 | 404), message)) if !is_failure(&message) => {
+            Ok(Answer::Refused { status, message })
+        }
+        Some((status, message)) => Err(GitHubError::Api {
+            path: path.to_owned(),
+            status,
+            message,
+        }),
+        None => Err(GitHubError::Gh(InventoryError::Command {
+            command: output.command,
+            detail: output.detail,
+        })),
+    }
+}
+
+/// The status and message of GitHub's error body, as a failed `gh api` prints it: an object,
+/// or that object in a list under `--slurp`, with the status as a string or a number. `None`
+/// for anything else (an HTML error page), whose explanation is gh's own message.
+fn error_body(stdout: &str) -> Option<(u16, String)> {
+    let body: Value = serde_json::from_str(stdout).ok()?;
     let error = match &body {
         Value::Array(list) if list.len() == 1 => &list[0],
         other => other,
@@ -485,24 +525,8 @@ fn api(gh: &str, path: &str, paging: Paging) -> Result<Answer, GitHubError> {
     let status = error["status"]
         .as_str()
         .and_then(|s| s.parse::<u16>().ok())
-        .or_else(|| error["status"].as_u64().and_then(|s| u16::try_from(s).ok()));
-    match (status, error["message"].as_str()) {
-        (Some(status @ (403 | 404)), Some(message)) if !is_failure(message) => {
-            Ok(Answer::Refused {
-                status,
-                message: message.to_owned(),
-            })
-        }
-        (Some(status), Some(message)) => Err(GitHubError::Api {
-            path: path.to_owned(),
-            status,
-            message: message.to_owned(),
-        }),
-        _ => Err(GitHubError::Gh(InventoryError::Command {
-            command: output.command,
-            detail: output.detail,
-        })),
-    }
+        .or_else(|| error["status"].as_u64().and_then(|s| u16::try_from(s).ok()))?;
+    Some((status, error["message"].as_str()?.to_owned()))
 }
 
 fn page_items(page: Value) -> Vec<Value> {
@@ -658,12 +682,15 @@ refuse() { echo "{\"message\":\"$2\",\"status\":\"$1\"}"; exit 1; }
 file() {
   case "$*" in *application/vnd.github.raw*) ;; *) echo "not raw" >&2; exit 3 ;; esac
 }
+slurp() {
+  case "$*" in *--paginate*--slurp*) ;; *) echo "not slurped" >&2; exit 3 ;; esac
+}
 case "$last" in
   repos/o/r) ok repo ;;
   repos/o/r/dependency-graph/sbom) ok sbom ;;
   repos/o/r/dependabot/alerts*) no dependabot ;;
   repos/o/r/code-scanning/alerts*) no code-scanning ;;
-  repos/o/r/secret-scanning/alerts*hide_secret=true*) ok secret-scanning ;;
+  repos/o/r/secret-scanning/alerts*hide_secret=true*) slurp "$@"; ok secret-scanning ;;
   repos/o/r/contents/.github/workflows) ok workflows ;;
   repos/o/r/contents/.github/workflows/ci.yml) file "$@"; echo 'on: push' ;;
   repos/o/r/contents/.github/workflows/big.yml) file "$@"; head -c 300000 /dev/zero | tr '\0' a ;;
@@ -707,9 +734,12 @@ esac
         let many_alerts: Vec<Value> = (0..=ALERT_LIMIT).map(|n| json!({"number": n})).collect();
         let workflows = |n: usize| -> Value {
             (0..n)
-                .map(|n| json!({"type": "file", "name": format!("w{n}.yml")}))
+                .map(|n| json!({"type": "file", "name": format!("w{n}.yml"), "size": 1}))
                 .collect()
         };
+        let mut at_limit = workflows(WORKFLOW_LIMIT);
+        // Exactly at the size limit, as the listing reports it.
+        at_limit[0]["size"] = json!(WORKFLOW_SIZE_LIMIT);
         let limit_alerts: Vec<Value> = (0..ALERT_LIMIT).map(|n| json!({"number": n})).collect();
         fs::write(dir.join("limit-file.json"), "a".repeat(WORKFLOW_SIZE_LIMIT)).unwrap();
         let fixtures = [
@@ -736,7 +766,10 @@ esac
             ),
             (
                 "limited",
-                json!({"owner": {"type": "Organization", "login": "lim"}}),
+                json!({
+                    "owner": {"type": "Organization", "login": "lim"},
+                    "security_and_analysis": null
+                }),
             ),
             (
                 "dependabot",
@@ -764,12 +797,13 @@ esac
                     {"type": "dir", "name": "sub"},
                     {"type": "file", "name": ".evil"},
                     {"type": "file", "name": "big.yml"},
-                    {"type": "file", "name": "gone.yml"}
+                    {"type": "file", "name": "gone.yml"},
+                    {"type": "file", "name": "huge.yml", "size": 10_000_000}
                 ]),
             ),
             ("many-alerts", json!([many_alerts])),
             ("many-workflows", workflows(WORKFLOW_LIMIT + 1)),
-            ("limit-workflows", workflows(WORKFLOW_LIMIT)),
+            ("limit-workflows", at_limit),
             ("limit-alerts", json!([limit_alerts])),
         ];
         for (name, value) in fixtures {
@@ -876,11 +910,12 @@ esac
             "\"CI.yml\" differs from another file only in case",
             "workflow big.yml: 300000 bytes, over the 262144-byte limit",
             "workflow gone.yml:",
+            "workflow huge.yml: 10000000 bytes, over the 262144-byte limit",
             "setting actions_workflow_permissions: unexpected answer",
         ] {
             assert!(problems.contains(expected), "{expected}: {problems}");
         }
-        assert_eq!(repo.problems.len(), 6, "{problems}");
+        assert_eq!(repo.problems.len(), 7, "{problems}");
     }
 
     #[test]
@@ -908,6 +943,10 @@ esac
         assert!(
             settings.get("default_branch_protection").is_none(),
             "no default branch"
+        );
+        assert_eq!(
+            settings["security_and_analysis"], NOT_VISIBLE,
+            "null for a non-admin"
         );
         let alerts: Value =
             serde_json::from_str(file(&repo, "github/secret-scanning-alerts.json")).unwrap();
@@ -1082,21 +1121,15 @@ esac
 
 #[cfg(test)]
 mod percent_properties {
-    use std::fmt::Write as _;
-
     use proptest::prelude::*;
 
     use super::*;
 
     proptest! {
-        /// Encoding every byte and decoding gives the text back.
+        /// Decoding what `path_segment` encoded gives the text back.
         #[test]
         fn decodes_what_was_encoded(text in any::<String>()) {
-            let encoded = text.bytes().fold(String::new(), |mut out, b| {
-                write!(out, "%{b:02X}").expect("writing to a String cannot fail");
-                out
-            });
-            prop_assert_eq!(percent_decode(&encoded), text);
+            prop_assert_eq!(percent_decode(&path_segment(&text)), text);
         }
     }
 }
