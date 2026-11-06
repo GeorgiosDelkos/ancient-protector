@@ -44,6 +44,7 @@ use crate::findings::Finding;
 use crate::findings::Fix;
 use crate::findings::Issue;
 use crate::findings::Known;
+use crate::findings::Subject;
 use crate::findings::Verdict;
 use crate::findings::is_forging;
 use crate::github;
@@ -524,7 +525,12 @@ impl Shared<'_> {
             .issues
             .into_iter()
             .map(|issue| {
-                let key = FindingKey::new(&[target, &issue.subject.to_string()]);
+                // Data, not the `Display` text, so rewording that keeps every key.
+                let (kind, name) = match &issue.subject {
+                    Subject::Setting(key) => ("setting", key),
+                    Subject::File(path) => ("file", path),
+                };
+                let key = FindingKey::new(&[target, kind, name]);
                 ReportIssue {
                     key,
                     issue,

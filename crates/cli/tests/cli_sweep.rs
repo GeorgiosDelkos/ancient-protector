@@ -157,7 +157,8 @@ impl Sandbox {
             .expect("the test binary was built by cargo")
     }
 
-    /// `report.json` of `target` in the newest sweep folder.
+    /// `report.json` of `target` in the newest sweep folder. Folder names are start times,
+    /// then `-2` and so on within one second; by name alone `-10` would sort before `-9`.
     fn newest_report(&self, target: &str) -> serde_json::Value {
         let mut dirs: Vec<_> = fs::read_dir(self.path().join("data/sweeps"))
             .expect("a sweep wrote its folder")
@@ -165,8 +166,17 @@ impl Sandbox {
             .map(|e| e.path())
             .filter(|p| p.is_dir())
             .collect();
-        // Folder names are start times, then `-2` and so on within one second.
-        dirs.sort();
+        dirs.sort_by_key(|dir| {
+            let name = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("sweep folders have UTF-8 names")
+                .to_owned();
+            match name.split_once('-') {
+                Some((stamp, n)) => (stamp.to_owned(), n.parse::<u32>().expect("a number")),
+                None => (name, 1),
+            }
+        });
         let report = dirs
             .last()
             .expect("a sweep ran")

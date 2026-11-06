@@ -103,7 +103,8 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   as the newest report had it. A dismissed finding shows again when that time changes; an
   issue stays dismissed until `undismiss`. Writes take `state/.lock` and replace the file
   whole. Reports keep dismissed entries, marked, and `report.md` lists them under "Dismissed".
-  A dismissals file that cannot be read is a note in every report, and nothing is dismissed.
+  A dismissals file that cannot be read is a note in each report with a verdict, and nothing
+  is dismissed. A target that could not be collected has nothing to dismiss and no note.
 - Changes: each target's report has `changes`, against that target's newest earlier report
   with a verdict: new is what is shown now and was not shown then (absent, or dismissed and
   shown again), resolved is what was shown then and is gone now; a key dismissed since is
