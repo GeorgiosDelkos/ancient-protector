@@ -62,7 +62,7 @@ struct Shared {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum Status {
-    /// No sweep is running, and none has failed since the app started.
+    /// No sweep is running, and the last one, if any, had a verdict for every target.
     Idle,
     /// A sweep is running.
     Sweeping {
@@ -136,7 +136,7 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
         // every later start would be refused.
         let status = panic::catch_unwind(AssertUnwindSafe(|| run(&app))).unwrap_or_else(|_| {
             Status::Failed {
-                error: "the sweep stopped unexpectedly; see the system log".to_owned(),
+                error: "the sweep stopped unexpectedly".to_owned(),
             }
         });
         app.state::<Runner>().set(status);
@@ -221,9 +221,15 @@ pub(crate) fn schedule(app: AppHandle) {
             let on_disk = match last_sweep_started(runner.data_dir()) {
                 Ok(on_disk) => on_disk,
                 Err(e) => {
-                    runner.set(Status::Failed {
-                        error: format!("cannot check the schedule: {e}"),
-                    });
+                    // Under one lock, so a running sweep's status is never overwritten. The
+                    // failure shows until the next sweep sets the status again.
+                    let mut shared = runner.lock();
+                    if !matches!(shared.status, Status::Sweeping { .. }) {
+                        shared.status = Status::Failed {
+                            error: format!("cannot check the schedule: {e}"),
+                        };
+                    }
+                    drop(shared);
                     changed(&app);
                     continue;
                 }
