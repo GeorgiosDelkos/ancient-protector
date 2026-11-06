@@ -576,7 +576,9 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
         let stdout = text(&declined.stdout);
         assert!(
             stdout.starts_with(&format!(
-                "Fix {key} on the GitHub repository o/r, as a pull request (found by the sweep of"
+                "Fix {key} on the GitHub repository o/r, as a pull request (found by the sweep of \
+                 {}): s\n",
+                report["started"].as_str().unwrap()
             )),
             "{stdout}"
         );
@@ -606,6 +608,11 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
     assert_eq!(record["outcome"], "fixed");
     assert_eq!(record["confirmed"], "asked");
     let dir = PathBuf::from(record["dir"].as_str().unwrap());
+    assert!(
+        dir.starts_with(sandbox.path().join("data/fixes")),
+        "{}",
+        dir.display()
+    );
     let log = fs::read_to_string(dir.join("agent.log")).unwrap();
     assert!(log.contains("--permission-mode bypassPermissions"), "{log}");
     let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap();
