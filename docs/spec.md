@@ -402,8 +402,12 @@ files.
 - `findings` lists, per configured target in sweep order, the open findings and issues of its
   newest report with a verdict: severity, key, title (the advisories, component, version and
   where it was found; or the issue's subject) and the fix summary, plus how many are
-  dismissed. `--json` prints one object per target (`target`, `swept`, `open`, `dismissed`).
-  Each report entry carries that `title`, so the tray app shows the same line.
+  dismissed. Dismissed means dismissed in `state/dismissals.json` now, as `fix` checks it, so a
+  `dismiss` shows at once. Titles and summaries are printed as plain lines (control and
+  invisible characters replaced), since they hold agent text and names from the target.
+  `--json` prints one object per target (`target`, `swept`, `open`, `dismissed`). Each report
+  entry carries that `title`, so the tray app shows the same line. `--target` matches the
+  report name exactly.
 
 ## Risks to keep visible
 

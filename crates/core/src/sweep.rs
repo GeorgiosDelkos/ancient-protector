@@ -210,8 +210,9 @@ pub struct ReportIssue {
     pub dismissed: Option<Dismissal>,
 }
 
-/// Sweeps this Mac and every repository in `config.repos`, one after the other, with the
-/// agent named in `config`, and returns one report per target.
+/// Sweeps the targets `targets` names (this Mac, the repositories in `config.repos`, the
+/// servers in `config.servers`) one after the other, with the agent named in `config`, and
+/// returns one report per target swept.
 ///
 /// Blocks for the whole sweep: inventory commands, `gh api` calls, every feed request (NVD is
 /// paced, so the first sweep of a Mac with a hundred Homebrew formulae takes over ten minutes
@@ -219,8 +220,9 @@ pub struct ReportIssue {
 ///
 /// # Errors
 ///
-/// Fails before any agent runs when no agent is configured or found, another sweep is
-/// running, or the sweep folder cannot be written; and stops when a prompt or bundle cannot be
+/// Fails before anything runs when `targets` names no configured target, and before any agent
+/// runs when no agent is configured or found, another sweep is running, or the sweep folder
+/// cannot be written; and stops when a prompt or bundle cannot be
 /// read or written. Failures of one target (a repository that cannot be read, the agent, its
 /// findings, the report files) are recorded in that target's report instead.
 pub fn sweep(
@@ -285,23 +287,17 @@ pub fn sweep(
         let mac = collect_mac(&config.project_dirs);
         reports.push(shared.sweep_target(&dir, mac, progress)?);
     }
-    for repo in config
-        .repos
-        .iter()
-        .filter(|r| wanted(&format!("github:{r}")))
-    {
+    for repo in config.repos.iter().filter(|r| wanted(&repo_target(r))) {
         reports.push(shared.sweep_repo(&dir, repo, progress)?);
     }
-    for server in &config.servers {
-        if wanted(&format!("server:{}", server.name)) {
-            reports.push(shared.sweep_server(&dir, server, progress)?);
-        }
+    for server in config.servers.iter().filter(|s| wanted(&server_target(s))) {
+        reports.push(shared.sweep_server(&dir, server, progress)?);
     }
     Ok(reports)
 }
 
 /// Which targets a sweep covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Targets<'a> {
     /// This Mac, every configured repository and every configured server.
     All,
@@ -313,12 +309,22 @@ pub enum Targets<'a> {
 pub(crate) fn configured_targets(config: &Config) -> Vec<(String, String)> {
     let mut targets = vec![("mac".to_owned(), "mac".to_owned())];
     for repo in &config.repos {
-        targets.push((format!("github:{repo}"), github_dir_name(repo)));
+        targets.push((repo_target(repo), github_dir_name(repo)));
     }
     for server in &config.servers {
-        targets.push((format!("server:{}", server.name), server_dir_name(server)));
+        targets.push((server_target(server), server_dir_name(server)));
     }
     targets
+}
+
+/// A repository's report name, `github:owner/name`, matched exactly by `--target`.
+fn repo_target(repo: &RepoSlug) -> String {
+    format!("github:{repo}")
+}
+
+/// A server's report name, `server:name`.
+fn server_target(server: &Server) -> String {
+    format!("server:{}", server.name)
 }
 
 fn server_dir_name(server: &Server) -> String {
@@ -400,7 +406,7 @@ impl Shared<'_> {
         repo: &RepoSlug,
         progress: &mut dyn FnMut(Progress<'_>),
     ) -> Result<Report, SweepError> {
-        let target = format!("github:{repo}");
+        let target = repo_target(repo);
         let dir_name = github_dir_name(repo);
         progress(Progress::Target { target: &target });
         progress(Progress::Inventory);
@@ -430,7 +436,7 @@ impl Shared<'_> {
         server: &Server,
         progress: &mut dyn FnMut(Progress<'_>),
     ) -> Result<Report, SweepError> {
-        let target = format!("server:{}", server.name);
+        let target = server_target(server);
         // `server-` keeps a server named `mac` from sharing the Mac's folder.
         let dir_name = server_dir_name(server);
         progress(Progress::Target { target: &target });
@@ -561,13 +567,14 @@ impl Shared<'_> {
             .map(|(valid, key)| {
                 let modified = modified.get(valid.advisory.as_str()).copied().flatten();
                 let installed = components[valid.component].clone();
-                let title = format!(
+                // Names, versions and paths come from the target; one plain line.
+                let title = plain(&format!(
                     "{} in {} {}, {}",
                     valid.finding.advisories.join(", "),
                     component_name(&installed),
                     installed.version,
                     installed.found_in
-                );
+                ));
                 ReportFinding {
                     key,
                     title,
@@ -591,7 +598,7 @@ impl Shared<'_> {
                 let key = FindingKey::new(&[target, kind, name]);
                 ReportIssue {
                     key,
-                    title: issue.subject.to_string(),
+                    title: plain(&issue.subject.to_string()),
                     issue,
                     dismissed: self.dismissals.get(key, None).cloned(),
                 }
@@ -902,7 +909,7 @@ fn judge(
 /// invisible character ([`is_forging`]) becomes U+FFFD. For messages that quote the agent (a
 /// rejected id, a serde error naming its field) and reach the terminal, `report.json` or the
 /// agent's next prompt.
-fn plain(text: &str) -> String {
+pub(crate) fn plain(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' | '\r' | '\t' => ' ',

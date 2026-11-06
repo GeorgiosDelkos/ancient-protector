@@ -178,7 +178,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Sweeps every target and prints each report; fails when any target has no valid verdict.
+/// Sweeps `targets` and prints each report; fails when any target swept has no valid verdict.
 fn run_sweep(data_dir: &DataDir, config: &Config, targets: Targets<'_>) -> anyhow::Result<()> {
     let reports = sweep(data_dir, config, targets, &mut |p| show_progress(&p))?;
     let mut failures = Vec::new();
@@ -214,10 +214,7 @@ fn findings_text(all: &[Latest]) -> String {
         for open in &target.open {
             out.push_str(&format!(
                 "  {:<8} {}  {}\n           fix: {}\n",
-                open.severity.to_string(),
-                open.key,
-                open.title,
-                open.fix
+                open.severity, open.key, open.title, open.fix
             ));
         }
     }

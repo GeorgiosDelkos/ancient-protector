@@ -781,18 +781,10 @@ fn findings_list_what_is_open_and_one_target_can_be_swept() {
         "{listed}"
     );
 
+    // A dismissal shows at once, with no sweep between.
     assert!(
         sandbox
             .run(&["dismiss", &key, "--reason", "fine"])
-            .status
-            .success()
-    );
-    assert!(
-        sandbox
-            .command("issue")
-            .args(["sweep", "--target", "github:o/r"])
-            .output()
-            .unwrap()
             .status
             .success()
     );

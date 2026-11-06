@@ -115,7 +115,7 @@ pub enum Severity {
 
 impl fmt::Display for Severity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        f.pad(match self {
             Self::Critical => "critical",
             Self::High => "high",
             Self::Medium => "medium",
