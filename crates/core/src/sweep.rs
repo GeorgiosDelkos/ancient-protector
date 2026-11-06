@@ -183,6 +183,8 @@ impl Report {
 pub struct ReportFinding {
     /// Its key, the same in every sweep that finds it.
     pub key: FindingKey,
+    /// One line naming it: the advisories, the component and where it was found.
+    pub title: String,
     /// The agent's finding.
     #[serde(flatten)]
     pub finding: Finding,
@@ -199,6 +201,8 @@ pub struct ReportFinding {
 pub struct ReportIssue {
     /// Its key, the same in every sweep that finds it.
     pub key: FindingKey,
+    /// One line naming it: its subject.
+    pub title: String,
     /// The agent's issue.
     #[serde(flatten)]
     pub issue: Issue,
@@ -222,8 +226,20 @@ pub struct ReportIssue {
 pub fn sweep(
     data_dir: &DataDir,
     config: &Config,
+    targets: Targets<'_>,
     progress: &mut dyn FnMut(Progress<'_>),
 ) -> Result<Vec<Report>, SweepError> {
+    if let Targets::Only(only) = targets
+        && !configured_targets(config).iter().any(|(t, _)| t == only)
+    {
+        return Err(SweepError::UnknownTarget {
+            target: only.to_owned(),
+        });
+    }
+    let wanted = |target: &str| match targets {
+        Targets::All => true,
+        Targets::Only(only) => only == target,
+    };
     let agent = config.agent.ok_or(SweepError::NoAgent)?;
     let located = agent.locate()?.ok_or(SweepError::AgentNotFound { agent })?;
     let sweeps = data_dir.sweeps_dir();
@@ -263,18 +279,50 @@ pub fn sweep(
     };
 
     let mut reports = Vec::new();
-    progress(Progress::Target { target: "mac" });
-    progress(Progress::Inventory);
-    let mac = collect_mac(&config.project_dirs);
-    reports.push(shared.sweep_target(&dir, mac, progress)?);
-
-    for repo in &config.repos {
+    if wanted("mac") {
+        progress(Progress::Target { target: "mac" });
+        progress(Progress::Inventory);
+        let mac = collect_mac(&config.project_dirs);
+        reports.push(shared.sweep_target(&dir, mac, progress)?);
+    }
+    for repo in config
+        .repos
+        .iter()
+        .filter(|r| wanted(&format!("github:{r}")))
+    {
         reports.push(shared.sweep_repo(&dir, repo, progress)?);
     }
     for server in &config.servers {
-        reports.push(shared.sweep_server(&dir, server, progress)?);
+        if wanted(&format!("server:{}", server.name)) {
+            reports.push(shared.sweep_server(&dir, server, progress)?);
+        }
     }
     Ok(reports)
+}
+
+/// Which targets a sweep covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Targets<'a> {
+    /// This Mac, every configured repository and every configured server.
+    All,
+    /// One of them, by its report name: `mac`, `github:owner/name` or `server:name`.
+    Only(&'a str),
+}
+
+/// Every configured target, in sweep order, by report name and folder name.
+pub(crate) fn configured_targets(config: &Config) -> Vec<(String, String)> {
+    let mut targets = vec![("mac".to_owned(), "mac".to_owned())];
+    for repo in &config.repos {
+        targets.push((format!("github:{repo}"), github_dir_name(repo)));
+    }
+    for server in &config.servers {
+        targets.push((format!("server:{}", server.name), server_dir_name(server)));
+    }
+    targets
+}
+
+fn server_dir_name(server: &Server) -> String {
+    format!("server-{}", server.name)
 }
 
 /// What every target of one sweep shares.
@@ -384,7 +432,7 @@ impl Shared<'_> {
     ) -> Result<Report, SweepError> {
         let target = format!("server:{}", server.name);
         // `server-` keeps a server named `mac` from sharing the Mac's folder.
-        let dir_name = format!("server-{}", server.name);
+        let dir_name = server_dir_name(server);
         progress(Progress::Target { target: &target });
         progress(Progress::Inventory);
         let started = Timestamp::now();
@@ -512,10 +560,19 @@ impl Shared<'_> {
             .zip(keys)
             .map(|(valid, key)| {
                 let modified = modified.get(valid.advisory.as_str()).copied().flatten();
+                let installed = components[valid.component].clone();
+                let title = format!(
+                    "{} in {} {}, {}",
+                    valid.finding.advisories.join(", "),
+                    component_name(&installed),
+                    installed.version,
+                    installed.found_in
+                );
                 ReportFinding {
                     key,
+                    title,
                     finding: valid.finding,
-                    installed: components[valid.component].clone(),
+                    installed,
                     modified,
                     dismissed: self.dismissals.get(key, modified).cloned(),
                 }
@@ -534,6 +591,7 @@ impl Shared<'_> {
                 let key = FindingKey::new(&[target, kind, name]);
                 ReportIssue {
                     key,
+                    title: issue.subject.to_string(),
                     issue,
                     dismissed: self.dismissals.get(key, None).cloned(),
                 }
@@ -978,12 +1036,7 @@ pub fn report_markdown(report: &Report) -> String {
     let dismissed = dismissed_findings
         .iter()
         .map(|f| {
-            let what = format!(
-                "{} {} in {}",
-                f.finding.advisories.join(", "),
-                component_name(&f.installed),
-                f.installed.found_in
-            );
+            let what = &f.title;
             let reason = &f
                 .dismissed
                 .as_ref()
@@ -992,7 +1045,7 @@ pub fn report_markdown(report: &Report) -> String {
             (f.key, f.finding.severity, what, reason)
         })
         .chain(dismissed_issues.iter().map(|i| {
-            let what = i.issue.subject.to_string();
+            let what = &i.title;
             let reason = &i
                 .dismissed
                 .as_ref()
@@ -1006,7 +1059,7 @@ pub fn report_markdown(report: &Report) -> String {
         for (key, severity, what, reason) in dismissed {
             out.push_str(&format!(
                 "- {severity} {} (key {key}): {}\n",
-                escape(&what),
+                escape(what),
                 escape(reason)
             ));
         }
@@ -1204,6 +1257,15 @@ impl Lock {
 /// Error that stops a sweep before the agent runs.
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
+    /// `--target` names no configured target.
+    #[error(
+        "{target} is not a configured target; use mac, github:<owner>/<name> or \
+         server:<name> from config.toml"
+    )]
+    UnknownTarget {
+        /// The name given.
+        target: String,
+    },
     /// config.toml names no agent.
     #[error(
         "no agent chosen; set `agent` in config.toml (claude, grok, codex, gemini or opencode)"
@@ -1455,6 +1517,7 @@ mod tests {
     fn report_finding(id: &str, severity: &str, kev: bool, lookup: &str) -> ReportFinding {
         ReportFinding {
             key: FindingKey::new(&[id, lookup]),
+            title: format!("{id} in {lookup}"),
             modified: None,
             dismissed: None,
             finding: serde_json::from_value(json!({
@@ -1537,6 +1600,7 @@ mod tests {
         let with_issue = Report {
             issues: vec![ReportIssue {
                 key: FindingKey::new(&["issue"]),
+                title: "setting default_branch_protection".to_owned(),
                 issue,
                 dismissed: None,
             }],

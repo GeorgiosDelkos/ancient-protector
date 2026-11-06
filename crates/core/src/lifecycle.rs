@@ -23,8 +23,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
+use crate::config::Config;
+use crate::findings::Severity;
 use crate::findings::is_forging;
 use crate::paths::DataDir;
+use crate::sweep;
 
 /// The stable id of a finding or issue: 16 hex digits, the same in every sweep that finds it.
 ///
@@ -285,6 +288,100 @@ pub(crate) fn newest_verdict(
         }
     }
     Ok(None)
+}
+
+/// A target's open findings and issues, as its newest report with a verdict has them.
+#[derive(Debug, Serialize)]
+pub struct Latest {
+    /// The target: `mac`, `github:owner/name` or `server:name`.
+    pub target: String,
+    /// When that sweep started; `None` when the target has no report with a verdict yet.
+    pub swept: Option<Timestamp>,
+    /// The findings and issues not dismissed, most severe first.
+    pub open: Vec<Open>,
+    /// How many are dismissed.
+    pub dismissed: usize,
+}
+
+/// One open finding or issue.
+#[derive(Debug, Serialize)]
+pub struct Open {
+    /// Its key, for `dismiss` and `fix`.
+    pub key: FindingKey,
+    /// How bad it is.
+    pub severity: Severity,
+    /// One line naming it.
+    pub title: String,
+    /// One line: what the fix does.
+    pub fix: String,
+}
+
+/// Each configured target's open findings and issues, in sweep order.
+///
+/// # Errors
+///
+/// Fails when a sweep folder or report cannot be read.
+pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateError> {
+    let sweeps = data_dir.sweeps_dir();
+    let mut all = Vec::new();
+    for (target, dir_name) in sweep::configured_targets(config) {
+        let Some((path, saved)) = newest_verdict(&sweeps, &dir_name)? else {
+            all.push(Latest {
+                target,
+                swept: None,
+                open: Vec::new(),
+                dismissed: 0,
+            });
+            continue;
+        };
+        let read_err = |source| StateError::Read {
+            path: path.clone(),
+            source,
+        };
+        let text = fs::read_to_string(&path).map_err(read_err)?;
+        let listing: Listing = serde_json::from_str(&text)
+            .map_err(|e| read_err(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+        let entries = listing.findings.into_iter().chain(listing.issues);
+        let (open, dismissed): (Vec<_>, Vec<_>) = entries.partition(|e| e.dismissed.is_none());
+        let mut open: Vec<Open> = open
+            .into_iter()
+            .map(|e| Open {
+                key: e.key,
+                severity: e.severity,
+                title: e.title,
+                fix: e.fix.summary,
+            })
+            .collect();
+        open.sort_by_key(|o| o.severity);
+        all.push(Latest {
+            target,
+            swept: Some(saved.started),
+            open,
+            dismissed: dismissed.len(),
+        });
+    }
+    Ok(all)
+}
+
+/// What [`latest`] reads from a report.
+#[derive(Debug, Deserialize)]
+struct Listing {
+    findings: Vec<ListingEntry>,
+    issues: Vec<ListingEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListingEntry {
+    key: FindingKey,
+    severity: Severity,
+    title: String,
+    fix: ListingFix,
+    dismissed: Option<IgnoredAny>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListingFix {
+    summary: String,
 }
 
 /// What later sweeps and commands read back from a saved `report.json`.

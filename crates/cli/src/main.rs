@@ -10,6 +10,7 @@ use ancient_protector_core::Feeds;
 use ancient_protector_core::FindingKey;
 use ancient_protector_core::History;
 use ancient_protector_core::Inventory;
+use ancient_protector_core::Latest;
 use ancient_protector_core::LoadConfigError;
 use ancient_protector_core::NvdAccess;
 use ancient_protector_core::OsvQuery;
@@ -19,7 +20,9 @@ use ancient_protector_core::Product;
 use ancient_protector_core::Progress;
 use ancient_protector_core::Schedule;
 use ancient_protector_core::SshConn;
+use ancient_protector_core::Targets;
 use ancient_protector_core::dismiss;
+use ancient_protector_core::latest;
 use ancient_protector_core::plan_fix;
 use ancient_protector_core::report_markdown;
 use ancient_protector_core::run_fix;
@@ -73,13 +76,23 @@ enum Command {
     /// Reads macOS, Homebrew, global toolchains, and lockfiles under `mac.project_dirs` from
     /// config.toml. Anything that could not be read is reported on stderr.
     Inventory,
-    /// Sweep this Mac and the repositories in `repos`: inventory, advisories, the chosen
-    /// agent's verdict, and a report per target.
+    /// Sweep this Mac, the repositories in `repos` and the servers in `servers`: inventory,
+    /// advisories, the chosen agent's verdict, and a report per target.
     ///
     /// Prints the reports on stdout and progress on stderr. The reports and the agent's
     /// bundles are kept under the data directory's `sweeps` folder. Repositories are read with
     /// `gh api` and your gh login. Exits non-zero when a target got no valid verdict.
-    Sweep,
+    Sweep {
+        /// Sweep only this target: mac, github:<owner>/<name> or server:<name>.
+        #[arg(long, value_name = "TARGET")]
+        target: Option<String>,
+    },
+    /// List each target's open findings and issues from its newest sweep, with their keys.
+    Findings {
+        /// One JSON object per target instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Hide a finding or issue from reports, for a reason.
     ///
     /// The key is shown under each finding in the report. A finding shows again when its
@@ -133,7 +146,20 @@ fn main() -> anyhow::Result<()> {
             let config = load_config(&data_dir, &home()?)?;
             inventory(&Inventory::collect_mac(&config.project_dirs))?;
         }
-        Command::Sweep => run_sweep(&data_dir, &load_config(&data_dir, &home()?)?)?,
+        Command::Sweep { target } => {
+            let targets = target.as_deref().map_or(Targets::All, Targets::Only);
+            run_sweep(&data_dir, &load_config(&data_dir, &home()?)?, targets)?;
+        }
+        Command::Findings { json } => {
+            let all = latest(&data_dir, &load_config(&data_dir, &home()?)?)?;
+            if json {
+                for target in &all {
+                    print(&serde_json::to_string(target).context("write JSON")?);
+                }
+            } else {
+                print(&findings_text(&all));
+            }
+        }
         Command::Dismiss { key, reason } => {
             dismiss(&data_dir, key, &reason)?;
             print(&format!(
@@ -153,8 +179,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Sweeps every target and prints each report; fails when any target has no valid verdict.
-fn run_sweep(data_dir: &DataDir, config: &Config) -> anyhow::Result<()> {
-    let reports = sweep(data_dir, config, &mut |p| show_progress(&p))?;
+fn run_sweep(data_dir: &DataDir, config: &Config, targets: Targets<'_>) -> anyhow::Result<()> {
+    let reports = sweep(data_dir, config, targets, &mut |p| show_progress(&p))?;
     let mut failures = Vec::new();
     for report in &reports {
         print(&report_markdown(report));
@@ -166,6 +192,36 @@ fn run_sweep(data_dir: &DataDir, config: &Config) -> anyhow::Result<()> {
         anyhow::bail!("sweep incomplete: {}", failures.join("; "));
     }
     Ok(())
+}
+
+/// The open findings per target, one line each, most severe first.
+fn findings_text(all: &[Latest]) -> String {
+    let mut out = String::new();
+    for target in all {
+        let Some(swept) = target.swept else {
+            out.push_str(&format!("{}: no sweep with a verdict yet\n", target.target));
+            continue;
+        };
+        let dismissed = match target.dismissed {
+            0 => String::new(),
+            n => format!(", {n} dismissed"),
+        };
+        out.push_str(&format!(
+            "{} (swept {swept}): {} open{dismissed}\n",
+            target.target,
+            target.open.len()
+        ));
+        for open in &target.open {
+            out.push_str(&format!(
+                "  {:<8} {}  {}\n           fix: {}\n",
+                open.severity.to_string(),
+                open.key,
+                open.title,
+                open.fix
+            ));
+        }
+    }
+    out
 }
 
 /// Shows the fix for `key`, asks to run it unless `yes`, and runs it. Fails when it is not

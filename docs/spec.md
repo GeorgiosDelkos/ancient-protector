@@ -394,7 +394,16 @@ not an OSV ecosystem, so formulae go through NVD.
 ### CLI
 
 `ancient-protector sweep [--target <id>]`, `findings [--json]`, `dismiss <key> --reason <text>`,
-`undismiss <key>`, `fix <key>` (shows the fix and asks to confirm). Same core, same files.
+`undismiss <key>`, `fix <key> [--yes]` (shows the fix and asks to confirm). Same core, same
+files.
+
+- `sweep --target` takes a report name (`mac`, `github:<owner>/<name>`, `server:<name>`) of a
+  configured target and sweeps only it; an unknown name fails before anything runs.
+- `findings` lists, per configured target in sweep order, the open findings and issues of its
+  newest report with a verdict: severity, key, title (the advisories, component, version and
+  where it was found; or the issue's subject) and the fix summary, plus how many are
+  dismissed. `--json` prints one object per target (`target`, `swept`, `open`, `dismissed`).
+  Each report entry carries that `title`, so the tray app shows the same line.
 
 ## Risks to keep visible
 
@@ -422,7 +431,8 @@ toml, reqwest, clap, zip) before adding them.
 6. Server target (two-phase agent run).
 7. Lifecycle: dismissals and changes (PR 8); fix confirm/exec and fix history (PR 9).
    Done when both merge.
-8. CLI.
+8. CLI: `findings` and `sweep --target` (PR 10); `dismiss`, `undismiss` and `fix` came with
+   step 7.
 9. Tauri app: tray, popover, window, notifications, autostart, scheduler.
 10. Later: signing + notarization in CI once an Apple Developer account is available.
 
