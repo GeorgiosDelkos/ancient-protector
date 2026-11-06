@@ -4,3 +4,7 @@
 # checks it), and it holds only glue, with its decisions in the core.
 test_package = ["ancient-protector-core", "ancient-protector"]
 exclude_globs = ["app/**"]
+# These two run /usr/bin/security against the user's login Keychain, which no test may touch,
+# so a mutant there cannot be caught. Their decisions are in `saved` and `keychain_script`,
+# which are mutated and tested.
+exclude_re = ["NvdAccess::has_keychain_key", "NvdAccess::save_to_keychain"]
