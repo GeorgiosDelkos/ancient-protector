@@ -73,6 +73,9 @@ export function App() {
         {(d) => (
           <p class={`banner ${d().outcome === "fixed" ? "good" : "bad"}`}>
             <b>{d().outcome === "fixed" ? "Fixed" : `Fix ${d().outcome}`}:</b> {d().summary}
+            <Show when={d().pull_request}>
+              {(url) => <span class="pr">Pull request: {url()}</span>}
+            </Show>
             <button type="button" class="ghost x" aria-label="Close" onClick={() => setDone(null)}>
               ×
             </button>
@@ -121,7 +124,7 @@ export function App() {
                 onAction={() => setSettings("agent")}
               />
             </Match>
-            <Match when={listed().length === 0 && o().last_swept !== null}>
+            <Match when={o().all_clear}>
               <AllClear overview={o()} now={now()} />
             </Match>
             <Match when={true}>
@@ -343,8 +346,12 @@ function Detail(props: {
       .then(setPreview)
       .catch((e: unknown) => props.onError(String(e)));
   };
-  const runFix = () => {
-    invoke("fix", { key: props.item.key }).catch((e: unknown) => props.onError(String(e)));
+  // The preview's `found` pins the fix to the one shown: Rust refuses it if a sweep changed
+  // the finding since.
+  const runFix = (shown: FixPreview) => {
+    invoke("fix", { key: props.item.key, found: shown.found }).catch((e: unknown) =>
+      props.onError(String(e)),
+    );
   };
   const dismiss = (event: SubmitEvent) => {
     event.preventDefault();
@@ -427,8 +434,27 @@ function Detail(props: {
                 <p>
                   Run this fix on <b>{p().destination}</b> with {p().agent}, with full access?
                 </p>
+                <p class="fixline">{p().summary}</p>
+                <Show when={p().commands.length > 0}>
+                  <pre class="cmd" aria-label="Commands the fix runs">
+                    <For each={p().commands}>
+                      {(c) => (
+                        <span>
+                          <span class="p">$ </span>
+                          {c}
+                          {"\n"}
+                        </span>
+                      )}
+                    </For>
+                  </pre>
+                </Show>
                 <div class="dacts">
-                  <button type="button" class="btn primary" disabled={props.busy} onClick={runFix}>
+                  <button
+                    type="button"
+                    class="btn primary"
+                    disabled={props.busy}
+                    onClick={() => runFix(p())}
+                  >
                     Run fix
                   </button>
                   <button type="button" class="btn" onClick={() => setPreview(null)}>
@@ -548,8 +574,7 @@ function AllClear(props: { overview: Overview; now: Date }) {
       </div>
       <h1>All clear</h1>
       <p>
-        {props.overview.targets.length} targets swept {since(swept() ?? "", props.now)} ago. Nothing
-        open
+        {props.overview.target_count} swept {since(swept() ?? "", props.now)} ago. Nothing open
         <Show when={dismissed() > 0}>; {dismissed()} dismissed</Show>.
       </p>
       <Targets targets={props.overview.targets} now={props.now} />

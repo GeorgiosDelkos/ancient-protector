@@ -69,6 +69,8 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     counts: { critical: 0, high: 0, medium: 0, low: 0 },
     headline: "All clear",
     last_swept: null,
+    all_clear: false,
+    target_count: "1 target",
     targets: [
       {
         label: "This Mac",

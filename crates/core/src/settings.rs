@@ -10,9 +10,6 @@ use std::io;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process;
-use std::sync::Mutex;
-use std::sync::PoisonError;
 
 use serde::Deserialize;
 use toml_edit::Array;
@@ -28,10 +25,6 @@ use crate::config::DEFAULT_CONFIG;
 use crate::config::LoadConfigError;
 use crate::config::expand_home;
 use crate::paths::DataDir;
-
-/// Held while a change is read, applied and written, so changes in this process apply one
-/// after another.
-static SAVING: Mutex<()> = Mutex::new(());
 
 /// One change to the config.
 #[derive(Debug, Deserialize)]
@@ -97,11 +90,12 @@ pub fn save_setting(
     home: &Path,
     setting: &Setting,
 ) -> Result<Config, SaveSettingError> {
-    // Read, edit and write are one step: two changes at once (two quick clicks) would each
-    // edit the same text, and the later write would drop the earlier change. A poisoned lock
-    // guards no data, so it is used as it is.
-    let _saving = SAVING.lock().unwrap_or_else(PoisonError::into_inner);
     let path = data_dir.config_file();
+    // Read, edit and write are one step: two changes at once (two quick clicks, or the app and
+    // the CLI) would each edit the same text, and the later write would drop the earlier
+    // change. An exclusive lock on a file beside the config keeps them apart across
+    // processes; it is released when the file closes.
+    let _saving = lock(&path)?;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => DEFAULT_CONFIG.to_owned(),
@@ -111,9 +105,10 @@ pub fn save_setting(
         path: path.clone(),
         source,
     })?;
-    apply(&mut doc, setting, home).map_err(|table| SaveSettingError::Inline {
+    apply(&mut doc, setting, home).map_err(|(key, shape)| SaveSettingError::NotEditable {
         path: path.clone(),
-        table,
+        key,
+        shape,
     })?;
     let changed = doc.to_string();
     let config = Config::from_text(&path, &changed, home)?;
@@ -121,9 +116,24 @@ pub fn save_setting(
     Ok(config)
 }
 
-/// Applies `setting` to `doc`. Fails with the table's name when the file writes it inline
-/// (`github = { repos = [...] }`), which this does not edit.
-fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), &'static str> {
+/// How a key must be written for a change to edit it.
+#[derive(Debug, Clone, Copy)]
+pub enum Shape {
+    /// A `[name]` section.
+    Section,
+    /// An array of values.
+    Array,
+    /// `[[servers]]` tables.
+    Tables,
+}
+
+/// The key a change cannot edit, and how it must be written instead.
+type NotEditable = (&'static str, Shape);
+
+/// Applies `setting` to `doc`. Fails when the file writes the key it edits another way (an
+/// inline `github = { repos = [...] }`, a `repos = "o/r"`): replacing it would drop the user's
+/// values, and the checks before writing see only the replacement.
+fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), NotEditable> {
     match setting {
         Setting::Agent { agent: Some(agent) } => {
             let fresh = !doc.contains_key("agent");
@@ -148,10 +158,10 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), &'
         }
         Setting::AddFolder { dir } => {
             let same = |entry: &str| expand_home(entry, home) == expand_home(dir, home);
-            add(array(table(doc, "mac")?, "project_dirs"), dir, same);
+            add(array(table(doc, "mac")?, "mac.project_dirs")?, dir, same);
         }
         Setting::RemoveFolder { dir } => {
-            let dirs = array(table(doc, "mac")?, "project_dirs");
+            let dirs = array(table(doc, "mac")?, "mac.project_dirs")?;
             dirs.retain(|v| {
                 v.as_str()
                     .is_none_or(|e| expand_home(e, home) != expand_home(dir, home))
@@ -159,12 +169,12 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), &'
         }
         Setting::AddRepo { repo } => {
             let repo = repo.trim();
-            add(array(table(doc, "github")?, "repos"), repo, |e| {
+            add(array(table(doc, "github")?, "github.repos")?, repo, |e| {
                 e.eq_ignore_ascii_case(repo)
             });
         }
         Setting::RemoveRepo { repo } => {
-            let repos = array(table(doc, "github")?, "repos");
+            let repos = array(table(doc, "github")?, "github.repos")?;
             repos.retain(|v| v.as_str().is_none_or(|e| !e.eq_ignore_ascii_case(repo)));
         }
         Setting::AddServer { ssh } => {
@@ -244,24 +254,27 @@ fn keep_opening_comments_on_top(doc: &mut DocumentMut, key: &str) {
     }
 }
 
-/// The table `name`, created when missing. Anything else under that name (an inline table, or
-/// a hand-edited `mac = 1`) is refused, not replaced: an inline table is valid, and replacing
-/// it would drop the user's values.
-fn table<'a>(doc: &'a mut DocumentMut, name: &'static str) -> Result<&'a mut Table, &'static str> {
+/// The table `name`, created when missing; anything else under that name is refused, as in
+/// [`apply`].
+fn table<'a>(doc: &'a mut DocumentMut, name: &'static str) -> Result<&'a mut Table, NotEditable> {
     doc.entry(name)
         .or_insert_with(|| Item::Table(Table::new()))
         .as_table_mut()
-        .ok_or(name)
+        .ok_or((name, Shape::Section))
 }
 
-/// The array `name` in `table`, created when missing. One that is not an array (`repos = 1`)
-/// is replaced; the checks before writing refuse that file anyway, so nothing is lost.
-fn array<'a>(table: &'a mut Table, name: &str) -> &'a mut Array {
-    let item = table.entry(name).or_insert_with(|| value(Array::new()));
-    if !item.is_array() {
-        *item = value(Array::new());
-    }
-    item.as_array_mut().expect("made an array just above")
+/// The array at `key` (`github.repos`) in its table, created when missing; anything else is
+/// refused, as in [`apply`].
+fn array<'a>(table: &'a mut Table, key: &'static str) -> Result<&'a mut Array, NotEditable> {
+    let name = key
+        .rsplit('.')
+        .next()
+        .expect("split yields at least one part");
+    table
+        .entry(name)
+        .or_insert_with(|| value(Array::new()))
+        .as_array_mut()
+        .ok_or((key, Shape::Array))
 }
 
 /// Appends `entry` unless an entry is `same` as it.
@@ -273,11 +286,24 @@ fn add(array: &mut Array, entry: &str, same: impl Fn(&str) -> bool) {
 
 /// The `[[servers]]` tables, created when missing; refused when the file writes them another
 /// way (`servers = [{ ... }]`), as in [`table`].
-fn servers(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, &'static str> {
+fn servers(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, NotEditable> {
     doc.entry("servers")
         .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()))
         .as_array_of_tables_mut()
-        .ok_or("servers")
+        .ok_or(("servers", Shape::Tables))
+}
+
+/// Takes the exclusive lock that keeps saves apart, creating the config's folder first.
+fn lock(path: &Path) -> Result<fs::File, SaveSettingError> {
+    let lock_err = |source| SaveSettingError::Write {
+        path: path.to_owned(),
+        source,
+    };
+    let dir = path.parent().expect("the config file has a folder");
+    fs::create_dir_all(dir).map_err(lock_err)?;
+    let file = fs::File::create(dir.join(".config.toml.lock")).map_err(lock_err)?;
+    file.lock().map_err(lock_err)?;
+    Ok(file)
 }
 
 /// Writes `text` to a temporary name, syncs it, and renames it over `path`, so neither a
@@ -289,16 +315,26 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
     };
     let dir = path.parent().expect("the config file has a folder");
     fs::create_dir_all(dir).map_err(write_err)?;
-    // Named per process, so a CLI or a second app saving at the same moment never writes into
-    // this file; within a process, `SAVING` keeps saves apart.
-    let partial = dir.join(format!(".config.toml.{}.partial", process::id()));
+    // One name is enough: saves hold the lock from `save_setting` while writing it.
+    let partial = dir.join(".config.toml.partial");
     fs::File::create(&partial)
         .and_then(|mut file| {
             file.write_all(text.as_bytes())?;
             file.sync_data()
         })
         .and_then(|()| fs::rename(&partial, path))
+        .inspect_err(|_| drop(fs::remove_file(&partial)))
         .map_err(write_err)
+}
+
+impl Shape {
+    fn describe(self, key: &str) -> String {
+        match self {
+            Self::Section => format!("a [{key}] section"),
+            Self::Array => "a list".to_owned(),
+            Self::Tables => format!("[[{key}]] tables"),
+        }
+    }
 }
 
 /// Error from changing the config.
@@ -322,16 +358,19 @@ pub enum SaveSettingError {
         #[source]
         source: toml_edit::TomlError,
     },
-    /// The table the change edits is written inline; nothing was written.
+    /// The key the change edits is written another way; nothing was written.
     #[error(
-        "{} writes {table} inline; change it there by hand, or rewrite it as a [{table}] section",
-        path.display()
+        "{}: {key} is not written as {}, so it cannot be changed here; edit it by hand",
+        path.display(),
+        shape.describe(key)
     )]
-    Inline {
+    NotEditable {
         /// The file.
         path: PathBuf,
-        /// The table.
-        table: &'static str,
+        /// The key, such as `github` or `github.repos`.
+        key: &'static str,
+        /// How it must be written.
+        shape: Shape,
     },
     /// The change would make the config invalid; nothing was written.
     #[error(transparent)]
@@ -556,11 +595,33 @@ mod tests {
         ] {
             let err = save(&data_dir, change).unwrap_err();
             assert!(
-                matches!(err, SaveSettingError::Inline { table: t, .. } if t == table),
+                matches!(err, SaveSettingError::NotEditable { key, .. } if key == table),
                 "{err:?}"
             );
         }
         assert_eq!(fs::read_to_string(data_dir.config_file()).unwrap(), inline);
+    }
+
+    #[test]
+    fn a_list_written_as_one_value_is_refused_not_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let text = "[github]\nrepos = \"o/a\"\n";
+        fs::create_dir_all(data_dir.config_file().parent().unwrap()).unwrap();
+        fs::write(data_dir.config_file(), text).unwrap();
+        let err = save(&data_dir, repo_added("o/b")).unwrap_err();
+        assert!(
+            err.to_string()
+                .ends_with("github.repos is not written as a list, so it cannot be changed here; edit it by hand"),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(data_dir.config_file()).unwrap(), text);
+        let err = SaveSettingError::NotEditable {
+            path: PathBuf::from("c.toml"),
+            key: "servers",
+            shape: Shape::Tables,
+        };
+        assert!(err.to_string().contains("[[servers]] tables"), "{err}");
     }
 
     #[test]

@@ -27,6 +27,10 @@ pub struct PopoverView {
     pub headline: String,
     /// When the newest sweep of any target started.
     pub last_swept: Option<Timestamp>,
+    /// Whether a sweep ran and nothing is open.
+    pub all_clear: bool,
+    /// How many targets there are: "1 target", "3 targets".
+    pub target_count: String,
     /// One line per target, in sweep order.
     pub targets: Vec<TargetLine>,
     /// How many findings are dismissed across targets.
@@ -134,6 +138,11 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
         exploited: findings.iter().filter(|f| f.open.known_exploited).count(),
         counts: Counts::of(findings.iter().map(|f| &f.open)),
         headline: headline(needs_you, findings.len()),
+        all_clear: findings.is_empty() && last_swept.is_some(),
+        target_count: match targets.len() {
+            1 => "1 target".to_owned(),
+            n => format!("{n} targets"),
+        },
         findings,
         last_swept,
         targets,
@@ -309,6 +318,18 @@ mod tests {
         let view = popover_view(Vec::new());
         assert_eq!(view.headline, "All clear");
         assert_eq!(view.last_swept, None);
+        assert!(!view.all_clear, "nothing was swept yet");
+        assert_eq!(view.target_count, "0 targets");
+        let swept = popover_view(vec![target("mac", Some(1), Vec::new(), 0)]);
+        assert!(swept.all_clear);
+        assert_eq!(swept.target_count, "1 target");
+        let open = popover_view(vec![target(
+            "mac",
+            Some(1),
+            vec![open(1, Severity::Low, false, None)],
+            0,
+        )]);
+        assert!(!open.all_clear);
     }
 
     #[test]

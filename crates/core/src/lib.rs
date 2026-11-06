@@ -44,7 +44,6 @@ pub use crate::config::SshConn;
 pub use crate::config::SshWord;
 pub use crate::detect::Detected;
 pub use crate::detect::detect;
-pub use crate::detect::use_login_shell_path;
 pub use crate::feeds::Advisory;
 pub use crate::feeds::Crowded;
 pub use crate::feeds::FeedError;

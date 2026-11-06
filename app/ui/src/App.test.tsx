@@ -132,7 +132,7 @@ describe("the popover", () => {
   });
 
   it("shows all clear once a sweep found nothing", async () => {
-    shown = overview({ last_swept: "2026-11-06T11:00:00Z", dismissed: 2 });
+    shown = overview({ last_swept: "2026-11-06T11:00:00Z", dismissed: 2, all_clear: true });
     answer();
     render(() => <App />);
     expect(await screen.findByText("All clear")).toBeTruthy();
@@ -149,7 +149,7 @@ describe("a finding", () => {
         found: "2026-11-06T11:00:00Z",
         summary: "Update openssl",
         steps: [],
-        commands: [],
+        commands: ["brew upgrade openssl"],
         agent: "claude",
       }),
       fix: () => null,
@@ -159,9 +159,13 @@ describe("a finding", () => {
     fireEvent.click(screen.getByText("Fix…"));
     const confirm = await screen.findByText(/with full access\?/);
     expect(within(confirm).getByText("this Mac")).toBeTruthy();
+    expect(screen.getByText("Update openssl")).toBeTruthy();
+    expect(screen.getByLabelText("Commands the fix runs").textContent).toContain(
+      "brew upgrade openssl",
+    );
     expect(invoke).not.toHaveBeenCalledWith("fix", expect.anything());
     fireEvent.click(screen.getByText("Run fix"));
-    expect(invoke).toHaveBeenCalledWith("fix", { key: "a" });
+    expect(invoke).toHaveBeenCalledWith("fix", { key: "a", found: "2026-11-06T11:00:00Z" });
   });
 
   it("is dismissed with the reason given", async () => {
@@ -445,18 +449,21 @@ describe("the detail", () => {
 
 describe("a finished fix", () => {
   it.each([
-    ["fixed", "Fixed:", "banner good"],
-    ["failed", "Fix failed:", "banner bad"],
-  ])("reads %s, and closes", async (outcome, label, className) => {
+    ["fixed", "Fixed:", "banner good", "https://github.com/me/app/pull/7"],
+    ["failed", "Fix failed:", "banner bad", null],
+  ])("reads %s, and closes", async (outcome, label, className, pr) => {
     shown = two();
     answer();
     render(() => <App />);
     await screen.findByText("2 findings need you");
     handlers.get("fix-done")?.({
-      payload: { key: "a", outcome, summary: "Updated openssl", pull_request: null },
+      payload: { key: "a", outcome, summary: "Updated openssl", pull_request: pr },
     });
     const banner = (await screen.findByText(label)).closest("p") as HTMLElement;
     expect(banner.className).toBe(className);
+    expect(banner.querySelector(".pr")?.textContent ?? null).toBe(
+      pr === null ? null : `Pull request: ${pr}`,
+    );
     expect(banner.textContent).toContain("Updated openssl");
     fireEvent.click(within(banner).getByLabelText("Close"));
     expect(screen.queryByText(label)).toBeNull();
@@ -576,11 +583,11 @@ describe("state across commands", () => {
   });
 
   it("says nothing about dismissals when there are none", async () => {
-    shown = overview({ last_swept: "2026-11-06T11:00:00Z" });
+    shown = overview({ last_swept: "2026-11-06T11:00:00Z", all_clear: true });
     answer();
     render(() => <App />);
-    const text = (await screen.findByText(/targets swept/)).textContent ?? "";
+    const text = (await screen.findByText(/target swept/)).textContent ?? "";
     expect(text).not.toContain("dismissed");
-    expect(text).toMatch(/1 targets swept .* ago\. Nothing open\./);
+    expect(text).toMatch(/1 target swept .* ago\. Nothing open\./);
   });
 });

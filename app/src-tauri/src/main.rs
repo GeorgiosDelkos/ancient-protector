@@ -270,16 +270,18 @@ fn fix_preview(runner: State<'_, Runner>, key: String) -> Result<FixPreview, Str
 }
 
 /// Runs the fix of `key`, which the user just confirmed in the detail view, with full access.
-#[tauri::command]
+/// `found` is the preview's: the fix runs only when it is still the one the user saw. Async,
+/// so planning it never stalls the UI.
+#[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
-fn fix(app: AppHandle, key: String) -> Result<(), String> {
+fn fix(app: AppHandle, key: String, found: Timestamp) -> Result<(), String> {
     let key: FindingKey = key
         .parse()
         .map_err(|e: ParseFindingKeyError| e.to_string())?;
-    runner::start_fix(&app, key)
+    runner::start_fix(&app, key, found)
 }
 
 /// Dismisses `key` for `reason`; it shows again when its advisory changes.

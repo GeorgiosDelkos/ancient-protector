@@ -443,6 +443,18 @@ Built in step 9b (2026-11-06):
   `~/.ssh/config` hosts, project folders, the Keychain key) takes about two seconds, so it
   runs once as the app starts and again only on "Look again". A change returns the new view
   at once instead of detecting again.
+- Each detection also sets the `PATH` every tool and agent then runs with, so a tool found
+  by "Look again" is the one the next sweep runs. Until the first detection at start ends,
+  tools run with macOS's minimal `PATH` (accepted: a sweep that early is rare).
+- Saves take an exclusive lock on `.config.toml.lock`, so two at once (quick clicks, or the
+  app and the CLI) both land. A key written another way than a change expects (an inline
+  table, `repos = "o/r"`) is refused with what to change, never replaced.
+- A confirmed fix carries the preview's `found`; the app refuses it when a newer sweep
+  changed the finding, and the confirm shows the commands that will run.
+- The NVD key is saved with `/usr/bin/security -i`, the command on stdin, so the program
+  that reads it before each sweep is the one that created it and is trusted without a
+  prompt. Accepted: a key saved by an earlier build through Security.framework may prompt
+  once; "Always Allow" or saving it again fixes that.
 - The popover stays open while detection or the folder picker runs: macOS asks for Documents
   or Keychain access then, and the prompt would take the focus and hide it.
 - Tests: the views and changes have Rust unit tests in the core (mutation-tested in CI); the

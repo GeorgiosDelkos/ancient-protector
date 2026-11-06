@@ -114,16 +114,19 @@ impl NvdAccess {
             .write_all(script.as_bytes())
             .map_err(KeychainError::Run)?;
         let output = child.wait_with_output().map_err(KeychainError::Run)?;
-        // `security -i` reports a failed command on stderr; the text is not shown, since it
-        // could quote the command and with it the key.
-        if output.status.success() && output.stderr.is_empty() {
-            Ok(())
-        } else {
-            Err(KeychainError::Save(format!(
-                "security exited with {}",
-                output.status
-            )))
-        }
+        saved(output.status.success(), &output.stderr)
+    }
+}
+
+/// Whether `security -i` stored the key. It exits 0 even when the command fails, and then
+/// prints the error or its usage on stderr (observed on macOS 26 with a scratch keychain), so
+/// any stderr is a failure. The text is not shown, since it could quote the command and with
+/// it the key.
+fn saved(exited_ok: bool, stderr: &[u8]) -> Result<(), KeychainError> {
+    match (exited_ok, stderr.is_empty()) {
+        (true, true) => Ok(()),
+        (true, false) => Err(KeychainError::Save("security reported an error".to_owned())),
+        (false, _) => Err(KeychainError::Save("security failed".to_owned())),
     }
 }
 
@@ -168,7 +171,7 @@ fn from_security_output(code: Option<i32>, stdout: &[u8]) -> Result<NvdAccess, K
     }
 }
 
-/// Error from [`NvdAccess::from_keychain`].
+/// Error from reading or saving the NVD key in the Keychain.
 #[derive(Debug, thiserror::Error)]
 pub enum KeychainError {
     /// `/usr/bin/security` could not be started.
@@ -187,7 +190,9 @@ pub enum KeychainError {
     #[error("an NVD API key is one line of letters, digits and dashes; paste it again")]
     NotAKey,
     /// The Keychain refused to store the key.
-    #[error("the Keychain refused the key ({0}); allow access in Keychain Access and try again")]
+    #[error(
+        "the Keychain did not store the key: {0}; allow access in Keychain Access and try again"
+    )]
     Save(String),
 }
 
@@ -557,19 +562,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn only_an_nvd_key_reaches_the_keychain_command() {
-        let key = "1a2b3c4d-0000-4000-8000-0123456789ab";
-        assert_eq!(
-            keychain_script(&format!(" {key}\n")).unwrap(),
-            format!(
-                "add-generic-password -U -s {KEYCHAIN_SERVICE} -a {KEYCHAIN_ACCOUNT} -w {key}\n"
-            )
-        );
-        for bad in ["", "-U", "a b", "a\nb", "a\"b", "key;rm", &"a".repeat(129)] {
-            assert_eq!(keychain_script(bad), None, "{bad:?}");
-        }
-    }
     use crate::feeds::Endpoints;
     use crate::feeds::test_server::Request;
     use crate::feeds::test_server::TestServer;
@@ -609,6 +601,23 @@ mod tests {
 
     fn product(name: &str) -> Product {
         name.parse().unwrap()
+    }
+
+    #[test]
+    fn only_an_nvd_key_reaches_the_keychain_command() {
+        let key = "1a2b3c4d-0000-4000-8000-0123456789ab";
+        assert_eq!(
+            keychain_script(&format!(" {key}\n")).unwrap(),
+            format!(
+                "add-generic-password -U -s {KEYCHAIN_SERVICE} -a {KEYCHAIN_ACCOUNT} -w {key}\n"
+            )
+        );
+        assert!(saved(true, b"").is_ok());
+        assert!(saved(true, b"Usage: add-generic-password").is_err());
+        assert!(saved(false, b"").is_err());
+        for bad in ["", "-U", "a b", "a\nb", "a\"b", "key;rm", &"a".repeat(129)] {
+            assert_eq!(keychain_script(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

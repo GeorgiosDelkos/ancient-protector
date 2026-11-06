@@ -56,22 +56,29 @@ pub(crate) struct Held<'a> {
 impl Drop for Held<'_> {
     fn drop(&mut self) {
         // Relaxed: the count guards no other data; the next blur reads whatever is set by then.
-        let last = self
+        let left = self
             .app
             .state::<Popover>()
             .held
-            .fetch_sub(1, Ordering::Relaxed)
-            == 1;
+            .fetch_sub(1, Ordering::Relaxed);
+        if left != 1 {
+            return;
+        }
         // A blur while held was ignored, so the last hold closes a popover that lost the focus
         // meanwhile (the user clicked elsewhere, or a prompt kept it), as that blur would have.
-        // Best effort: a popover left open closes on the next click elsewhere or on the icon.
-        if let Some(window) = self.app.get_webview_window(POPOVER)
-            && last
-            && window.is_visible().unwrap_or(false)
-            && !window.is_focused().unwrap_or(true)
-        {
-            drop(window.hide());
-        }
+        // On the main thread, where blurs are handled, so this never waits on it, and with the
+        // count read again there: a hold taken since keeps the popover open. Best effort: a
+        // popover left open closes on the next click elsewhere or on the icon.
+        let app = self.app.clone();
+        drop(self.app.run_on_main_thread(move || {
+            if app.state::<Popover>().held.load(Ordering::Relaxed) == 0
+                && let Some(window) = app.get_webview_window(POPOVER)
+                && window.is_visible().unwrap_or(false)
+                && !window.is_focused().unwrap_or(true)
+            {
+                drop(window.hide());
+            }
+        }));
     }
 }
 

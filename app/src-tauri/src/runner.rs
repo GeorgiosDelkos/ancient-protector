@@ -237,14 +237,22 @@ pub(crate) struct FixDone {
 }
 
 /// Runs the confirmed fix of `key` on its own thread, and tells the popover how it ended with
-/// a `fix-done` event. The fix is planned again here, so a sweep that landed since the
-/// preview is caught, and the status shows the plan's own summary.
+/// a `fix-done` event.
+///
+/// The fix is planned again and runs only when it comes from the sweep that found the one the
+/// user confirmed (`found`, from the preview), so a sweep that landed since the preview is
+/// refused instead of running commands the user never saw. `run_fix` checks the plan against
+/// the reports once more under the sweeps lock, which catches a sweep that lands after this.
 ///
 /// # Errors
 ///
-/// Fails when the fix cannot be planned, or a sweep or another fix is running.
-pub(crate) fn start_fix(app: &AppHandle, key: FindingKey) -> Result<(), String> {
+/// Fails when the fix cannot be planned, changed since the preview, or a sweep or another fix
+/// is running.
+pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> Result<(), String> {
     let plan = plan(app, key)?;
+    if plan.found() != found {
+        return Err("a newer sweep changed this finding; open it again to see its fix".to_owned());
+    }
     let title = plan.fix().summary.clone();
     app.state::<Runner>().claim(Status::Fixing { title })?;
     changed(app);

@@ -50,13 +50,12 @@ enum Fresh {
     Now,
 }
 
-/// As the app starts, in the background: finds tools on the login shell's `PATH` from now on
-/// (macOS starts an app with a minimal one), then runs detection, so the settings open at
-/// once. Any macOS prompt detection raises (Documents access, the Keychain) shows before the
-/// popover opens. Off the main thread, so a slow login profile never delays the tray icon.
+/// Runs detection as the app starts, in the background, so the settings open at once and
+/// tools are found on the login shell's `PATH` (macOS starts an app with a minimal one). Any
+/// macOS prompt it raises (Documents access, the Keychain) shows before the popover opens.
+/// Off the main thread, so a slow login profile never delays the tray icon.
 pub(crate) fn detect_at_start(app: AppHandle) {
     thread::spawn(move || {
-        ancient_protector_core::use_login_shell_path();
         let found = detect(app.state::<Runner>().home());
         app.state::<Detection>().lock().get_or_insert(found);
     });

@@ -109,23 +109,17 @@ pub struct SshHost {
     pub host_name: Option<String>,
 }
 
-/// Asks the login shell for its `PATH`, and has every tool the core runs from now on found on
-/// it, as in the user's terminal. For the menu-bar app, which macOS starts with a minimal
-/// `PATH`; returns `false` when the shell gave no answer, and the process's `PATH` stays.
-pub fn use_login_shell_path() -> bool {
-    match login_shell() {
-        Some(answer) => {
-            command::use_search_path(answer.path);
-            true
-        }
-        None => false,
-    }
-}
-
 /// Detects what this Mac has. Takes a few seconds: it runs the login shell, `gh` twice and
 /// the Keychain lookup.
+///
+/// Every tool the core runs from then on is found on the login shell's `PATH`, as in the
+/// user's terminal and as the settings show it: the menu-bar app starts with macOS's minimal
+/// one. When the shell gives no answer, the `PATH` in use stays.
 pub fn detect(home: &Path) -> Detected {
     let answer = login_shell();
+    if let Some(answer) = &answer {
+        command::use_search_path(answer.path.clone());
+    }
     let found = |program: &str| answer.as_ref().and_then(|a| a.binary(program));
     let agents = AGENTS.iter().map(|&a| (a, found(a.binary()))).collect();
     let tools: Vec<Tool> = TOOLS
@@ -250,7 +244,7 @@ fn ssh_hosts(config: &str) -> Vec<SshHost> {
     let mut hosts: Vec<SshHost> = Vec::new();
     let mut block: Vec<usize> = Vec::new();
     for line in config.lines() {
-        let line = line.trim();
+        let line = without_comment(line).trim();
         let Some((keyword, rest)) = line.split_once(|c: char| c.is_whitespace() || c == '=') else {
             continue;
         };
@@ -281,6 +275,19 @@ fn ssh_hosts(config: &str) -> Vec<SshHost> {
         }
     }
     hosts
+}
+
+/// `line` up to a comment: a word starting with `#` and the rest of the line, as OpenSSH reads
+/// it, so `Host web # prod` names only `web`.
+fn without_comment(line: &str) -> &str {
+    let mut at_word_start = true;
+    for (i, c) in line.char_indices() {
+        if c == '#' && at_word_start {
+            return &line[..i];
+        }
+        at_word_start = c.is_whitespace() || c == '=';
+    }
+    line
 }
 
 #[cfg(test)]
@@ -328,6 +335,9 @@ Match host staging
   HostName ignored
 Host web
   HostName shadowed
+# Host commented-out
+Host db-2 # the new database
+  HostName 10.0.0.7 # behind the VPN
 ";
         assert_eq!(
             ssh_hosts(config),
@@ -343,6 +353,10 @@ Host web
                 SshHost {
                     alias: "db-1".to_owned(),
                     host_name: Some("db.internal".to_owned())
+                },
+                SshHost {
+                    alias: "db-2".to_owned(),
+                    host_name: Some("10.0.0.7".to_owned())
                 },
             ]
         );
