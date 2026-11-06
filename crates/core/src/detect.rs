@@ -413,7 +413,10 @@ mod tests {
         let gh = tmp.path().join("gh");
         script(
             &gh,
-            "case \"$1\" in api) echo 'not logged in: run gh auth login' ;; *) echo '[{\"nameWithOwner\":\"o/r\",\"isPrivate\":false}]' ;; esac\n",
+            "case \"$1\" in\n\
+             api) echo 'not logged in: run gh auth login' ;;\n\
+             *) echo '[{\"nameWithOwner\":\"o/r\",\"isPrivate\":false}]' ;;\n\
+             esac\n",
         );
         let shell = tmp.path().join("shell");
         script(
