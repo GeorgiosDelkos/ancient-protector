@@ -301,7 +301,7 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     let listening = fixed("listening")?;
     if listening.status == NOT_FOUND {
         collected.problems.push(
-            "listening sockets are not checked: neither ss nor netstat ran on the server"
+            "listening sockets are not checked: ss is missing or failed, and netstat is missing"
                 .to_owned(),
         );
     }
@@ -1304,7 +1304,8 @@ Version: 1
             [
                 "OS packages are not checked: no dpkg, apk or rpm package list found, or a \
                  distribution other than Debian, Ubuntu or Alpine",
-                "listening sockets are not checked: neither ss nor netstat ran on the server",
+                "listening sockets are not checked: ss is missing or failed, and netstat is \
+                 missing",
             ]
         );
         let files: Vec<&str> = collected.files.iter().map(|f| f.0.as_str()).collect();

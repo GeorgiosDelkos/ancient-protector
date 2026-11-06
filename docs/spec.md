@@ -183,7 +183,7 @@ OS packages are looked up in OSV by release ecosystem (`Debian:12`, `Ubuntu:24.0
 `Alpine:v3.20`) and source package name, with the installed version: by name alone Debian 12's
 `openssl` matches 266 advisories and `linux` over 1000 (checked 2026-11-06), and OSV compares
 dpkg and apk versions as the distribution does. So OSV sees the versions of OS packages, unlike
-language packages. A query that still matches more than 200 advisories (the kernel) keeps only
+language packages (accepted by the user 2026-11-06). A query that still matches more than 200 advisories (the kernel) keeps only
 those for a CVE in CISA KEV, read from the advisory id (`DEBIAN-CVE-...`; grouped `DSA-` and
 `USN-` advisories of such a query are dropped), and the report says how many were left out.
 Kernel images built from `linux-signed*` source packages are looked up as the kernel's source

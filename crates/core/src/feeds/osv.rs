@@ -41,10 +41,12 @@ pub(super) fn fetch(
     kev: Option<&Kev>,
 ) -> Result<OsvAdvisories, FeedError> {
     let mut ids = query_ids(feeds, queries)?;
-    // querybatch's `modified` is the record's. OSV records are modified no earlier than they
-    // are published (the schema calls `modified` the time of the last change), so this drops
-    // what the window would drop after fetching, without fetching it, and before the crowded
-    // queries are counted.
+    // querybatch's `modified` is the record's. Dropping by it before fetching, and before the
+    // crowded queries are counted, relies on `modified` never being earlier than `published`:
+    // the schema calls it the time the entry was last modified
+    // (<https://github.com/ossf/osv-schema/blob/7e336cc6dabe/docs/schema.md#modified-field>)
+    // but does not state the ordering. A record that broke it would be dropped here although
+    // the window would keep it.
     ids.retain(|_, queried| {
         queried
             .modified
