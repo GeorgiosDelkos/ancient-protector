@@ -482,21 +482,7 @@ fn print(text: &str) {
 
 /// Prints one progress line of a sweep on stderr.
 fn show_progress(progress: &Progress<'_>) {
-    let line = match progress {
-        Progress::Target { target } => format!("sweeping {target}"),
-        Progress::Inventory => "listing what is installed".to_owned(),
-        Progress::Advisories { packages, products } => {
-            format!("fetching advisories for {packages} packages and {products} NVD products")
-        }
-        Progress::Product {
-            done,
-            total,
-            product,
-        } => format!("NVD {done}/{total}: {product}"),
-        Progress::Agent { agent, attempt: 1 } => format!("{agent} is judging the advisories"),
-        Progress::Agent { agent, .. } => format!("{agent} is fixing its rejected findings"),
-    };
-    status(&line);
+    status(&progress.to_string());
 }
 
 #[expect(
