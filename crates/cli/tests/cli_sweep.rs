@@ -36,6 +36,7 @@ case "$FAKE_AGENT_MODE:$n" in
   retry:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
   silent:*) ;;
+  partial:*) echo '{"outcome": "partial", "summary": "half"}' > result.json ;;
   fix:*)
     echo '{"outcome": "fixed", "summary": "pinned the action",
       "pull_request": "https://github.com/o/r/pull/7"}' > result.json ;;
@@ -599,6 +600,7 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
     assert_eq!(record["key"], key.as_str());
     assert_eq!(record["target"], "github:o/r");
     assert_eq!(record["outcome"], "fixed");
+    assert_eq!(record["confirmed"], "asked");
     let dir = PathBuf::from(record["dir"].as_str().unwrap());
     let log = fs::read_to_string(dir.join("agent.log")).unwrap();
     assert!(log.contains("--permission-mode bypassPermissions"), "{log}");
@@ -629,6 +631,8 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["dir"].to_string())
         .collect();
     assert_eq!(dirs.len(), 2);
+    let last: serde_json::Value = serde_json::from_str(history.lines().last().unwrap()).unwrap();
+    assert_eq!(last["confirmed"], "yes_flag");
     assert_ne!(dirs[0], dirs[1]);
 
     let unknown = sandbox.fix(&["0123456789abcdef", "--yes"], "");
@@ -658,6 +662,13 @@ fn only_a_current_undismissed_finding_is_fixed_and_a_silent_agent_fails() {
     );
     let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
     assert!(history.contains(r#""outcome":"unknown""#), "{history}");
+    let partial = sandbox
+        .command("partial")
+        .args(["fix", &key, "--yes"])
+        .output()
+        .unwrap();
+    assert!(!partial.status.success(), "only fixed counts as done");
+    assert!(text(&partial.stderr).contains("the fix did not finish: partial, agent exit code 0"));
 
     assert!(
         sandbox

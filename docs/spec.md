@@ -264,10 +264,14 @@ use ssh.
   only).
 - Where to work: this Mac; for a repository, a clone in the fix folder, a branch
   `ancient-protector/fix-<key>`, and a pull request (never a push to the default branch); for a
-  server, every command through `ssh` with the sweep's options to that one host.
+  server, every command through `ssh` with the sweep's options to that one host, carried to the
+  server's `sh -s` in a quoted heredoc, so a quote in a command cannot end the ssh line and run
+  the rest on the Mac. Accepted risk: a repository fix lets the full-access agent read the
+  clone, which may hold agent instruction files; the repositories are the user's own, and the
+  agent's project settings and hooks come from its working folder, the fix folder.
 - `state/fixes.jsonl` gets one line per run: key, target, agent, start and end, exit code,
   outcome (`unknown` when `result.json` is missing or invalid or the agent did not start,
-  with why), summary, pull request, folder. Appends take `state/.lock`; a last line cut short
+  with why), summary, pull request, how it was confirmed (`asked` or `yes_flag`), folder. Appends take `state/.lock`; a last line cut short
   by a crash is ended first. The CLI exits non-zero unless the outcome is `fixed` and the
   agent exited 0.
 - A fix holds `sweeps/.lock`, so no sweep or other fix runs while it changes the target.

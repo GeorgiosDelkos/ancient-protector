@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use ancient_protector_core::Config;
+use ancient_protector_core::Confirmed;
 use ancient_protector_core::DataDir;
 use ancient_protector_core::Feeds;
 use ancient_protector_core::FindingKey;
@@ -205,7 +206,12 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
             anyhow::bail!("not confirmed; nothing was run");
         }
     }
-    let record = run_fix(data_dir, &plan)?;
+    let confirmed = if yes {
+        Confirmed::YesFlag
+    } else {
+        Confirmed::Asked
+    };
+    let record = run_fix(data_dir, &plan, confirmed)?;
     let pull_request = record
         .pull_request
         .as_ref()

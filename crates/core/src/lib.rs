@@ -57,6 +57,7 @@ pub use crate::findings::Fix;
 pub use crate::findings::Issue;
 pub use crate::findings::Severity;
 pub use crate::findings::Subject;
+pub use crate::fix::Confirmed;
 pub use crate::fix::FixError;
 pub use crate::fix::FixPlan;
 pub use crate::fix::FixRecord;

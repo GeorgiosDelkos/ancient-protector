@@ -47,6 +47,11 @@ use crate::sweep::Lock;
 use crate::sweep::Prompt;
 use crate::sweep::SweepError;
 
+/// Ends the heredoc that carries a command to a server's `sh`. Quoted, so this Mac's shell
+/// expands nothing in the command; a confirmed command is one line, and one that is exactly
+/// this word is refused, so none can end the heredoc early.
+const HEREDOC_END: &str = "ANCIENT_PROTECTOR_END";
+
 /// The JSON Schema of `result.json`, written into each fix folder for the agent.
 const RESULT_SCHEMA: &str = include_str!("fix-result.schema.json");
 
@@ -139,6 +144,9 @@ pub fn plan_fix(data_dir: &DataDir, config: &Config, key: FindingKey) -> Result<
     let fix = Fix::deserialize(&entry["fix"]).map_err(invalid)?;
     let mut problems = Vec::new();
     findings::check_fix("fix", &fix, &mut problems);
+    if fix.commands.iter().any(|c| c.trim() == HEREDOC_END) {
+        problems.push(format!("fix.commands: {HEREDOC_END} is reserved"));
+    }
     if !problems.is_empty() {
         return Err(FixError::Malformed { key, problems });
     }
@@ -198,6 +206,8 @@ pub struct FixRecord {
     pub summary: String,
     /// The pull request the agent opened, for a repository.
     pub pull_request: Option<String>,
+    /// How the user confirmed it.
+    pub confirmed: Confirmed,
     /// The fix's folder: prompt, `fix.json`, agent log and result.
     pub dir: PathBuf,
 }
@@ -237,6 +247,16 @@ struct AgentResult {
     pull_request: Option<String>,
 }
 
+/// How the user confirmed a fix, kept in its record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confirmed {
+    /// The user answered yes to the question.
+    Asked,
+    /// A script passed `--yes`, having shown the fix itself.
+    YesFlag,
+}
+
 /// Runs the confirmed `plan` with full access and records the run in `state/fixes.jsonl`.
 /// Call it only after the user confirmed what the plan shows.
 ///
@@ -247,7 +267,11 @@ struct AgentResult {
 ///
 /// Fails before the agent runs when a sweep or fix is running or the fix folder cannot be
 /// written, and after it when the record cannot be appended.
-pub fn run_fix(data_dir: &DataDir, plan: &FixPlan) -> Result<FixRecord, FixError> {
+pub fn run_fix(
+    data_dir: &DataDir,
+    plan: &FixPlan,
+    confirmed: Confirmed,
+) -> Result<FixRecord, FixError> {
     let _lock = Lock::acquire(&data_dir.sweeps_dir())?;
     let started = Timestamp::now();
     let fixes = data_dir.fixes_dir();
@@ -295,6 +319,7 @@ pub fn run_fix(data_dir: &DataDir, plan: &FixPlan) -> Result<FixRecord, FixError
         outcome,
         summary,
         pull_request,
+        confirmed,
         dir,
     };
     append(data_dir, &record)?;
@@ -340,10 +365,12 @@ fn access(config: &Config, target: &str, key: FindingKey) -> Result<(String, Str
         let ssh = server::ssh_command_line(&server.conn);
         let access = format!(
             "The server {name}. You are on this Mac; run every command on the server as\n\n\
-             ```sh\n{ssh} '<command>'\n```\n\n\
-             with exactly these ssh options, and connect to no other host. Use `sudo` where \
-             the confirmed command does; if sudo asks for a password, stop and write \
-             `failed`."
+             ```sh\n{ssh} sh -s <<'{HEREDOC_END}'\n<command>\n{HEREDOC_END}\n```\n\n\
+             with the command on its own line, exactly as confirmed, and exactly these ssh \
+             options; connect to no other host. Never put a command inside quotes on the ssh \
+             line: a quote in the command would end them and run the rest on this Mac. Use \
+             `sudo` where the confirmed command does; if sudo asks for a password, stop and \
+             write `failed`."
         );
         return Ok((format!("the server {name}, through `{ssh}`"), access));
     }
@@ -518,7 +545,10 @@ mod tests {
             "the user sees the host: {shown}"
         );
         assert!(
-            server.contains("-l ops -i /k/id_ed -o IdentitiesOnly=yes -- 10.0.0.5 '<command>'"),
+            server.contains(
+                "-l ops -i /k/id_ed -o IdentitiesOnly=yes -- 10.0.0.5 sh -s \
+                 <<'ANCIENT_PROTECTOR_END'\n<command>\nANCIENT_PROTECTOR_END\n"
+            ),
             "{server}"
         );
 
@@ -621,6 +651,7 @@ mod tests {
             outcome: Outcome::Fixed,
             summary: format!("run {n}"),
             pull_request: None,
+            confirmed: Confirmed::Asked,
             dir: PathBuf::from("/f"),
         }
     }
