@@ -98,7 +98,8 @@ impl Inventory {
 pub struct Component {
     /// How advisories are looked up for it.
     pub lookup: Lookup,
-    /// The installed version, as the source reports it.
+    /// The version as the source reports it: installed, or for a dependency graph a manifest
+    /// range (`^1.2.0`) or `unknown` when the graph has none.
     pub version: String,
     /// Where it was found.
     pub found_in: FoundIn,

@@ -41,8 +41,8 @@ case "$last" in
   repos/o/r/dependency-graph/sbom) echo '{"sbom":{"packages":[{"versionInfo":"4.17.20",
     "externalRefs":[{"referenceType":"purl","referenceLocator":"pkg:npm/lodash@4.17.20"}]}]}}' ;;
   repos/o/r/*alerts*) echo '[[]]' ;;
-  "repos/o/r/contents/.github/workflows?ref=main") echo '[{"type":"file","name":"ci.yml"}]' ;;
-  "repos/o/r/contents/.github/workflows/ci.yml?ref=main") echo 'on: pull_request_target' ;;
+  repos/o/r/contents/.github/workflows) echo '[{"type":"file","name":"ci.yml"}]' ;;
+  repos/o/r/contents/.github/workflows/ci.yml) echo 'on: pull_request_target' ;;
   repos/o/r/branches/main/protection) refuse 404 "Branch not protected" ;;
   repos/o/r/*) echo '{}' ;;
   *) refuse 404 "Not Found" ;;
@@ -157,7 +157,7 @@ fn clean_sweep_writes_bundle_and_report() {
     assert!(stderr.contains("NVD 1/1: apple:macos"), "{stderr}");
     // The feeds are unreachable, so the verdict says it covers only what was checked.
     assert!(
-        stdout.contains("No affected component among what was checked"),
+        stdout.contains("Nothing affected or risky was found in what was checked"),
         "{stdout}"
     );
     assert!(stdout.contains("## Not checked"), "{stdout}");
@@ -254,7 +254,7 @@ fn twice_rejected_findings_fail_the_sweep_but_keep_the_report() {
         assert!(stderr.contains("sweep incomplete"), "{mode}: {stderr}");
         assert!(stdout.contains("**No verdict:**"), "{mode}: {stdout}");
         assert!(
-            !stdout.contains("No installed component is affected"),
+            !stdout.contains("Nothing affected or risky was found."),
             "{mode}: {stdout}"
         );
         assert_eq!(sandbox.runs().trim(), "2", "{mode}");

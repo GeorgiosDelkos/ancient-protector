@@ -225,27 +225,7 @@ pub fn sweep(
     reports.push(shared.sweep_target(&dir, mac, progress)?);
 
     for repo in &config.repos {
-        let target = format!("github:{repo}");
-        progress(Progress::Target { target: &target });
-        progress(Progress::Inventory);
-        let started = Timestamp::now();
-        match github::collect("gh", repo) {
-            Ok(collected) => {
-                let collected = Collected::github(repo, collected);
-                reports.push(shared.sweep_target(&dir, collected, progress)?);
-            }
-            Err(e) => {
-                let dir = dir.join(github_dir_name(repo));
-                fs::create_dir_all(&dir).map_err(|source| SweepError::Write {
-                    path: dir.clone(),
-                    source,
-                })?;
-                let mut report = Report::new(started, target, agent, dir.clone());
-                report.failure = Some(plain(&error_chain(&e)));
-                save_report(&dir, &mut report);
-                reports.push(report);
-            }
-        }
+        reports.push(shared.sweep_repo(&dir, repo, progress)?);
     }
     Ok(reports)
 }
@@ -282,21 +262,6 @@ struct Collected {
     problems: Vec<String>,
 }
 
-impl Collected {
-    fn github(repo: &RepoSlug, collected: github::Repo) -> Self {
-        Self {
-            target: format!("github:{repo}"),
-            dir_name: github_dir_name(repo),
-            title: format!("the GitHub repository {repo}"),
-            prompt: Prompt::GitHub,
-            components: collected.components,
-            files: collected.files,
-            settings: collected.settings,
-            problems: collected.problems,
-        }
-    }
-}
-
 /// This Mac's inventory as a target.
 fn collect_mac(project_dirs: &[PathBuf]) -> Collected {
     let inventory = Inventory::collect_mac(project_dirs);
@@ -324,6 +289,46 @@ fn github_dir_name(repo: &RepoSlug) -> String {
 }
 
 impl Shared<'_> {
+    /// Collects `repo` with `gh` and sweeps it. A repository that cannot be read gets a report
+    /// with the reason and no agent run.
+    fn sweep_repo(
+        &self,
+        sweep_dir: &Path,
+        repo: &RepoSlug,
+        progress: &mut dyn FnMut(Progress<'_>),
+    ) -> Result<Report, SweepError> {
+        let target = format!("github:{repo}");
+        let dir_name = github_dir_name(repo);
+        progress(Progress::Target { target: &target });
+        progress(Progress::Inventory);
+        let started = Timestamp::now();
+        let collected = match github::collect("gh", repo) {
+            Ok(collected) => collected,
+            Err(e) => {
+                let dir = sweep_dir.join(dir_name);
+                fs::create_dir_all(&dir).map_err(|source| SweepError::Write {
+                    path: dir.clone(),
+                    source,
+                })?;
+                let mut report = Report::new(started, target, self.agent, dir.clone());
+                report.failure = Some(plain(&error_chain(&e)));
+                save_report(&dir, &mut report);
+                return Ok(report);
+            }
+        };
+        let collected = Collected {
+            target,
+            dir_name,
+            title: format!("the GitHub repository {repo}"),
+            prompt: Prompt::GitHub,
+            components: collected.components,
+            files: collected.files,
+            settings: collected.settings,
+            problems: collected.problems,
+        };
+        self.sweep_target(sweep_dir, collected, progress)
+    }
+
     /// Fetches the target's advisories, writes its bundle, runs the agent and saves the
     /// report in `<sweep>/<target folder>`.
     fn sweep_target(
@@ -742,9 +747,9 @@ fn headline(report: &Report) -> String {
     }
     let nothing_found = report.findings.is_empty() && report.issues.is_empty();
     match (nothing_found, report.problems.is_empty()) {
-        (true, true) => "No installed component is affected by a known advisory.\n\n".to_owned(),
-        (true, false) => "No affected component among what was checked; some things were not \
-                          checked (see the end).\n\n"
+        (true, true) => "Nothing affected or risky was found.\n\n".to_owned(),
+        (true, false) => "Nothing affected or risky was found in what was checked; some things \
+                          were not checked (see the end).\n\n"
             .to_owned(),
         (false, _) => String::new(),
     }
@@ -1189,7 +1194,7 @@ mod tests {
         );
         assert!(text.contains("```sh\ngh api -X PUT x\n```"), "{text}");
         assert!(
-            !text.contains("No installed component"),
+            !text.contains("Nothing affected or risky"),
             "an issue is a result: {text}"
         );
     }
@@ -1198,13 +1203,13 @@ mod tests {
     fn headline_says_what_the_verdict_covers() {
         let clean = report_markdown(&report(vec![], &[]));
         assert!(
-            clean.contains("No installed component is affected"),
+            clean.contains("Nothing affected or risky was found."),
             "{clean}"
         );
         let gaps = report_markdown(&report(vec![], &["OSV: offline"]));
         assert!(gaps.contains("some things were not checked"), "{gaps}");
         assert!(
-            !gaps.contains("No installed component is affected"),
+            !gaps.contains("Nothing affected or risky was found."),
             "{gaps}"
         );
         let failed = Report {
@@ -1213,7 +1218,7 @@ mod tests {
         };
         let failed = report_markdown(&failed);
         assert!(failed.contains("**No verdict:** claude exited"), "{failed}");
-        assert!(!failed.contains("No installed component"), "{failed}");
+        assert!(!failed.contains("Nothing affected or risky"), "{failed}");
     }
 
     #[test]

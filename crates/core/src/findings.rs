@@ -24,6 +24,9 @@ pub(crate) const SCHEMA: &str = include_str!("findings.schema.json");
 #[serde(deny_unknown_fields)]
 struct Findings {
     findings: Vec<Finding>,
+    /// Optional, unlike in the schema: a prompt copied to the data directory before issues
+    /// existed asks for `{"findings": []}`, and a Mac sweep has no issues.
+    #[serde(default)]
     issues: Vec<Issue>,
 }
 
@@ -66,7 +69,7 @@ pub struct Issue {
 }
 
 /// What an [`Issue`] is about: a key of the bundle's `github/settings.json`, or a bundle file.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Subject {
     /// A setting, by its key in `github/settings.json`.
@@ -468,10 +471,10 @@ mod tests {
         });
         let verdict = validate(&text.to_string(), &known).unwrap();
         assert_eq!(verdict.issues.len(), 2);
-        assert_eq!(
-            verdict.issues[0].subject,
-            Subject::Setting("default_branch_protection".into())
-        );
+        assert!(matches!(
+            &verdict.issues[0].subject,
+            Subject::Setting(key) if key == "default_branch_protection"
+        ));
 
         let mut bad = issue(&json!({"file": "../etc/passwd"}));
         bad["explanation"] = json!("x\u{1b}[2J");
@@ -497,8 +500,11 @@ mod tests {
             let text = json!({"findings": [], "issues": [issue(&subject)]});
             assert!(validate(&text.to_string(), &known).is_err());
         }
-        let missing = validate(r#"{"findings": []}"#, &known).unwrap_err();
-        assert!(missing[0].contains("missing field `issues`"), "{missing:?}");
+        let older = validate(r#"{"findings": []}"#, &known).unwrap();
+        assert!(
+            older.issues.is_empty(),
+            "a prompt from before issues still works"
+        );
         assert_eq!(Subject::File("a".into()).to_string(), "file a");
     }
 

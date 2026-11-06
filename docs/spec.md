@@ -131,7 +131,7 @@ Known gaps, accepted for now:
 ### GitHub repositories (decided 2026-11-06)
 
 Each repository in `repos` is its own target, swept after the Mac in the same sweep folder
-(`sweeps/<time>/github-<owner>-<name>/`). The app collects everything through `gh api` with
+(`sweeps/<time>/github-<owner>--<name>/`). The app collects everything through `gh api` with
 the user's `gh` login; the agent never calls GitHub and reads only the bundle.
 
 | Part | API | In the bundle as |

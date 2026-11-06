@@ -16,9 +16,15 @@ and need none.
 - `records/<source>-<id>.json`: the full advisory. Open it when the index line is not enough.
 - `github/repository.json`: the repository: visibility, default branch, whether it is
   archived or a fork.
-- `github/settings.json`: one key per setting. A value with `status` and `message` is
-  GitHub's answer when the feature is off or not visible to the user's login ("Dependabot
-  alerts are disabled", "Branch not protected", "no analysis found").
+- `github/settings.json`: one key per setting. A value is GitHub's answer, or one of:
+  - `{"status": 204}`: GitHub answered with no content, which for `vulnerability_alerts`
+    means they are on;
+  - `{"status": 403 or 404, "message": ...}`: the feature is off or not visible to the
+    user's login ("Dependabot alerts are disabled", "Branch not protected", "no analysis
+    found"); read the message to tell which;
+  - `"not collected; see the problems in the report"`: the app could not read it, so say
+    nothing about it;
+  - an alert setting's `{"open": n}`: how many alerts are open.
 - `github/dependabot-alerts.json`, `github/code-scanning-alerts.json`,
   `github/secret-scanning-alerts.json`: the open alerts, when GitHub returned them. Secret
   values are removed.

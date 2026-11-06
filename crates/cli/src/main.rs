@@ -102,7 +102,6 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Sweeps this Mac and prints the report; fails when the agent gave no valid verdict.
 /// Sweeps every target and prints each report; fails when any target has no valid verdict.
 fn run_sweep(data_dir: &DataDir, config: &Config) -> anyhow::Result<()> {
     let reports = sweep(data_dir, config, &mut |p| show_progress(&p))?;

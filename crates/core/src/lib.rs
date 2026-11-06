@@ -50,7 +50,6 @@ pub use crate::findings::Fix;
 pub use crate::findings::Issue;
 pub use crate::findings::Severity;
 pub use crate::findings::Subject;
-pub use crate::github::GitHubError;
 pub use crate::inventory::Component;
 pub use crate::inventory::FoundIn;
 pub use crate::inventory::Inventory;
