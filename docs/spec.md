@@ -56,7 +56,7 @@ Core modules (one concept each):
 - `paths`: data dir layout.
 - `feeds::{osv, nvd, kev, ghsa}`: sync with cursor per source; `feeds::index` name index.
 - `inventory::{homebrew, toolchains, lockfiles}`: Mac collectors producing `Vec<Component>`;
-  GitHub collectors join them in step 5.
+  `github` collects a repository (step 5).
 - `agent`: `AgentKind` enum, detection, command construction, run with output capture.
 - `sweep`: orchestrates targets sequentially, emits progress events.
 - `findings`: schema, validation, store, dismissals, diff.
@@ -68,11 +68,12 @@ Core modules (one concept each):
 ```
 ~/Library/Application Support/ancient-protector/
   config.toml
-  prompts/{sweep,server-inventory,fix-plan,fix-exec}.md
+  prompts/{sweep,sweep-github,server-inventory,fix-plan,fix-exec}.md
   feeds/osv/<id>.json, feeds/nvd/<product>.json
   state/dismissals.json, fixes.jsonl
   sweeps/.lock
   sweeps/<utc-timestamp>[-n]/<target>/{bundle/, agent-1.log, agent-2.log, report.json, report.md}
+    (<target> is `mac` or `github-<owner>--<name>`)
 ```
 
 ### Key types (sketch, final shapes decided at the call site)
@@ -126,6 +127,33 @@ Known gaps, accepted for now:
   the ones NVD does not know.
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the login shell's `PATH` (`$SHELL -lc`), as the agent adapters do.
+
+### GitHub repositories (decided 2026-11-06)
+
+Each repository in `repos` is its own target, swept after the Mac in the same sweep folder
+(`sweeps/<time>/github-<owner>-<name>/`). The app collects everything through `gh api` with
+the user's `gh` login; the agent never calls GitHub and reads only the bundle.
+
+| Part | API | In the bundle as |
+|---|---|---|
+| Repository | `repos/{repo}` | `github/repository.json`; a repo that cannot be read fails its target |
+| Dependencies | `repos/{repo}/dependency-graph/sbom` (default branch) | components in `inventory.jsonl`, from each package URL; ecosystems the app cannot look up are counted in the report |
+| Dependabot alerts | `repos/{repo}/dependabot/alerts?state=open` | `github/dependabot-alerts.json` |
+| Code scanning alerts | `repos/{repo}/code-scanning/alerts?state=open` | `github/code-scanning-alerts.json` |
+| Secret scanning alerts | `repos/{repo}/secret-scanning/alerts?state=open` | `github/secret-scanning-alerts.json`, the secret value removed |
+| Workflows | `repos/{repo}/contents/.github/workflows` and each file | `github/workflows/<name>` |
+| Settings | the repository's `security_and_analysis`, `vulnerability-alerts`, the default branch's protection, `rulesets`, `actions/permissions`, `actions/permissions/workflow`, and for an organization owner its 2FA requirement | `github/settings.json`, one key per setting |
+
+A feature that is off answers with a 403 or 404 and a message ("Dependabot alerts are
+disabled", "no analysis found", "Branch not protected"); that answer is the setting's value in
+`settings.json`, not a failure, so the agent can report it. Any other failure of a part is a
+problem in the report and the rest still count. The dependency graph off (the SBOM returns 404)
+is reported, since the repo's dependencies were then not checked.
+
+Findings about settings and workflows have no advisory or component, so `findings.json` has a
+second list, `issues` (decided 2026-11-06): each names a `subject`, either `{"setting": <key
+in settings.json>}` or `{"file": <path of a bundle file under github/>}`, with severity,
+evidence, explanation and fix, checked like findings. A Mac sweep writes `"issues": []`.
 
 ### Sweep flow (per target, sequential)
 

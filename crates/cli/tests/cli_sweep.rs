@@ -21,13 +21,31 @@ echo $n > "$FAKE_AGENT_COUNTER"
 test -f PROMPT.md || { echo "no PROMPT.md in $(pwd)" >&2; exit 9; }
 echo "args: $*"
 case "$FAKE_AGENT_MODE:$n" in
-  ok:*) echo '{"findings": []}' > findings.json ;;
-  retry:1) echo '{"findings": [], "bogus": 1}' > findings.json ;;
-  retry:*) echo '{"findings": []}' > findings.json ;;
+  ok:*) echo '{"findings": [], "issues": []}' > findings.json ;;
+  retry:1) echo '{"findings": [], "issues": [], "bogus": 1}' > findings.json ;;
+  retry:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
   silent:*) ;;
   crash:*) exit 3 ;;
-  late-crash:*) echo '{"findings": []}' > findings.json; exit 3 ;;
+  late-crash:*) echo '{"findings": [], "issues": []}' > findings.json; exit 3 ;;
+esac
+"#;
+
+/// A fake `gh`: `o/r` is a public repository with one npm dependency and one workflow;
+/// `o/missing` does not exist. Answers by the API path, its last argument.
+const FAKE_GH: &str = r#"#!/bin/sh
+for last; do :; done
+refuse() { echo "{\"message\":\"$2\",\"status\":\"$1\"}"; exit 1; }
+case "$last" in
+  repos/o/r) echo '{"default_branch":"main","private":false,"owner":{"type":"User"}}' ;;
+  repos/o/r/dependency-graph/sbom) echo '{"sbom":{"packages":[{"versionInfo":"4.17.20",
+    "externalRefs":[{"referenceType":"purl","referenceLocator":"pkg:npm/lodash@4.17.20"}]}]}}' ;;
+  repos/o/r/*alerts*) echo '[[]]' ;;
+  "repos/o/r/contents/.github/workflows?ref=main") echo '[{"type":"file","name":"ci.yml"}]' ;;
+  "repos/o/r/contents/.github/workflows/ci.yml?ref=main") echo 'on: pull_request_target' ;;
+  repos/o/r/branches/main/protection) refuse 404 "Branch not protected" ;;
+  repos/o/r/*) echo '{}' ;;
+  *) refuse 404 "Not Found" ;;
 esac
 "#;
 
@@ -42,6 +60,7 @@ impl Sandbox {
         let sandbox = Self { root };
         fs::create_dir_all(sandbox.bin()).expect("the temp dir is writable");
         sandbox.script("bin/sw_vers", "#!/bin/sh\necho 27.2\n");
+        sandbox.script("bin/gh", FAKE_GH);
         sandbox.script("agents/claude", FAKE_AGENT);
         let claude = sandbox.path().join("agents/claude");
         sandbox.script(
@@ -103,6 +122,11 @@ impl Sandbox {
 
     /// The single sweep folder's `mac` target.
     fn sweep_dir(&self) -> PathBuf {
+        self.target_dir("mac")
+    }
+
+    /// A target's folder in the single sweep folder.
+    fn target_dir(&self, target: &str) -> PathBuf {
         let sweeps = self.path().join("data/sweeps");
         let mut dirs: Vec<_> = fs::read_dir(&sweeps)
             .expect("a sweep wrote its folder")
@@ -111,7 +135,7 @@ impl Sandbox {
             .filter(|p| p.is_dir())
             .collect();
         assert_eq!(dirs.len(), 1, "{dirs:?}");
-        dirs.remove(0).join("mac")
+        dirs.remove(0).join(target)
     }
 }
 
@@ -261,4 +285,54 @@ fn missing_or_unset_agent_stops_before_sweeping() {
         !sandbox.path().join("data/sweeps").exists(),
         "nothing was swept"
     );
+}
+
+#[test]
+fn github_repositories_are_swept_after_the_mac() {
+    let sandbox =
+        Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\", \"o/missing\"]\n");
+    let out = sandbox.sweep("ok");
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(!out.status.success(), "o/missing has no verdict: {stderr}");
+    assert!(stderr.contains("sweeping github:o/r"), "{stderr}");
+    assert!(
+        stderr.contains("github:o/missing: cannot read o/missing on GitHub: Not Found"),
+        "{stderr}"
+    );
+    assert!(stdout.contains("# Sweep of mac"), "{stdout}");
+    assert!(stdout.contains("# Sweep of github:o/r"), "{stdout}");
+    assert_eq!(
+        sandbox.runs().trim(),
+        "2",
+        "the agent ran for the Mac and o/r only"
+    );
+
+    let dir = sandbox.target_dir("github-o--r");
+    for file in [
+        "bundle/github/settings.json",
+        "bundle/github/repository.json",
+        "bundle/github/workflows/ci.yml",
+        "report.json",
+    ] {
+        assert!(dir.join(file).exists(), "{file}");
+    }
+    let inventory = fs::read_to_string(dir.join("bundle/inventory.jsonl")).unwrap();
+    assert!(inventory.contains("\"lodash\""), "{inventory}");
+    let prompt = fs::read_to_string(dir.join("bundle/PROMPT.md")).unwrap();
+    assert!(
+        prompt.starts_with("# Security sweep: the GitHub repository o/r"),
+        "{prompt}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["target"], "github:o/r");
+    assert_eq!(report["components"], 1);
+
+    let missing = sandbox.target_dir("github-o--missing");
+    let report = fs::read_to_string(missing.join("report.md")).unwrap();
+    assert!(
+        report.contains("**No verdict:** cannot read o/missing"),
+        "{report}"
+    );
+    assert!(sandbox.path().join("data/prompts/sweep-github.md").exists());
 }

@@ -1,9 +1,11 @@
-//! One sweep of this Mac: inventory, advisories, the agent's verdict, and the report.
+//! One sweep: this Mac, then each configured GitHub repository, each with its own inventory,
+//! advisories, agent verdict and report.
 //!
-//! Flow (spec, "Sweep flow"): collect the inventory; fetch OSV advisories for its packages, NVD
-//! CVEs for its products and the KEV catalog; link each advisory to the components whose query
-//! returned it; write the bundle; run the chosen agent in it; validate `findings.json`, retrying
-//! once with the problems appended; write `report.json` and `report.md`.
+//! Flow per target (spec, "Sweep flow"): collect the inventory; fetch OSV advisories for its
+//! packages and NVD CVEs for its products (the KEV catalog once per sweep); link each advisory
+//! to the components whose query returned it; write the bundle; run the chosen agent in it;
+//! validate `findings.json`, retrying once with the problems appended; write `report.json` and
+//! `report.md`.
 //!
 //! A source that fails is recorded in the report and the sweep goes on with the rest. Only one
 //! sweep runs at a time: the running sweep holds an advisory lock (`flock`) on `.lock` in the
@@ -28,16 +30,22 @@ use crate::bundle;
 use crate::bundle::BundleError;
 use crate::config::Config;
 use crate::config::History;
+use crate::config::RepoSlug;
 use crate::feeds::Advisory;
 use crate::feeds::Feeds;
+use crate::feeds::Kev;
 use crate::feeds::NvdAccess;
 use crate::feeds::OsvAdvisory;
 use crate::feeds::Product;
 use crate::findings;
 use crate::findings::Finding;
+use crate::findings::Fix;
+use crate::findings::Issue;
 use crate::findings::Known;
 use crate::findings::Valid;
+use crate::findings::Verdict;
 use crate::findings::is_forging;
+use crate::github;
 use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
@@ -45,8 +53,29 @@ use crate::inventory::Lookup;
 use crate::package::Package;
 use crate::paths::DataDir;
 
-/// The built-in sweep prompt, copied to `prompts/sweep.md` on first use so the user can edit it.
-const DEFAULT_PROMPT: &str = include_str!("prompts/sweep.md");
+/// Which built-in prompt a target uses. Each is copied to the data directory's `prompts/`
+/// folder on first use, so the user can edit it.
+#[derive(Debug, Clone, Copy)]
+enum Prompt {
+    Mac,
+    GitHub,
+}
+
+impl Prompt {
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Mac => "sweep.md",
+            Self::GitHub => "sweep-github.md",
+        }
+    }
+
+    fn default_text(self) -> &'static str {
+        match self {
+            Self::Mac => include_str!("prompts/sweep.md"),
+            Self::GitHub => include_str!("prompts/sweep-github.md"),
+        }
+    }
+}
 
 /// How many sweep folders may share one start second before the sweep gives up. Arbitrary:
 /// sweeps run one at a time and each takes seconds at least, so two is already rare.
@@ -55,6 +84,11 @@ const SAME_SECOND_LIMIT: u32 = 100;
 /// What the sweep is doing, for a progress display.
 #[derive(Debug)]
 pub enum Progress<'a> {
+    /// Starting a target: `mac` or `github:owner/name`.
+    Target {
+        /// The target.
+        target: &'a str,
+    },
     /// Listing what is installed.
     Inventory,
     /// Fetching advisories for this many packages and products.
@@ -89,7 +123,7 @@ pub struct Report {
     pub started: Timestamp,
     /// When it finished.
     pub finished: Timestamp,
-    /// What was swept (`mac`).
+    /// What was swept: `mac` or `github:owner/name`.
     pub target: String,
     /// The agent that judged the advisories.
     pub agent: AgentKind,
@@ -99,12 +133,33 @@ pub struct Report {
     pub advisories: usize,
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
+    /// Risky settings and files, most severe first.
+    pub issues: Vec<Issue>,
     /// What could not be checked: failed sources, unknown products, tools not installed.
     pub problems: Vec<String>,
     /// Why the agent's verdict is missing, when it is.
     pub failure: Option<String>,
-    /// The sweep's folder: bundle, agent logs and this report.
+    /// The target's folder: bundle, agent logs and this report.
     pub dir: PathBuf,
+}
+
+impl Report {
+    /// An empty report for `target`, finished now.
+    fn new(started: Timestamp, target: String, agent: AgentKind, dir: PathBuf) -> Self {
+        Self {
+            started,
+            finished: Timestamp::now(),
+            target,
+            agent,
+            components: 0,
+            advisories: 0,
+            findings: Vec::new(),
+            issues: Vec::new(),
+            problems: Vec::new(),
+            failure: None,
+            dir,
+        }
+    }
 }
 
 /// A finding with the component it names spelled out.
@@ -117,92 +172,220 @@ pub struct ReportFinding {
     pub installed: Component,
 }
 
-/// Sweeps this Mac with the agent named in `config`.
+/// Sweeps this Mac and every repository in `config.repos`, one after the other, with the
+/// agent named in `config`, and returns one report per target.
 ///
-/// Blocks for the whole sweep: inventory commands, every feed request (NVD is paced, so the
-/// first sweep of a Mac with a hundred Homebrew formulae takes over ten minutes without an API
-/// key), and the agent, which has no time limit. Calls `progress` as it goes.
+/// Blocks for the whole sweep: inventory commands, `gh api` calls, every feed request (NVD is
+/// paced, so the first sweep of a Mac with a hundred Homebrew formulae takes over ten minutes
+/// without an API key), and the agent, which has no time limit. Calls `progress` as it goes.
 ///
 /// # Errors
 ///
-/// Fails before the agent runs when no agent is configured or found, another sweep is running,
-/// or the sweep folder, prompt or bundle cannot be read or written. Failures after that (the
-/// agent, its findings, the report files) are recorded in the returned report instead.
-pub fn sweep_mac(
+/// Fails before any agent runs when no agent is configured or found, another sweep is
+/// running, or the sweep folder cannot be written; and stops when a prompt or bundle cannot be
+/// read or written. Failures of one target (a repository that cannot be read, the agent, its
+/// findings, the report files) are recorded in that target's report instead.
+pub fn sweep(
     data_dir: &DataDir,
     config: &Config,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Result<Report, SweepError> {
+) -> Result<Vec<Report>, SweepError> {
     let agent = config.agent.ok_or(SweepError::NoAgent)?;
     let located = agent.locate()?.ok_or(SweepError::AgentNotFound { agent })?;
     let sweeps = data_dir.sweeps_dir();
     let _lock = Lock::acquire(&sweeps)?;
-    let started = Timestamp::now();
-    let dir = create_sweep_dir(&sweeps, started)?.join("mac");
+    let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
 
-    progress(Progress::Inventory);
-    let inventory = Inventory::collect_mac(&config.project_dirs);
-    let mut problems: Vec<String> = inventory.problems.iter().map(error_chain).collect();
-    if !inventory.not_installed.is_empty() {
-        let tools = inventory.not_installed.join(", ");
-        problems.push(format!("not installed, so not checked: {tools}"));
-    }
-
-    let feeds = Feeds::new(data_dir, nvd_access(&mut problems));
-    let fetched = fetch(&feeds, &inventory, config.history, &mut problems, progress);
-    let entries: Vec<_> = fetched
-        .iter()
-        .map(|(advisory, components)| bundle::Entry {
-            advisory,
-            components: components.clone(),
-        })
-        .collect();
+    let mut notes = Vec::new();
+    let feeds = Feeds::new(data_dir, nvd_access(&mut notes));
     let kev = match feeds.kev() {
         Ok(kev) => Some(kev),
         Err(e) => {
-            problems.push(format!(
+            notes.push(format!(
                 "CISA KEV catalog, so known_exploited is unknown: {}",
                 error_chain(&e)
             ));
             None
         }
     };
-    let prompt = prompt(data_dir, &target_name(&inventory))?;
-    let known = bundle::write(
-        &dir.join("bundle"),
-        &prompt,
-        &inventory.components,
-        &entries,
-        kev.as_ref(),
-    )?;
-
-    let (valid, failure) = match judge(agent, &located, &dir, &known, progress) {
-        Ok(valid) => (valid, None),
-        Err(failure) => (Vec::new(), Some(plain(&failure))),
-    };
-    let mut findings: Vec<ReportFinding> = valid
-        .into_iter()
-        .map(|Valid { finding, component }| ReportFinding {
-            finding,
-            installed: inventory.components[component].clone(),
-        })
-        .collect();
-    findings.sort_by_key(|f| f.finding.severity);
-
-    let mut report = Report {
-        started,
-        finished: Timestamp::now(),
-        target: "mac".to_owned(),
+    let shared = Shared {
+        data_dir,
+        history: config.history,
         agent,
-        components: inventory.components.len(),
-        advisories: entries.len(),
-        findings,
-        problems: problems.iter().map(|p| plain(p)).collect(),
-        failure,
-        dir: dir.clone(),
+        located: &located,
+        feeds: &feeds,
+        kev: kev.as_ref(),
+        notes: &notes,
     };
-    save_report(&dir, &mut report);
-    Ok(report)
+
+    let mut reports = Vec::new();
+    progress(Progress::Target { target: "mac" });
+    progress(Progress::Inventory);
+    let mac = collect_mac(&config.project_dirs);
+    reports.push(shared.sweep_target(&dir, mac, progress)?);
+
+    for repo in &config.repos {
+        let target = format!("github:{repo}");
+        progress(Progress::Target { target: &target });
+        progress(Progress::Inventory);
+        let started = Timestamp::now();
+        match github::collect("gh", repo) {
+            Ok(collected) => {
+                let collected = Collected::github(repo, collected);
+                reports.push(shared.sweep_target(&dir, collected, progress)?);
+            }
+            Err(e) => {
+                let dir = dir.join(github_dir_name(repo));
+                fs::create_dir_all(&dir).map_err(|source| SweepError::Write {
+                    path: dir.clone(),
+                    source,
+                })?;
+                let mut report = Report::new(started, target, agent, dir.clone());
+                report.failure = Some(plain(&error_chain(&e)));
+                save_report(&dir, &mut report);
+                reports.push(report);
+            }
+        }
+    }
+    Ok(reports)
+}
+
+/// What every target of one sweep shares.
+#[derive(Debug)]
+struct Shared<'a> {
+    data_dir: &'a DataDir,
+    history: History,
+    agent: AgentKind,
+    located: &'a Located,
+    feeds: &'a Feeds,
+    kev: Option<&'a Kev>,
+    /// Problems that hold for every target (no NVD key, no KEV catalog).
+    notes: &'a [String],
+}
+
+/// One target, collected and ready for its bundle.
+#[derive(Debug)]
+struct Collected {
+    /// The report's `target`: `mac` or `github:owner/name`.
+    target: String,
+    /// Its folder in the sweep folder.
+    dir_name: String,
+    /// What the prompt calls it: "this Mac (macOS 27.2)".
+    title: String,
+    /// Which prompt it uses.
+    prompt: Prompt,
+    components: Vec<Component>,
+    /// Extra bundle files, by path in the bundle.
+    files: Vec<(String, String)>,
+    /// The settings an issue may name.
+    settings: Vec<String>,
+    problems: Vec<String>,
+}
+
+impl Collected {
+    fn github(repo: &RepoSlug, collected: github::Repo) -> Self {
+        Self {
+            target: format!("github:{repo}"),
+            dir_name: github_dir_name(repo),
+            title: format!("the GitHub repository {repo}"),
+            prompt: Prompt::GitHub,
+            components: collected.components,
+            files: collected.files,
+            settings: collected.settings,
+            problems: collected.problems,
+        }
+    }
+}
+
+/// This Mac's inventory as a target.
+fn collect_mac(project_dirs: &[PathBuf]) -> Collected {
+    let inventory = Inventory::collect_mac(project_dirs);
+    let mut problems: Vec<String> = inventory.problems.iter().map(error_chain).collect();
+    if !inventory.not_installed.is_empty() {
+        let tools = inventory.not_installed.join(", ");
+        problems.push(format!("not installed, so not checked: {tools}"));
+    }
+    Collected {
+        target: "mac".to_owned(),
+        dir_name: "mac".to_owned(),
+        title: target_name(&inventory),
+        prompt: Prompt::Mac,
+        components: inventory.components,
+        files: Vec::new(),
+        settings: Vec::new(),
+        problems,
+    }
+}
+
+/// `github-<owner>--<name>`. Owners never contain `--`, so the first one ends the owner and
+/// no two repositories share a folder.
+fn github_dir_name(repo: &RepoSlug) -> String {
+    format!("github-{}", repo.to_string().replacen('/', "--", 1))
+}
+
+impl Shared<'_> {
+    /// Fetches the target's advisories, writes its bundle, runs the agent and saves the
+    /// report in `<sweep>/<target folder>`.
+    fn sweep_target(
+        &self,
+        sweep_dir: &Path,
+        collected: Collected,
+        progress: &mut dyn FnMut(Progress<'_>),
+    ) -> Result<Report, SweepError> {
+        let started = Timestamp::now();
+        let dir = sweep_dir.join(&collected.dir_name);
+        let mut problems = self.notes.to_vec();
+        problems.extend(collected.problems);
+        let fetched = fetch(
+            self.feeds,
+            &collected.components,
+            self.history,
+            &mut problems,
+            progress,
+        );
+        let entries: Vec<_> = fetched
+            .iter()
+            .map(|(advisory, components)| bundle::Entry {
+                advisory,
+                components: components.clone(),
+            })
+            .collect();
+        let prompt = prompt(self.data_dir, collected.prompt, &collected.title)?;
+        let contents = bundle::Contents {
+            prompt: &prompt,
+            components: &collected.components,
+            entries: &entries,
+            files: &collected.files,
+            settings: &collected.settings,
+        };
+        let known = bundle::write(&dir.join("bundle"), &contents, self.kev)?;
+
+        let (verdict, failure) = match judge(self.agent, self.located, &dir, &known, progress) {
+            Ok(verdict) => (verdict, None),
+            Err(failure) => (Verdict::default(), Some(plain(&failure))),
+        };
+        let mut findings: Vec<ReportFinding> = verdict
+            .findings
+            .into_iter()
+            .map(|Valid { finding, component }| ReportFinding {
+                finding,
+                installed: collected.components[component].clone(),
+            })
+            .collect();
+        findings.sort_by_key(|f| f.finding.severity);
+        let mut issues = verdict.issues;
+        issues.sort_by_key(|i| i.severity);
+
+        let mut report = Report::new(started, collected.target, self.agent, dir.clone());
+        report.components = collected.components.len();
+        report.advisories = entries.len();
+        report.findings = findings;
+        report.issues = issues;
+        report.problems = problems.iter().map(|p| plain(p)).collect();
+        report.failure = failure;
+        save_report(&dir, &mut report);
+        Ok(report)
+    }
 }
 
 /// Creates `<sweeps>/<start time>`, or `<start time>-2` and so on when an earlier sweep
@@ -243,14 +426,14 @@ fn nvd_access(problems: &mut Vec<String>) -> NvdAccess {
 /// lookup returned it.
 fn fetch(
     feeds: &Feeds,
-    inventory: &Inventory,
+    components: &[Component],
     history: History,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
 ) -> Vec<(Advisory, BTreeSet<usize>)> {
     let mut packages: BTreeMap<Package, Vec<usize>> = BTreeMap::new();
     let mut products: BTreeMap<String, (Product, Vec<usize>)> = BTreeMap::new();
-    for (i, component) in inventory.components.iter().enumerate() {
+    for (i, component) in components.iter().enumerate() {
         match &component.lookup {
             Lookup::Package(p) => packages.entry(p.clone()).or_default().push(i),
             Lookup::Product(p) => {
@@ -368,7 +551,7 @@ fn judge(
     dir: &Path,
     known: &Known,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Result<Vec<Valid>, String> {
+) -> Result<Verdict, String> {
     let bundle = dir.join("bundle");
     let findings_path = bundle.join("findings.json");
     let rejected_path = bundle.join("findings.rejected.json");
@@ -446,21 +629,21 @@ fn target_name(inventory: &Inventory) -> String {
         )
 }
 
-/// The user's `prompts/sweep.md`, created from the built-in one on first use, with the target
-/// filled in.
-fn prompt(data_dir: &DataDir, target: &str) -> Result<String, SweepError> {
+/// The user's copy of `kind`'s prompt, created from the built-in one on first use, with the
+/// target filled in.
+fn prompt(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<String, SweepError> {
     let dir = data_dir.prompts_dir();
-    let path = dir.join("sweep.md");
+    let path = dir.join(kind.file_name());
     let template = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             fs::create_dir_all(&dir)
-                .and_then(|()| fs::write(&path, DEFAULT_PROMPT))
+                .and_then(|()| fs::write(&path, kind.default_text()))
                 .map_err(|source| SweepError::Write {
                     path: path.clone(),
                     source,
                 })?;
-            DEFAULT_PROMPT.to_owned()
+            kind.default_text().to_owned()
         }
         Err(source) => return Err(SweepError::Read { path, source }),
     };
@@ -537,6 +720,12 @@ pub fn report_markdown(report: &Report) -> String {
             out.push_str(&finding_markdown(&f.finding));
         }
     }
+    if !report.issues.is_empty() {
+        out.push_str("## Settings and files\n\n");
+        for issue in &report.issues {
+            out.push_str(&issue_markdown(issue));
+        }
+    }
     if !report.problems.is_empty() {
         out.push_str("## Not checked\n\n");
         for problem in &report.problems {
@@ -551,7 +740,8 @@ fn headline(report: &Report) -> String {
     if let Some(failure) = &report.failure {
         return format!("**No verdict:** {}\n\n", escape(failure));
     }
-    match (report.findings.is_empty(), report.problems.is_empty()) {
+    let nothing_found = report.findings.is_empty() && report.issues.is_empty();
+    match (nothing_found, report.problems.is_empty()) {
         (true, true) => "No installed component is affected by a known advisory.\n\n".to_owned(),
         (true, false) => "No affected component among what was checked; some things were not \
                           checked (see the end).\n\n"
@@ -602,12 +792,30 @@ fn finding_markdown(finding: &Finding) -> String {
         escape(&finding.evidence),
         escape(&finding.fix.summary),
     );
-    // The steps are left out: the commands are what to run, and the steps belong to the fix
-    // plan (spec, "Fix flow").
-    if !finding.fix.commands.is_empty() {
+    out.push_str(&commands_markdown(&finding.fix));
+    out
+}
+
+fn issue_markdown(issue: &Issue) -> String {
+    let mut out = format!(
+        "### {} {}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
+        issue.severity,
+        escape(&issue.subject.to_string()),
+        escape(&issue.explanation),
+        escape(&issue.evidence),
+        escape(&issue.fix.summary),
+    );
+    out.push_str(&commands_markdown(&issue.fix));
+    out
+}
+
+/// The fix's commands as one `sh` block, then a blank line. The steps are left out: the
+/// commands are what to run, and the steps belong to the fix plan (spec, "Fix flow").
+fn commands_markdown(fix: &Fix) -> String {
+    let mut out = String::new();
+    if !fix.commands.is_empty() {
         // Longer than any backtick run in the commands, so none can close the block early.
-        let longest = finding
-            .fix
+        let longest = fix
             .commands
             .iter()
             .flat_map(|c| c.split(|ch| ch != '`'))
@@ -616,7 +824,7 @@ fn finding_markdown(finding: &Finding) -> String {
             .unwrap_or(0);
         let fence = "`".repeat(longest.max(2) + 1);
         out.push_str(&format!("\n{fence}sh\n"));
-        for command in &finding.fix.commands {
+        for command in &fix.commands {
             out.push_str(&plain(command));
             out.push('\n');
         }
@@ -860,9 +1068,15 @@ mod tests {
         let history = Config::default_for_tests().history;
         let mut problems = Vec::new();
         let mut seen = Vec::new();
-        let fetched = fetch(&feeds, &inventory, history, &mut problems, &mut |p| {
-            seen.push(format!("{p:?}"));
-        });
+        let fetched = fetch(
+            &feeds,
+            &inventory.components,
+            history,
+            &mut problems,
+            &mut |p| {
+                seen.push(format!("{p:?}"));
+            },
+        );
 
         let linked: Vec<(&str, Vec<usize>)> = fetched
             .iter()
@@ -911,6 +1125,7 @@ mod tests {
             components: 2,
             advisories: 1,
             findings,
+            issues: Vec::new(),
             problems: problems.iter().map(|p| (*p).to_owned()).collect(),
             failure: None,
             dir: PathBuf::from("/tmp/s"),
@@ -950,6 +1165,33 @@ mod tests {
         assert!(lodash < text.find("## LOW curl").unwrap(), "worst first");
         assert!(text.contains("## Not checked\n\n- OSV: offline"), "{text}");
         assert!(!text.contains("No affected"), "{text}");
+    }
+
+    #[test]
+    fn markdown_lists_issues_in_their_own_section() {
+        let issue: Issue = serde_json::from_value(json!({
+            "subject": {"setting": "default_branch_protection"},
+            "severity": "medium",
+            "evidence": "Branch not protected",
+            "explanation": "Anyone with push access can rewrite main.",
+            "fix": {"summary": "Protect main", "steps": [], "commands": ["gh api -X PUT x"]}
+        }))
+        .unwrap();
+        let with_issue = Report {
+            issues: vec![issue],
+            ..report(vec![], &[])
+        };
+        let text = report_markdown(&with_issue);
+        assert!(text.contains("## Settings and files\n\n"), "{text}");
+        assert!(
+            text.contains("### medium setting default\\_branch\\_protection\n\nWhy: Anyone"),
+            "{text}"
+        );
+        assert!(text.contains("```sh\ngh api -X PUT x\n```"), "{text}");
+        assert!(
+            !text.contains("No installed component"),
+            "an issue is a result: {text}"
+        );
     }
 
     #[test]
@@ -1078,19 +1320,19 @@ mod tests {
     fn prompt_is_copied_once_then_read() {
         let tmp = tempfile::tempdir().unwrap();
         let data = DataDir::new(tmp.path());
-        let text = prompt(&data, "this Mac").unwrap();
+        let text = prompt(&data, Prompt::Mac, "this Mac").unwrap();
         assert!(
             text.starts_with("# Vulnerability sweep: this Mac"),
             "{text}"
         );
         let path = tmp.path().join("prompts/sweep.md");
         fs::write(&path, "Mine: {{target}}").unwrap();
-        assert_eq!(prompt(&data, "x").unwrap(), "Mine: x");
+        assert_eq!(prompt(&data, Prompt::Mac, "x").unwrap(), "Mine: x");
 
         // A template that exists but cannot be read is an error, not a reason to overwrite it.
         // Write-only, so overwriting would succeed if the code tried.
         fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
-        let result = prompt(&data, "x");
+        let result = prompt(&data, Prompt::Mac, "x");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(result, Err(SweepError::Read { .. })), "{result:?}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "Mine: {{target}}");

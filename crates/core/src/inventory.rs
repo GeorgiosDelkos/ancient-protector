@@ -152,6 +152,11 @@ pub enum FoundIn {
         /// The lockfile's path.
         path: PathBuf,
     },
+    /// A GitHub repository's dependency graph, on its default branch.
+    DependencyGraph {
+        /// The repository, `owner/name`.
+        repo: String,
+    },
 }
 
 /// How a person reads it: "Homebrew formula openssl@3", "lockfile /path/Cargo.lock".
@@ -169,6 +174,7 @@ impl std::fmt::Display for FoundIn {
             Self::UvTool => f.write_str("uv tools"),
             Self::Pipx => f.write_str("pipx"),
             Self::Lockfile { path } => write!(f, "lockfile {}", path.display()),
+            Self::DependencyGraph { repo } => write!(f, "the dependency graph of {repo}"),
         }
     }
 }

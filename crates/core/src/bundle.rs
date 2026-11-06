@@ -38,17 +38,41 @@ pub(crate) struct Entry<'a> {
     pub(crate) components: BTreeSet<usize>,
 }
 
+/// What goes into one target's bundle.
+#[derive(Debug)]
+pub(crate) struct Contents<'a> {
+    /// The rendered prompt, written as `PROMPT.md`.
+    pub(crate) prompt: &'a str,
+    /// The inventory; components get ids `c1`, `c2`, ... in this order.
+    pub(crate) components: &'a [Component],
+    /// The advisories and the components each was fetched for.
+    pub(crate) entries: &'a [Entry<'a>],
+    /// Target files by path in the bundle, all under [`TARGET_FILES`].
+    pub(crate) files: &'a [(String, String)],
+    /// The setting keys an issue may name.
+    pub(crate) settings: &'a [String],
+}
+
+/// The folder of a bundle that holds a target's own files, so they cannot replace the
+/// bundle's fixed files (`PROMPT.md`, `inventory.jsonl`, ...).
+const TARGET_FILES: &str = "github";
+
 /// Writes the bundle into `dir` (created if needed) and returns what findings may refer to.
 ///
-/// Components get ids `c1`, `c2`, ... in `components` order. `kev` is `None` when the catalog
-/// could not be read; `known_exploited` is then `null` in the index.
+/// `kev` is `None` when the catalog could not be read; `known_exploited` is then `null` in the
+/// index.
 pub(crate) fn write(
     dir: &Path,
-    prompt: &str,
-    components: &[Component],
-    entries: &[Entry<'_>],
+    contents: &Contents<'_>,
     kev: Option<&Kev>,
 ) -> Result<Known, BundleError> {
+    let Contents {
+        prompt,
+        components,
+        entries,
+        files,
+        settings,
+    } = *contents;
     let io_err = |path: &Path| {
         let path = path.to_owned();
         move |source| BundleError::Write { path, source }
@@ -121,7 +145,33 @@ pub(crate) fn write(
         let path = dir.join(name);
         fs::write(&path, text).map_err(io_err(&path))?;
     }
+    write_target_files(dir, files)?;
+    known.files = files.iter().map(|(name, _)| name.clone()).collect();
+    known.settings = settings.iter().cloned().collect();
     Ok(known)
+}
+
+/// Writes each target file at its path in `dir`, after checking the path: under
+/// [`TARGET_FILES`], each part made of ASCII letters, digits, `.`, `-` and `_`, none starting
+/// with `.`, so no path can leave the folder or replace a fixed file.
+fn write_target_files(dir: &Path, files: &[(String, String)]) -> Result<(), BundleError> {
+    for (name, text) in files {
+        let parts: Vec<&str> = name.split('/').collect();
+        let safe = parts.len() >= 2
+            && parts[0] == TARGET_FILES
+            && parts.iter().all(|p| cache_key(p).is_ok());
+        if !safe {
+            return Err(BundleError::BadPath { path: name.clone() });
+        }
+        let path = dir.join(name);
+        let parent = path
+            .parent()
+            .expect("a checked path has at least two parts");
+        fs::create_dir_all(parent)
+            .and_then(|()| fs::write(&path, text))
+            .map_err(|source| BundleError::Write { path, source })?;
+    }
+    Ok(())
 }
 
 /// The id of the `i`th component in a bundle.
@@ -281,6 +331,12 @@ pub enum BundleError {
         #[source]
         source: io::Error,
     },
+    /// A target file's path is not one the bundle accepts (see [`Contents::files`]).
+    #[error("the bundle file name {path:?} is not allowed")]
+    BadPath {
+        /// The path.
+        path: String,
+    },
     /// An advisory id is not a safe file name. The feeds reject such ids, so only a damaged
     /// feed cache can hold one.
     #[error(
@@ -300,6 +356,20 @@ mod tests {
     use super::*;
     use crate::inventory::FoundIn;
     use crate::inventory::Lookup;
+
+    fn contents<'a>(
+        prompt: &'a str,
+        components: &'a [Component],
+        entries: &'a [Entry<'a>],
+    ) -> Contents<'a> {
+        Contents {
+            prompt,
+            components,
+            entries,
+            files: &[],
+            settings: &[],
+        }
+    }
 
     fn advisory(source: Source, id: &str, aliases: &[&str], record: &Value) -> Advisory {
         Advisory {
@@ -460,7 +530,7 @@ mod tests {
             },
         ];
 
-        let known = write(&dir, "Do the sweep", &components, &entries, None).unwrap();
+        let known = write(&dir, &contents("Do the sweep", &components, &entries), None).unwrap();
         assert_eq!(known.components, 1);
         assert_eq!(known.advisories["GHSA-1"], [0].into());
         assert_eq!(
@@ -510,7 +580,7 @@ mod tests {
             },
         ];
         let kev = Kev::from_ids(&["CVE-1"]);
-        let known = write(tmp.path(), "p", &[], &entries, Some(&kev)).unwrap();
+        let known = write(tmp.path(), &contents("p", &[], &entries), Some(&kev)).unwrap();
         assert_eq!(known.exploited, Some(["GHSA-1".to_owned()].into()));
         let index = fs::read_to_string(tmp.path().join("advisories.jsonl")).unwrap();
         let lines: Vec<Value> = index
@@ -529,7 +599,7 @@ mod tests {
             advisory: &evil,
             components: BTreeSet::new(),
         }];
-        let err = write(&tmp.path().join("b"), "p", &[], &entries, None).unwrap_err();
+        let err = write(&tmp.path().join("b"), &contents("p", &[], &entries), None).unwrap_err();
         assert!(
             matches!(&err, BundleError::BadId { id } if id == "../../escape"),
             "{err:?}"
@@ -539,11 +609,55 @@ mod tests {
     }
 
     #[test]
+    fn target_files_stay_under_their_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [
+            ("github/settings.json".to_owned(), "{}".to_owned()),
+            ("github/workflows/ci.yml".to_owned(), "on: push".to_owned()),
+        ];
+        let settings = ["rulesets".to_owned()];
+        let mut with_files = contents("p", &[], &[]);
+        with_files.files = &files;
+        with_files.settings = &settings;
+        let known = write(tmp.path(), &with_files, None).unwrap();
+        let read = |name: &str| fs::read_to_string(tmp.path().join(name)).unwrap();
+        assert_eq!(read("github/workflows/ci.yml"), "on: push");
+        assert_eq!(
+            known.files,
+            [
+                "github/settings.json".to_owned(),
+                "github/workflows/ci.yml".to_owned()
+            ]
+            .into()
+        );
+        assert_eq!(known.settings, ["rulesets".to_owned()].into());
+
+        for bad in [
+            "PROMPT.md",
+            "github",
+            "github/../PROMPT.md",
+            "github/.hidden",
+            "github//x",
+            "other/x",
+        ] {
+            let files = [(bad.to_owned(), "x".to_owned())];
+            let mut bad_contents = contents("p", &[], &[]);
+            bad_contents.files = &files;
+            let err = write(&tmp.path().join("b"), &bad_contents, None).unwrap_err();
+            assert!(
+                matches!(&err, BundleError::BadPath { path } if path == bad),
+                "{err:?}"
+            );
+        }
+        assert_eq!(read("PROMPT.md"), "p", "never replaced");
+    }
+
+    #[test]
     fn unwritable_dir_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let blocker = tmp.path().join("file");
         fs::write(&blocker, "").unwrap();
-        let err = write(&blocker.join("bundle"), "p", &[], &[], None).unwrap_err();
+        let err = write(&blocker.join("bundle"), &contents("p", &[], &[]), None).unwrap_err();
         assert!(
             err.to_string().contains("cannot write the agent bundle"),
             "{err}"
