@@ -6,5 +6,6 @@ export default defineConfig({
   plugins: [solid()],
   server: { port: 5173, strictPort: true },
   build: { target: "safari16" },
-  test: { environment: "node" },
+  // Component tests render into jsdom, with the Tauri modules mocked in each test file.
+  test: { environment: "jsdom" },
 });

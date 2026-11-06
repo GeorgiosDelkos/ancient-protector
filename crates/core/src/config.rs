@@ -264,6 +264,19 @@ pub struct Server {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ServerName(String);
 
+impl ServerName {
+    /// Whether `name` is a valid server name.
+    pub(crate) fn is_valid(name: &str) -> bool {
+        // 64 is arbitrary: well under macOS's 255-byte file name limit, so the name still fits
+        // in a folder name with a prefix or suffix added.
+        (1..=64).contains(&name.len())
+            && !matches!(name, "." | "..")
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    }
+}
+
 impl fmt::Display for ServerName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -325,7 +338,7 @@ pub enum SshConn {
 pub struct SshWord(String);
 
 impl SshWord {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         let ok = (1..=255).contains(&value.len())
             && !value.starts_with('-')
             && value
@@ -641,14 +654,7 @@ fn resolve_servers(
     let mut seen = HashSet::new();
     let mut servers = Vec::with_capacity(raw.len());
     for (index, server) in raw.into_iter().enumerate() {
-        // 64 is arbitrary: well under macOS's 255-byte file name limit, so the name still fits
-        // in a folder name with a prefix or suffix added.
-        let name_ok = (1..=64).contains(&server.name.len())
-            && !matches!(server.name.as_str(), "." | "..")
-            && server
-                .name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+        let name_ok = ServerName::is_valid(&server.name);
         if !name_ok {
             problems.push(ConfigProblem::ServerName {
                 index,
@@ -757,7 +763,7 @@ fn resolve_conn(
 }
 
 /// Expands a leading `~/` (or a lone `~`) to `home`. Other paths are returned unchanged.
-fn expand_home(value: &str, home: &Path) -> PathBuf {
+pub(crate) fn expand_home(value: &str, home: &Path) -> PathBuf {
     if value == "~" {
         home.to_owned()
     } else if let Some(rest) = value.strip_prefix("~/") {

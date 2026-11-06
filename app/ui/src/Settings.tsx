@@ -1,60 +1,44 @@
 import { invoke } from "@tauri-apps/api/core";
-import { For, Match, Show, Switch, createMemo, createResource, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createResource, createSignal } from "solid-js";
 
 import { Icon } from "./icons.tsx";
-import {
-  AGENT_NAMES,
-  homeOf,
-  serverName,
-  tilde,
-  toggled,
-  type Current,
-  type SettingsData,
-  type Setting,
-} from "./settings.ts";
+import type { Section, Setting, SettingsView } from "./settings.ts";
 
-const SECTIONS: readonly [Section, string][] = [
-  ["agent", "Agent"],
-  ["schedule", "Schedule"],
-  ["mac", "This Mac"],
-  ["github", "GitHub"],
-  ["servers", "Servers"],
-  ["nvd", "NVD key"],
-];
-
-const TOOL_NAMES: Readonly<Record<string, string>> = {
-  brew: "Homebrew",
-  npm: "npm",
-  node: "Node",
-  uv: "uv",
-  pipx: "pipx",
-  cargo: "cargo",
-  rustup: "rustup",
-  python3: "Python",
-  gh: "gh",
-  ssh: "ssh",
-};
-
-export type Section = "agent" | "schedule" | "mac" | "github" | "servers" | "nvd";
-
-/** Settings inside the popover: a list of sections, each opening on its own with Back. */
+/** Settings inside the popover: a list of sections, each opening on its own with Back. Every
+ * value and choice comes from Rust; a change returns the settings as they now are. */
 export function Settings(props: { start: Section | null; onClose: () => void }) {
-  const [data, { refetch }] = createResource(() => invoke<SettingsData>("settings_data"));
+  const [view, { mutate }] = createResource(() => invoke<SettingsView>("settings_data"));
   const [section, setSection] = createSignal<Section | null>(props.start);
   const [error, setError] = createSignal<string | null>(null);
   const [saved, setSaved] = createSignal(false);
+  const [looking, setLooking] = createSignal(false);
 
-  const save = (setting: Setting) => {
+  /** Runs a command that returns the new settings, and shows them. */
+  const update = (command: Promise<SettingsView | null>) => {
     setError(null);
     setSaved(false);
-    invoke("save", { setting })
-      .then(() => {
-        setSaved(true);
-        return refetch();
+    command
+      .then((next) => {
+        if (next !== null) {
+          mutate(next);
+          setSaved(true);
+        }
       })
       .catch((e: unknown) => setError(String(e)));
   };
-  const title = () => SECTIONS.find(([id]) => id === section())?.[1] ?? "Settings";
+  const save = (setting: Setting) => update(invoke<SettingsView>("save", { setting }));
+  const lookAgain = () => {
+    setLooking(true);
+    setError(null);
+    invoke<SettingsView>("detect_again")
+      .then(mutate)
+      .catch((e: unknown) => setError(String(e)))
+      .finally(() => setLooking(false));
+  };
+  // Reading an errored resource throws, so the title checks first.
+  const title = () =>
+    (view.error === undefined ? view() : undefined)?.sections.find((s) => s.id === section())
+      ?.title ?? "Settings";
 
   return (
     <section class="settings-view">
@@ -72,128 +56,112 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
           <span class="navside savedtag">Saved</span>
         </Show>
       </div>
-      <Show when={error()}>{(e) => <p class="banner bad">{e()}</p>}</Show>
-      <Show when={data()} fallback={<p class="quiet">Looking at what this Mac has…</p>}>
-        {(d) => (
-          <Show
-            when={d().config}
-            fallback={
-              <p class="banner bad">
-                {d().problem} Fix config.toml by hand, or delete it to start from the default.
-              </p>
-            }
-          >
-            {(config) => (
-              <Switch>
-                <Match when={section() === null}>
-                  <div class="group list">
-                    <For each={SECTIONS}>
-                      {([id, label]) => (
-                        <button type="button" class="srow nav-row" onClick={() => setSection(id)}>
-                          <span class={`sicon ${id}`} aria-hidden="true">
-                            {label.slice(0, 1)}
-                          </span>
-                          <span class="t">{label}</span>
-                          <span class="sum">
-                            <Summary section={id} data={d()} config={config()} />
-                            <Icon name="chev" />
-                          </span>
-                        </button>
-                      )}
-                    </For>
-                  </div>
-                  <p class="note">
-                    Saved to config.toml as you change it.{" "}
-                    <button type="button" class="link" onClick={() => void invoke("open_config")}>
-                      Open config.toml
-                    </button>
-                  </p>
-                </Match>
-                <Match when={section() === "agent"}>
-                  <Agent data={d()} config={config()} save={save} />
-                </Match>
-                <Match when={section() === "schedule"}>
-                  <ScheduleSection config={config()} save={save} />
-                </Match>
-                <Match when={section() === "mac"}>
-                  <Mac data={d()} config={config()} save={save} onError={setError} />
-                </Match>
-                <Match when={section() === "github"}>
-                  <GitHub data={d()} config={config()} save={save} />
-                </Match>
-                <Match when={section() === "servers"}>
-                  <Servers data={d()} config={config()} save={save} />
-                </Match>
-                <Match when={section() === "nvd"}>
-                  <Nvd data={d()} onSaved={() => void refetch()} onError={setError} />
-                </Match>
-              </Switch>
-            )}
+      <Show when={error() ?? (view.error === undefined ? null : String(view.error))}>
+        {(e) => (
+          <p class="banner bad">
+            {e()}{" "}
+            <button type="button" class="link" onClick={() => void invoke("open_config")}>
+              Open config.toml
+            </button>
+          </p>
+        )}
+      </Show>
+      <Show
+        when={view.error === undefined ? view() : undefined}
+        fallback={
+          <Show when={view.loading}>
+            <p class="quiet">Looking at what this Mac has…</p>
           </Show>
+        }
+      >
+        {(v) => (
+          <Switch>
+            <Match when={section() === null}>
+              <div class="group list">
+                <For each={v().sections}>
+                  {(s) => (
+                    <button type="button" class="srow nav-row" onClick={() => setSection(s.id)}>
+                      <span class={`sicon ${s.id}`} aria-hidden="true">
+                        {s.title.slice(0, 1)}
+                      </span>
+                      <span class="t">{s.title}</span>
+                      <span class="sum">
+                        <span class={s.attention ? "warn" : ""}>{s.summary}</span>
+                        <Icon name="chev" />
+                      </span>
+                    </button>
+                  )}
+                </For>
+              </div>
+              <p class="note">
+                Saved to config.toml as you change it.{" "}
+                <button type="button" class="link" onClick={() => void invoke("open_config")}>
+                  Open config.toml
+                </button>{" "}
+                ·{" "}
+                <button type="button" class="link" disabled={looking()} onClick={lookAgain}>
+                  {looking() ? "Looking…" : "Look again"}
+                </button>
+              </p>
+            </Match>
+            <Match when={section() === "agent"}>
+              <Agent view={v()} save={save} />
+            </Match>
+            <Match when={section() === "schedule"}>
+              <ScheduleSection view={v()} save={save} />
+            </Match>
+            <Match when={section() === "mac"}>
+              <Mac
+                view={v()}
+                save={save}
+                onAdd={() => update(invoke<SettingsView | null>("add_folder"))}
+              />
+            </Match>
+            <Match when={section() === "github"}>
+              <GitHub view={v()} save={save} />
+            </Match>
+            <Match when={section() === "servers"}>
+              <Servers view={v()} save={save} />
+            </Match>
+            <Match when={section() === "nvd"}>
+              <Nvd
+                view={v()}
+                onSave={(key) => update(invoke<SettingsView>("set_nvd_key", { key }))}
+              />
+            </Match>
+          </Switch>
         )}
       </Show>
     </section>
   );
 }
 
-/** `n` with the right word: "1 folder", "2 folders". */
-function count(n: number, one: string, many: string): string {
-  return `${n} ${n === 1 ? one : many}`;
-}
-
-/** The value shown beside a section in the list. */
-function Summary(props: { section: Section; data: SettingsData; config: Current }) {
-  const text = (): [string, string] => {
-    const c = props.config;
-    switch (props.section) {
-      case "agent":
-        return c.agent === null ? ["Choose one", "warn"] : [AGENT_NAMES[c.agent] ?? c.agent, ""];
-      case "schedule":
-        return [c.every_hours === null ? "Manual" : `Every ${c.every_hours} h`, ""];
-      case "mac":
-        return [count(c.project_dirs.length, "folder", "folders"), ""];
-      case "github":
-        return [count(c.repos.length, "repository", "repositories"), ""];
-      case "servers":
-        return [count(c.servers.length, "server", "servers"), ""];
-      case "nvd":
-        return props.data.detected.nvd_key ? ["In Keychain", ""] : ["Not set", "warn"];
-    }
-  };
-  return <span class={text()[1]}>{text()[0]}</span>;
-}
-
-type Props = { data: SettingsData; config: Current; save: (setting: Setting) => void };
+type Props = { view: SettingsView; save: (setting: Setting) => void };
 
 function Agent(props: Props) {
   return (
     <section class="section">
       <p class="lead">runs sweeps and, after you confirm, fixes</p>
       <div class="group">
-        <For each={props.data.detected.agents}>
-          {(agent) => {
-            const chosen = () => props.config.agent === agent.name;
-            return (
-              <button
-                type="button"
-                class="srow"
-                disabled={agent.path === null}
-                aria-pressed={chosen()}
-                onClick={() => props.save({ kind: "agent", agent: agent.name })}
-              >
-                <span class={`radio ${chosen() ? "on" : ""}`} />
-                <span class="what">
-                  <span class="t">{AGENT_NAMES[agent.name] ?? agent.name}</span>
-                  <span class="s">
-                    {agent.path === null ? "not on your login shell's PATH" : agent.path}
-                  </span>
-                </span>
-                <span class={`state ${agent.path === null ? "no" : "ok"}`}>
-                  {agent.path === null ? "Not found" : "Found"}
-                </span>
-              </button>
-            );
-          }}
+        <For each={props.view.agents}>
+          {(agent) => (
+            <button
+              type="button"
+              class="srow"
+              disabled={!agent.available}
+              aria-pressed={agent.chosen}
+              onClick={() => props.save({ kind: "agent", agent: agent.agent })}
+            >
+              <span class={`radio ${agent.chosen ? "on" : ""}`} />
+              <span class="what">
+                <span class="t">{agent.name}</span>
+                <span class="s">{agent.path ?? "not on your login shell's PATH"}</span>
+              </span>
+              <span class={`state ${agent.path === null ? "no" : "ok"}`}>
+                {agent.path === null ? "Not found" : "Found"}
+              </span>
+            </button>
+          )}
         </For>
       </div>
       <p class="note">Found through your login shell, the same way a sweep starts the agent.</p>
@@ -201,28 +169,23 @@ function Agent(props: Props) {
   );
 }
 
-function ScheduleSection(props: { config: Current; save: (setting: Setting) => void }) {
-  const [hours, setHours] = createSignal(props.config.every_hours ?? 6);
-  const [since, setSince] = createSignal(
-    props.config.since === "all" ? "2025-01-01" : props.config.since,
-  );
-  const auto = () => props.config.every_hours !== null;
-  const all = () => props.config.since === "all";
+function ScheduleSection(props: Props) {
+  const s = () => props.view.schedule;
   return (
     <section class="section">
       <div class="line">
         <span class="seg">
           <button
             type="button"
-            class={auto() ? "" : "on"}
+            class={s().automatic ? "" : "on"}
             onClick={() => props.save({ kind: "schedule", every_hours: null })}
           >
             Manual
           </button>
           <button
             type="button"
-            class={auto() ? "on" : ""}
-            onClick={() => props.save({ kind: "schedule", every_hours: hours() })}
+            class={s().automatic ? "on" : ""}
+            onClick={() => props.save({ kind: "schedule", every_hours: s().hours })}
           >
             Every
           </button>
@@ -233,13 +196,11 @@ function ScheduleSection(props: { config: Current; save: (setting: Setting) => v
           type="number"
           min="1"
           max="168"
-          value={hours()}
-          disabled={!auto()}
-          onChange={(e) => {
-            const n = Number(e.currentTarget.value);
-            setHours(n);
-            props.save({ kind: "schedule", every_hours: n });
-          }}
+          value={s().hours}
+          disabled={!s().automatic}
+          onChange={(e) =>
+            props.save({ kind: "schedule", every_hours: Number(e.currentTarget.value) })
+          }
         />
         <span class="dim">hours</span>
       </div>
@@ -249,15 +210,15 @@ function ScheduleSection(props: { config: Current; save: (setting: Setting) => v
         <span class="seg">
           <button
             type="button"
-            class={all() ? "on" : ""}
+            class={s().all_history ? "on" : ""}
             onClick={() => props.save({ kind: "history", since: "all" })}
           >
             All
           </button>
           <button
             type="button"
-            class={all() ? "" : "on"}
-            onClick={() => props.save({ kind: "history", since: since() })}
+            class={s().all_history ? "" : "on"}
+            onClick={() => props.save({ kind: "history", since: s().since })}
           >
             Since
           </button>
@@ -266,80 +227,69 @@ function ScheduleSection(props: { config: Current; save: (setting: Setting) => v
           id="since"
           class="field"
           type="date"
-          value={since()}
-          disabled={all()}
-          onChange={(e) => {
-            setSince(e.currentTarget.value);
-            props.save({ kind: "history", since: e.currentTarget.value });
-          }}
+          value={s().since}
+          disabled={s().all_history}
+          onChange={(e) => props.save({ kind: "history", since: e.currentTarget.value })}
         />
       </div>
     </section>
   );
 }
 
-function Mac(props: Props & { onError: (e: string) => void }) {
-  const home = () => homeOf(props.data.path);
-  const dirs = () => props.config.project_dirs.map((d) => tilde(d, home()));
-  const suggested = () =>
-    props.data.detected.folders.map((f) => tilde(f, home())).filter((f) => !dirs().includes(f));
-  const setDirs = (next: string[]) => props.save({ kind: "project_dirs", dirs: next });
-  const pick = () => {
-    invoke<string | null>("pick_folder")
-      .then((picked) => {
-        if (picked !== null) {
-          setDirs(toggled(dirs(), tilde(picked, home())));
-        }
-      })
-      .catch((e: unknown) => props.onError(String(e)));
-  };
+function Mac(props: Props & { onAdd: () => void }) {
   return (
     <section class="section">
       <p class="lead">folders searched for lockfiles</p>
-      <Show when={dirs().length > 0 || suggested().length > 0}>
+      <Show when={props.view.folders.length > 0}>
         <div class="group">
-          <For each={dirs()}>
+          <For each={props.view.folders}>
             {(dir) => (
-              <div class="srow static">
-                <span class="chk on" />
-                <span class="what">
-                  <span class="t">{dir}</span>
-                </span>
-                <button
-                  type="button"
-                  class="btn small"
-                  onClick={() => setDirs(toggled(dirs(), dir))}
-                >
-                  Remove
-                </button>
-              </div>
-            )}
-          </For>
-          <For each={suggested()}>
-            {(dir) => (
-              <button type="button" class="srow" onClick={() => setDirs(toggled(dirs(), dir))}>
-                <span class="chk" />
-                <span class="what">
-                  <span class="t">{dir}</span>
-                </span>
-                <span class="state sugg">Add</span>
-              </button>
+              <Show
+                when={dir.chosen}
+                fallback={
+                  <button
+                    type="button"
+                    class="srow"
+                    onClick={() => props.save({ kind: "add_folder", dir: dir.value })}
+                  >
+                    <span class="chk" />
+                    <span class="what">
+                      <span class="t">{dir.value}</span>
+                    </span>
+                    <span class="state sugg">Add</span>
+                  </button>
+                }
+              >
+                <div class="srow static">
+                  <span class="chk on" />
+                  <span class="what">
+                    <span class="t">{dir.value}</span>
+                  </span>
+                  <button
+                    type="button"
+                    class="btn small"
+                    onClick={() => props.save({ kind: "remove_folder", dir: dir.value })}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </Show>
             )}
           </For>
         </div>
       </Show>
       <div class="line">
-        <button type="button" class="btn" onClick={pick}>
+        <button type="button" class="btn" onClick={() => props.onAdd()}>
           Add folder…
         </button>
       </div>
       <h2>Tools a Mac sweep reads</h2>
       <div class="tools">
-        <For each={props.data.detected.tools}>
+        <For each={props.view.tools}>
           {(tool) => (
             <span class={`tool ${tool.path === null ? "no" : ""}`} title={tool.path ?? "not found"}>
               <i />
-              {TOOL_NAMES[tool.name] ?? tool.name}
+              {tool.name}
             </span>
           )}
         </For>
@@ -351,15 +301,11 @@ function Mac(props: Props & { onError: (e: string) => void }) {
 
 function GitHub(props: Props) {
   const [typed, setTyped] = createSignal("");
-  const repos = () => props.config.repos;
-  const known = createMemo(() => new Set(props.data.detected.repos.map((r) => r.nameWithOwner)));
-  const extra = () => repos().filter((r) => !known().has(r));
-  const setRepos = (next: string[]) => props.save({ kind: "repos", repos: next });
   return (
     <section class="section">
       <div class="status-line">
         <Show
-          when={props.data.detected.gh_login}
+          when={props.view.gh_login}
           fallback={
             <>
               <span class="lead">Run gh auth login in a terminal to list your repositories.</span>
@@ -376,45 +322,35 @@ function GitHub(props: Props) {
         </Show>
       </div>
       <div class="group scroll">
-        <For each={extra()}>
+        <For each={props.view.repos}>
           {(repo) => (
-            <button type="button" class="srow" onClick={() => setRepos(toggled(repos(), repo))}>
-              <span class="chk on" />
+            <button
+              type="button"
+              class="srow"
+              aria-pressed={repo.chosen}
+              onClick={() =>
+                props.save({ kind: repo.chosen ? "remove_repo" : "add_repo", repo: repo.repo })
+              }
+            >
+              <span class={`chk ${repo.chosen ? "on" : ""}`} />
               <span class="what">
-                <span class="t">{repo}</span>
+                <span class="t">{repo.repo}</span>
+                <Show when={repo.private !== null}>
+                  <span class="s">{repo.private === true ? "private" : "public"}</span>
+                </Show>
               </span>
-              <span class="state ok">Swept</span>
+              <span class={`state ${repo.chosen ? "ok" : "no"}`}>
+                {repo.chosen ? "Swept" : "Not swept"}
+              </span>
             </button>
           )}
-        </For>
-        <For each={props.data.detected.repos}>
-          {(repo) => {
-            const on = () => repos().includes(repo.nameWithOwner);
-            return (
-              <button
-                type="button"
-                class="srow"
-                onClick={() => setRepos(toggled(repos(), repo.nameWithOwner))}
-              >
-                <span class={`chk ${on() ? "on" : ""}`} />
-                <span class="what">
-                  <span class="t">{repo.nameWithOwner}</span>
-                  <span class="s">{repo.isPrivate ? "private" : "public"}</span>
-                </span>
-                <span class={`state ${on() ? "ok" : "no"}`}>{on() ? "Swept" : "Not swept"}</span>
-              </button>
-            );
-          }}
         </For>
       </div>
       <form
         class="line"
         onSubmit={(e) => {
           e.preventDefault();
-          const repo = typed().trim();
-          if (repo !== "" && !repos().includes(repo)) {
-            setRepos([...repos(), repo]);
-          }
+          props.save({ kind: "add_repo", repo: typed() });
           setTyped("");
         }}
       >
@@ -425,7 +361,7 @@ function GitHub(props: Props) {
           value={typed()}
           onInput={(e) => setTyped(e.currentTarget.value)}
         />
-        <button type="submit" class="btn">
+        <button type="submit" class="btn" disabled={typed().trim() === ""}>
           Add
         </button>
       </form>
@@ -434,13 +370,11 @@ function GitHub(props: Props) {
 }
 
 function Servers(props: Props) {
-  const configured = () => new Set(props.config.servers.map((s) => s.reach));
-  const hosts = () => props.data.detected.ssh_hosts.filter((h) => !configured().has(h.alias));
   return (
     <section class="section">
       <p class="lead">read over SSH with a fixed, read-only script</p>
       <div class="group scroll">
-        <For each={props.config.servers}>
+        <For each={props.view.servers}>
           {(server) => (
             <div class="srow static">
               <span class="chk on" />
@@ -461,26 +395,19 @@ function Servers(props: Props) {
             </div>
           )}
         </For>
-        <For each={hosts()}>
+        <For each={props.view.hosts}>
           {(host) => (
             <button
               type="button"
               class="srow"
-              disabled={serverName(host.alias) === ""}
-              onClick={() =>
-                props.save({
-                  kind: "add_server",
-                  name: serverName(host.alias),
-                  ssh: host.alias,
-                  dirs: [],
-                })
-              }
+              disabled={!host.addable}
+              onClick={() => props.save({ kind: "add_server", ssh: host.alias })}
             >
               <span class="chk" />
               <span class="what">
                 <span class="t">{host.alias}</span>
                 <span class="s">
-                  from ~/.ssh/config{host.host_name ? ` · ${host.host_name}` : ""}
+                  from ~/.ssh/config{host.host_name === null ? "" : ` · ${host.host_name}`}
                 </span>
               </span>
               <span class="state sugg">Add</span>
@@ -488,7 +415,7 @@ function Servers(props: Props) {
           )}
         </For>
       </div>
-      <Show when={props.config.servers.length === 0 && hosts().length === 0}>
+      <Show when={props.view.servers.length === 0 && props.view.hosts.length === 0}>
         <p class="quiet">No hosts in ~/.ssh/config. Add one there, or edit config.toml.</p>
       </Show>
       <p class="note">
@@ -499,14 +426,14 @@ function Servers(props: Props) {
   );
 }
 
-function Nvd(props: { data: SettingsData; onSaved: () => void; onError: (e: string) => void }) {
+function Nvd(props: { view: SettingsView; onSave: (key: string) => void }) {
   const [key, setKey] = createSignal("");
   return (
     <section class="section">
       <div class="status-line">
         <span class="lead">Optional, and free from nvd.nist.gov.</span>
-        <span class={`state right ${props.data.detected.nvd_key ? "ok" : "warn"}`}>
-          {props.data.detected.nvd_key ? "In Keychain" : "Not set"}
+        <span class={`state right ${props.view.nvd_key ? "ok" : "warn"}`}>
+          {props.view.nvd_key ? "In Keychain" : "Not set"}
         </span>
       </div>
       <p class="lead">
@@ -517,12 +444,8 @@ function Nvd(props: { data: SettingsData; onSaved: () => void; onError: (e: stri
         class="line"
         onSubmit={(e) => {
           e.preventDefault();
-          invoke("set_nvd_key", { key: key() })
-            .then(() => {
-              setKey("");
-              props.onSaved();
-            })
-            .catch((err: unknown) => props.onError(String(err)));
+          props.onSave(key());
+          setKey("");
         }}
       >
         <input
@@ -530,7 +453,7 @@ function Nvd(props: { data: SettingsData; onSaved: () => void; onError: (e: stri
           class="field grow mono"
           type="password"
           autocomplete="off"
-          placeholder={props.data.detected.nvd_key ? "Replace the stored key" : "Paste your key"}
+          placeholder={props.view.nvd_key ? "Replace the stored key" : "Paste your key"}
           value={key()}
           onInput={(e) => setKey(e.currentTarget.value)}
         />

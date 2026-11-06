@@ -1,4 +1,4 @@
-//! Changes the settings window makes to `config.toml`.
+//! Changes the settings make to `config.toml`.
 //!
 //! Each change is one [`Setting`], applied to the file as the user left it, so comments and
 //! layout stay. Before it is written, the changed text goes through the same parsing and
@@ -23,6 +23,7 @@ use crate::agent::AgentKind;
 use crate::config::Config;
 use crate::config::DEFAULT_CONFIG;
 use crate::config::LoadConfigError;
+use crate::config::expand_home;
 use crate::paths::DataDir;
 
 /// One change to the config.
@@ -44,24 +45,31 @@ pub enum Setting {
         /// The value of `since`.
         since: String,
     },
-    /// The folders searched for lockfiles, replacing the list.
-    ProjectDirs {
-        /// The folders, absolute or starting with `~/`.
-        dirs: Vec<String>,
+    /// Adds a folder searched for lockfiles, unless it is there already.
+    AddFolder {
+        /// The folder, absolute or starting with `~/`.
+        dir: String,
     },
-    /// The repositories swept, replacing the list.
-    Repos {
-        /// Each as `owner/name`.
-        repos: Vec<String>,
+    /// Removes a folder searched for lockfiles, however the file spells it (`~/code` or
+    /// `/Users/me/code`).
+    RemoveFolder {
+        /// The folder, absolute or starting with `~/`.
+        dir: String,
     },
-    /// Adds a server reached through an alias from `~/.ssh/config`.
+    /// Adds a repository to sweep, unless it is there already (GitHub ignores case).
+    AddRepo {
+        /// As `owner/name`; spaces around it are dropped.
+        repo: String,
+    },
+    /// Stops sweeping a repository.
+    RemoveRepo {
+        /// As `owner/name`.
+        repo: String,
+    },
+    /// Adds a server reached through an alias from `~/.ssh/config`, named after the alias.
     AddServer {
-        /// Its name in reports.
-        name: String,
         /// The ssh alias.
         ssh: String,
-        /// Folders on it searched for lockfiles.
-        dirs: Vec<String>,
     },
     /// Removes the server with this name.
     RemoveServer {
@@ -92,14 +100,14 @@ pub fn save_setting(
         path: path.clone(),
         source,
     })?;
-    apply(&mut doc, setting);
+    apply(&mut doc, setting, home);
     let changed = doc.to_string();
     let config = Config::from_text(&path, &changed, home)?;
     write(&path, &changed)?;
     Ok(config)
 }
 
-fn apply(doc: &mut DocumentMut, setting: &Setting) {
+fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) {
     match setting {
         Setting::Agent { agent: Some(agent) } => {
             let fresh = !doc.contains_key("agent");
@@ -121,19 +129,31 @@ fn apply(doc: &mut DocumentMut, setting: &Setting) {
         Setting::History { since } => {
             table(doc, "history")["since"] = value(since.as_str());
         }
-        Setting::ProjectDirs { dirs } => {
-            table(doc, "mac")["project_dirs"] = value(Array::from_iter(dirs));
+        Setting::AddFolder { dir } => {
+            let same = |entry: &str| expand_home(entry, home) == expand_home(dir, home);
+            add(array(table(doc, "mac"), "project_dirs"), dir, same);
         }
-        Setting::Repos { repos } => {
-            table(doc, "github")["repos"] = value(Array::from_iter(repos));
+        Setting::RemoveFolder { dir } => {
+            let dirs = array(table(doc, "mac"), "project_dirs");
+            dirs.retain(|v| {
+                v.as_str()
+                    .is_none_or(|e| expand_home(e, home) != expand_home(dir, home))
+            });
         }
-        Setting::AddServer { name, ssh, dirs } => {
+        Setting::AddRepo { repo } => {
+            let repo = repo.trim();
+            add(array(table(doc, "github"), "repos"), repo, |e| {
+                e.eq_ignore_ascii_case(repo)
+            });
+        }
+        Setting::RemoveRepo { repo } => {
+            let repos = array(table(doc, "github"), "repos");
+            repos.retain(|v| v.as_str().is_none_or(|e| !e.eq_ignore_ascii_case(repo)));
+        }
+        Setting::AddServer { ssh } => {
             let mut server = Table::new();
-            server["name"] = value(name.as_str());
+            server["name"] = value(ssh.as_str());
             server["ssh"] = value(ssh.as_str());
-            if !dirs.is_empty() {
-                server["dirs"] = value(Array::from_iter(dirs));
-            }
             servers(doc).push(server);
         }
         Setting::RemoveServer { name } => {
@@ -184,6 +204,23 @@ fn table<'a>(doc: &'a mut DocumentMut, name: &str) -> &'a mut Table {
         *item = Item::Table(Table::new());
     }
     item.as_table_mut().expect("made a table just above")
+}
+
+/// The array `name` in `table`, created when missing. One that is not an array is replaced, as
+/// in [`table`].
+fn array<'a>(table: &'a mut Table, name: &str) -> &'a mut Array {
+    let item = table.entry(name).or_insert_with(|| value(Array::new()));
+    if !item.is_array() {
+        *item = value(Array::new());
+    }
+    item.as_array_mut().expect("made an array just above")
+}
+
+/// Appends `entry` unless an entry is `same` as it.
+fn add(array: &mut Array, entry: &str, same: impl Fn(&str) -> bool) {
+    if !array.iter().any(|v| v.as_str().is_some_and(&same)) {
+        array.push(entry);
+    }
 }
 
 fn servers(doc: &mut DocumentMut) -> &mut ArrayOfTables {
@@ -292,19 +329,18 @@ mod tests {
             },
         )
         .unwrap();
-        let dirs = vec!["~/code".to_owned(), "/Users/me/src".to_owned()];
-        save(&data_dir, Setting::ProjectDirs { dirs }).unwrap();
-        save(
-            &data_dir,
-            Setting::Repos {
-                repos: vec!["o/r".to_owned()],
-            },
-        )
-        .unwrap();
+        for dir in ["~/code", "/Users/me/src"] {
+            save(
+                &data_dir,
+                Setting::AddFolder {
+                    dir: dir.to_owned(),
+                },
+            )
+            .unwrap();
+        }
+        save(&data_dir, repo_added("o/r")).unwrap();
         let server = Setting::AddServer {
-            name: "web".to_owned(),
             ssh: "web".to_owned(),
-            dirs: vec!["/srv/app".to_owned()],
         };
         let config = save(&data_dir, server).unwrap();
         assert_eq!(config.schedule, Schedule::EveryHours(6.try_into().unwrap()));
@@ -361,36 +397,74 @@ mod tests {
         assert_eq!(config.agent, None);
     }
 
+    fn repo_added(repo: &str) -> Setting {
+        Setting::AddRepo {
+            repo: repo.to_owned(),
+        }
+    }
+
+    #[test]
+    fn folders_and_repos_are_added_once_and_removed_however_they_are_spelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let folder = |dir: &str| Setting::AddFolder {
+            dir: dir.to_owned(),
+        };
+        save(&data_dir, folder("~/code")).unwrap();
+        save(&data_dir, folder("/Users/me/src")).unwrap();
+        let config = save(&data_dir, folder("/home/code")).unwrap();
+        assert_eq!(
+            config.project_dirs,
+            [PathBuf::from("/home/code"), PathBuf::from("/Users/me/src")],
+            "/home/code is ~/code"
+        );
+        let config = save(
+            &data_dir,
+            Setting::RemoveFolder {
+                dir: "/home/code".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(config.project_dirs, [PathBuf::from("/Users/me/src")]);
+
+        save(&data_dir, repo_added(" o/r ")).unwrap();
+        let config = save(&data_dir, repo_added("O/R")).unwrap();
+        assert_eq!(config.repos.len(), 1, "GitHub ignores case");
+        save(&data_dir, repo_added("o/s")).unwrap();
+        let config = save(
+            &data_dir,
+            Setting::RemoveRepo {
+                repo: "O/r".to_owned(),
+            },
+        )
+        .unwrap();
+        let repos: Vec<String> = config.repos.iter().map(ToString::to_string).collect();
+        assert_eq!(repos, ["o/s"]);
+    }
+
     #[test]
     fn an_invalid_change_is_refused_and_nothing_is_written() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path());
-        save(
-            &data_dir,
-            Setting::Repos {
-                repos: vec!["o/r".to_owned()],
-            },
-        )
-        .unwrap();
+        save(&data_dir, repo_added("o/r")).unwrap();
         let before = fs::read_to_string(data_dir.config_file()).unwrap();
 
         for bad in [
-            Setting::Repos {
-                repos: vec!["not a repo".to_owned()],
-            },
+            repo_added("not a repo"),
             Setting::Schedule {
                 every_hours: Some(0),
             },
             Setting::History {
                 since: "yesterday".to_owned(),
             },
-            Setting::ProjectDirs {
-                dirs: vec!["relative/dir".to_owned()],
+            Setting::AddFolder {
+                dir: "relative/dir".to_owned(),
             },
             Setting::AddServer {
-                name: "../x".to_owned(),
-                ssh: "x".to_owned(),
-                dirs: vec![],
+                ssh: "-oProxyCommand=x".to_owned(),
+            },
+            Setting::AddServer {
+                ssh: "web:22".to_owned(),
             },
         ] {
             let err = save(&data_dir, bad).unwrap_err();

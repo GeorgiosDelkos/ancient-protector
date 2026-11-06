@@ -13,21 +13,19 @@ import {
   onMount,
 } from "solid-js";
 
-import type { FixDone, FixPreview, Overview, Status, Target } from "./overview.ts";
-import { Settings, type Section } from "./Settings.tsx";
-import { Glyph, Icon } from "./icons.tsx";
 import {
   SEVERITIES,
-  bySeverity,
-  headline,
-  lastSwept,
-  needsYou,
-  ranked,
-  since,
-  targetKind,
-  targetLabel,
+  type FixDone,
+  type FixPreview,
   type Listed,
-} from "./view.ts";
+  type Overview,
+  type Status,
+  type TargetLine,
+} from "./overview.ts";
+import { Settings } from "./Settings.tsx";
+import type { Section } from "./settings.ts";
+import { Glyph, Icon } from "./icons.tsx";
+import { since } from "./time.ts";
 
 type Tab = "needs" | "targets" | "all";
 
@@ -60,7 +58,7 @@ export function App() {
   const tick = setInterval(() => setNow(new Date()), 30_000);
   onCleanup(() => clearInterval(tick));
 
-  const listed = createMemo(() => ranked(overview()?.targets ?? []));
+  const listed = () => overview()?.findings ?? [];
   const chosen = createMemo(() => listed().find((o) => o.key === selected()) ?? null);
 
   const run = (action: () => Promise<unknown>) => {
@@ -98,13 +96,13 @@ export function App() {
                 <Detail
                   item={item()}
                   now={now()}
-                  busy={o().status.state !== "idle" && o().status.state !== "failed"}
+                  busy={o().busy}
                   onBack={() => setSelected(null)}
                   onError={setError}
                 />
               )}
             </Match>
-            <Match when={o().status.state === "sweeping" || o().status.state === "fixing"}>
+            <Match when={o().busy}>
               <Busy status={o().status} now={now()} />
             </Match>
             <Match when={o().problem !== null && o().targets.length === 0}>
@@ -123,21 +121,16 @@ export function App() {
                 onAction={() => setSettings("agent")}
               />
             </Match>
-            <Match when={listed().length === 0 && lastSwept(o().targets) !== null}>
+            <Match when={listed().length === 0 && o().last_swept !== null}>
               <AllClear overview={o()} now={now()} />
             </Match>
             <Match when={true}>
-              <Summary
-                overview={o()}
-                listed={listed()}
-                now={now()}
-                onSweep={() => run(() => invoke("sweep_now"))}
-              />
-              <Tabs tab={tab()} onTab={setTab} listed={listed()} targets={o().targets.length} />
+              <Summary overview={o()} now={now()} onSweep={() => run(() => invoke("sweep_now"))} />
+              <Tabs tab={tab()} onTab={setTab} overview={o()} />
               <Switch>
                 <Match when={tab() === "needs"}>
                   <Rows
-                    items={listed().filter(needsYou)}
+                    items={listed().filter((f) => f.needs_you)}
                     now={now()}
                     empty="Nothing critical, high or exploited is open."
                     onOpen={setSelected}
@@ -166,21 +159,16 @@ export function App() {
   );
 }
 
-function Summary(props: {
-  overview: Overview;
-  listed: readonly Listed[];
-  now: Date;
-  onSweep: () => void;
-}) {
-  const counts = () => bySeverity(props.listed);
-  const exploited = () => props.listed.filter((o) => o.known_exploited).length;
-  const swept = () => lastSwept(props.overview.targets);
+function Summary(props: { overview: Overview; now: Date; onSweep: () => void }) {
+  const counts = () => props.overview.counts;
+  const exploited = () => props.overview.exploited;
+  const swept = () => props.overview.last_swept;
   const failed = () => (props.overview.status.state === "failed" ? props.overview.status : null);
   return (
     <section class="summary">
       <div class="headline">
         <div>
-          <h1>{headline(props.listed)}</h1>
+          <h1>{props.overview.headline}</h1>
           <p class="sub">
             <Show when={exploited() > 0}>
               <span class="kev-text">{exploited()} exploited in the wild</span> ·{" "}
@@ -194,7 +182,7 @@ function Summary(props: {
         </button>
       </div>
       <Show when={failed()}>{(f) => <p class="banner bad">Last sweep: {f().error}</p>}</Show>
-      <Show when={props.listed.length > 0}>
+      <Show when={props.overview.findings.length > 0}>
         <div
           class="bar"
           role="img"
@@ -219,16 +207,11 @@ function Summary(props: {
   );
 }
 
-function Tabs(props: {
-  tab: Tab;
-  onTab: (tab: Tab) => void;
-  listed: readonly Listed[];
-  targets: number;
-}) {
+function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }) {
   const tabs = (): [Tab, string, number][] => [
-    ["needs", "Needs you", props.listed.filter(needsYou).length],
-    ["targets", "Targets", props.targets],
-    ["all", "All open", props.listed.length],
+    ["needs", "Needs you", props.overview.needs_you],
+    ["targets", "Targets", props.overview.targets.length],
+    ["all", "All open", props.overview.findings.length],
   ];
   return (
     <div class="seg" role="tablist" aria-label="View">
@@ -270,7 +253,7 @@ function Rows(props: {
                   <span class="id">{item.advisories.join(" · ")}</span>
                 </Show>
                 <span class="where">
-                  {targetLabel(item.target)}
+                  {item.target}
                   <Show when={item.place}> · {item.place}</Show>
                 </span>
                 <span class="fix">
@@ -297,19 +280,19 @@ function Rows(props: {
   );
 }
 
-function Targets(props: { targets: readonly Target[]; now: Date }) {
+function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
   return (
     <div class="group list">
       <For each={props.targets}>
         {(t) => {
-          const counts = () => bySeverity(t.open);
+          const counts = () => t.counts;
           return (
             <div class="row static">
               <span class="ticon">
-                <Icon name={targetKind(t.target)} />
+                <Icon name={t.kind} />
               </span>
               <span class="what">
-                <span class="t">{targetLabel(t.target)}</span>
+                <span class="t">{t.label}</span>
                 <span class="where">
                   {t.swept === null
                     ? "not swept yet"
@@ -317,7 +300,7 @@ function Targets(props: { targets: readonly Target[]; now: Date }) {
                   <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
                 </span>
               </span>
-              <span class="mini" aria-label={`${t.open.length} open`}>
+              <span class="mini" aria-label={`${t.open} open`}>
                 <For each={SEVERITIES}>
                   {(s) => (
                     <For each={Array.from({ length: Math.min(counts()[s], 4) })}>
@@ -325,7 +308,7 @@ function Targets(props: { targets: readonly Target[]; now: Date }) {
                     </For>
                   )}
                 </For>
-                <Show when={t.open.length === 0 && t.swept !== null}>
+                <Show when={t.open === 0 && t.swept !== null}>
                   <Icon name="done" />
                 </Show>
               </span>
@@ -405,7 +388,7 @@ function Detail(props: {
           </dd>
           <dt>Where</dt>
           <dd>
-            {targetLabel(props.item.target)}
+            {props.item.target}
             <Show when={props.item.place}> · {props.item.place}</Show>
           </dd>
           <Show when={props.item.first_seen}>
@@ -502,11 +485,9 @@ function Busy(props: { status: Status; now: Date }) {
           <section class="summary">
             <div class="headline">
               <div>
-                <h1>Sweeping {s().current === null ? "" : targetLabel(s().current ?? "")}</h1>
+                <h1>Sweeping {s().current ?? ""}</h1>
                 <p class="sub">
-                  target {s().done.length + (s().current === null ? 0 : 1)} of{" "}
-                  {s().done.length + s().pending.length + (s().current === null ? 0 : 1)} · started{" "}
-                  {since(s().started, props.now)} ago
+                  target {s().position} of {s().total} · started {since(s().started, props.now)} ago
                 </p>
               </div>
               <span class="spin" aria-label="Sweeping" />
@@ -516,7 +497,7 @@ function Busy(props: { status: Status; now: Date }) {
                 {(t) => (
                   <div class="step done">
                     <Icon name="done" />
-                    <span>{targetLabel(t)}</span>
+                    <span>{t}</span>
                     <span class="st">done</span>
                   </div>
                 )}
@@ -531,7 +512,7 @@ function Busy(props: { status: Status; now: Date }) {
                 {(t) => (
                   <div class="step next">
                     <Icon name="wait" />
-                    <span>{targetLabel(t)}</span>
+                    <span>{t}</span>
                     <span class="st">next</span>
                   </div>
                 )}
@@ -560,8 +541,8 @@ function Busy(props: { status: Status; now: Date }) {
 }
 
 function AllClear(props: { overview: Overview; now: Date }) {
-  const swept = () => lastSwept(props.overview.targets);
-  const dismissed = () => props.overview.targets.reduce((n, t) => n + t.dismissed, 0);
+  const swept = () => props.overview.last_swept;
+  const dismissed = () => props.overview.dismissed;
   return (
     <section class="clear">
       <div class="seal">

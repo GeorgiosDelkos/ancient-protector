@@ -1,9 +1,9 @@
-//! What this Mac already has, for the settings window to start from: the agents and tools on
+//! What this Mac already has, for the settings to start from: the agents and tools on
 //! the login shell's `PATH`, the `gh` login and its repositories, the hosts in
 //! `~/.ssh/config`, the usual project folders, and whether an NVD key is in the Keychain.
 //!
 //! Nothing here changes anything; every part that cannot be read comes back empty, since a
-//! settings window that fails to open over one missing tool helps no one.
+//! settings view that fails to open over one missing tool helps no one.
 
 use std::env;
 use std::ffi::OsString;
@@ -12,12 +12,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use serde::Serialize;
 
 use crate::agent::AgentKind;
 use crate::inventory::command;
 
-/// The agents a sweep can run, in the order the settings window lists them.
+/// The agents a sweep can run, in the order the settings list them.
 const AGENTS: [AgentKind; 5] = [
     AgentKind::Claude,
     AgentKind::Grok,
@@ -26,9 +25,19 @@ const AGENTS: [AgentKind; 5] = [
     AgentKind::Codex,
 ];
 
-/// The tools a Mac sweep reads, plus `gh` and `ssh`, which repository and server sweeps use.
-const TOOLS: [&str; 10] = [
-    "brew", "npm", "node", "uv", "pipx", "cargo", "rustup", "python3", "gh", "ssh",
+/// The tools a Mac sweep reads, plus `gh` and `ssh`, which repository and server sweeps use:
+/// each program and its name as people know it.
+const TOOLS: [(&str, &str); 10] = [
+    ("brew", "Homebrew"),
+    ("npm", "npm"),
+    ("node", "Node"),
+    ("uv", "uv"),
+    ("pipx", "pipx"),
+    ("cargo", "cargo"),
+    ("rustup", "rustup"),
+    ("python3", "Python"),
+    ("gh", "gh"),
+    ("ssh", "ssh"),
 ];
 
 /// Folders people keep projects in, relative to the home folder. Arbitrary: the common names
@@ -51,16 +60,16 @@ const PATH_MARK: &str = "__ancient_protector_path__";
 const BIN_MARK: &str = "__ancient_protector_bin__";
 const END_MARK: &str = "__ancient_protector_end__";
 
-/// What the settings window starts from.
-#[derive(Debug, Serialize)]
+/// What the settings start from.
+#[derive(Debug)]
 pub struct Detected {
     /// Each agent, and where the login shell finds it.
-    pub agents: Vec<Found>,
+    pub agents: Vec<(AgentKind, Option<PathBuf>)>,
     /// Each tool, and where the login shell finds it.
-    pub tools: Vec<Found>,
+    pub tools: Vec<Tool>,
     /// The `gh` login, or `None` when gh is missing or not logged in.
     pub gh_login: Option<String>,
-    /// The user's repositories, newest push first; empty without a gh login.
+    /// The user's repositories, as gh lists them (newest push first); empty without a gh login.
     pub repos: Vec<RepoInfo>,
     /// The concrete hosts in `~/.ssh/config`.
     pub ssh_hosts: Vec<SshHost>,
@@ -70,29 +79,29 @@ pub struct Detected {
     pub nvd_key: bool,
 }
 
-/// A program and where it was found.
-#[derive(Debug, Serialize)]
-pub struct Found {
-    /// Its name (`claude`, `brew`).
-    pub name: String,
+/// A tool and where it was found.
+#[derive(Debug)]
+pub struct Tool {
+    /// Its program (`brew`).
+    pub program: &'static str,
+    /// Its name as people know it (`Homebrew`).
+    pub name: &'static str,
     /// Its path, or `None` when the login shell does not find it.
     pub path: Option<PathBuf>,
 }
 
 /// One of the user's repositories.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoInfo {
     /// `owner/name`.
     pub name_with_owner: String,
     /// Whether it is private.
     pub is_private: bool,
-    /// When it was last pushed, as GitHub says.
-    pub pushed_at: Option<String>,
 }
 
 /// A host from `~/.ssh/config`.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SshHost {
     /// The alias, as `ssh <alias>` takes it.
     pub alias: String,
@@ -117,15 +126,19 @@ pub fn use_login_shell_path() -> bool {
 /// the Keychain lookup.
 pub fn detect(home: &Path) -> Detected {
     let answer = login_shell();
-    let found = |name: &str| Found {
-        name: name.to_owned(),
-        path: answer.as_ref().and_then(|a| a.binary(name)),
-    };
-    let agents = AGENTS.iter().map(|a| found(a.binary())).collect();
-    let tools: Vec<Found> = TOOLS.iter().map(|t| found(t)).collect();
+    let found = |program: &str| answer.as_ref().and_then(|a| a.binary(program));
+    let agents = AGENTS.iter().map(|&a| (a, found(a.binary()))).collect();
+    let tools: Vec<Tool> = TOOLS
+        .iter()
+        .map(|&(program, name)| Tool {
+            program,
+            name,
+            path: found(program),
+        })
+        .collect();
     let gh = tools
         .iter()
-        .find(|t| t.name == "gh")
+        .find(|t| t.program == "gh")
         .and_then(|t| t.path.clone());
     let gh_login = gh.as_deref().and_then(gh_login);
     let repos = match (&gh, &gh_login) {
@@ -169,7 +182,11 @@ impl Answer {
 
 fn login_shell() -> Option<Answer> {
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
-    let names: Vec<&str> = AGENTS.iter().map(|a| a.binary()).chain(TOOLS).collect();
+    let names: Vec<&str> = AGENTS
+        .iter()
+        .map(|a| a.binary())
+        .chain(TOOLS.iter().map(|&(program, _)| program))
+        .collect();
     // The names are this module's constants, so they need no quoting.
     let script = format!(
         "printf '%s\\n' {PATH_MARK} \"$PATH\"; for b in {}; do printf '{BIN_MARK}%s\\t%s\\n' \
@@ -217,7 +234,7 @@ fn gh_repos(gh: &Path) -> Vec<RepoInfo> {
     let Some(gh) = gh.to_str() else {
         return Vec::new();
     };
-    let fields = "nameWithOwner,isPrivate,pushedAt";
+    let fields = "nameWithOwner,isPrivate";
     let args = ["repo", "list", "--limit", REPO_LIMIT, "--json", fields];
     command::run(gh, &args)
         .ok()

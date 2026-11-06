@@ -1,6 +1,12 @@
-// The shapes the app's commands return (app/src-tauri/src/main.rs and runner.rs).
+// The shapes the app's commands return (app/src-tauri/src/main.rs, runner.rs and the core's
+// popover.rs). Everything here is worked out in Rust; the UI only lays it out.
 
 export type Severity = "critical" | "high" | "medium" | "low";
+
+/** The severities in the order the popover lists them. */
+export const SEVERITIES: readonly Severity[] = ["critical", "high", "medium", "low"];
+
+export type Counts = Readonly<Record<Severity, number>>;
 
 export type Status =
   | { readonly state: "idle" }
@@ -10,12 +16,14 @@ export type Status =
       readonly current: string | null;
       readonly done: readonly string[];
       readonly pending: readonly string[];
+      readonly position: number;
+      readonly total: number;
       readonly started: string;
     }
   | { readonly state: "fixing"; readonly title: string }
   | { readonly state: "failed"; readonly error: string };
 
-export type Open = {
+export type Listed = {
   readonly key: string;
   readonly severity: Severity;
   readonly title: string;
@@ -29,19 +37,31 @@ export type Open = {
   readonly commands: readonly string[];
   readonly first_seen: string | null;
   readonly new: boolean;
+  readonly target: string;
+  readonly needs_you: boolean;
 };
 
-export type Target = {
-  readonly target: string;
+export type TargetLine = {
+  readonly label: string;
+  readonly kind: "mac" | "repo" | "server";
   readonly swept: string | null;
   readonly components: number;
-  readonly open: readonly Open[];
+  readonly counts: Counts;
+  readonly open: number;
   readonly dismissed: number;
 };
 
 export type Overview = {
   readonly status: Status;
-  readonly targets: readonly Target[];
+  readonly busy: boolean;
+  readonly findings: readonly Listed[];
+  readonly needs_you: number;
+  readonly exploited: number;
+  readonly counts: Counts;
+  readonly headline: string;
+  readonly last_swept: string | null;
+  readonly targets: readonly TargetLine[];
+  readonly dismissed: number;
   readonly agent: string | null;
   readonly schedule: string;
   readonly config: string;
