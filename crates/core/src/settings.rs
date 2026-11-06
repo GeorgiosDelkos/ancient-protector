@@ -526,8 +526,10 @@ mod tests {
     fn inline_tables_are_refused_not_replaced() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path());
-        let inline = "github = { repos = [\"a/b\"] }\nmac = { project_dirs = [\"/x\"] }\n\
-                      schedule = { every_hours = 2 }\nservers = [{ name = \"web\", ssh = \"web\" }]\n";
+        let inline = "github = { repos = [\"a/b\"] }\n\
+                      mac = { project_dirs = [\"/x\"] }\n\
+                      schedule = { every_hours = 2 }\n\
+                      servers = [{ name = \"web\", ssh = \"web\" }]\n";
         fs::create_dir_all(data_dir.config_file().parent().unwrap()).unwrap();
         fs::write(data_dir.config_file(), inline).unwrap();
         for (change, table) in [
