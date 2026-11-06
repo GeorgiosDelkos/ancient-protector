@@ -50,11 +50,12 @@ esac
 "#;
 
 /// A fake `ssh`: `web` answers as a Debian 12 server with one OS package and one listening
-/// socket; `down` cannot be reached. The marker is the argument after `sh -s --`.
+/// socket; `down` cannot be reached. The marker is on stdin's first line, `marker=<hex>`.
 const FAKE_SSH: &str = r#"#!/bin/sh
 while [ "$1" != "--" ]; do shift; done
 dest=$2
-m=$6
+IFS= read -r first
+m=${first#marker=}
 case "$dest" in
   web)
     printf '%s begin os-release\nID=debian\nVERSION_ID=12\n\n%s end 0\n' "$m" "$m"

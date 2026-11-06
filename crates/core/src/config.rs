@@ -216,13 +216,6 @@ pub struct Server {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ServerName(String);
 
-impl ServerName {
-    /// The name as written in the config.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 impl fmt::Display for ServerName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -230,8 +223,8 @@ impl fmt::Display for ServerName {
 }
 
 /// An absolute folder on a server: 1 to 1024 bytes of ASCII letters, digits, `/`, `.`, `-` and
-/// `_`, starting with `/`, with no `..` part. The server script quotes it in single quotes,
-/// which this character set cannot end, and it cannot climb out of what the user named. Only
+/// `_`, starting with `/`, with no `..` part. The app hands it to the server script in single
+/// quotes, which this character set cannot end, and it cannot climb out of what the user named. Only
 /// [`Config::load`] constructs one.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RemoteDir(String);
