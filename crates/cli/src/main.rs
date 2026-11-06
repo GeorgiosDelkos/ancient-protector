@@ -18,7 +18,6 @@ use ancient_protector_core::Outcome;
 use ancient_protector_core::Package;
 use ancient_protector_core::Product;
 use ancient_protector_core::Progress;
-use ancient_protector_core::Schedule;
 use ancient_protector_core::SshConn;
 use ancient_protector_core::Targets;
 use ancient_protector_core::dismiss;
@@ -426,10 +425,7 @@ fn summary(config: &Config) -> String {
         || "none (set `agent` in config.toml)".to_owned(),
         |a| a.to_string(),
     );
-    let schedule = match config.schedule {
-        Schedule::Manual => "manual".to_owned(),
-        Schedule::EveryHours(h) => format!("every {h} h"),
-    };
+    let schedule = config.schedule.to_string();
     let history = match config.history {
         History::All => "all".to_owned(),
         History::Since(since) => format!("since {}", since.date()),
@@ -482,21 +478,7 @@ fn print(text: &str) {
 
 /// Prints one progress line of a sweep on stderr.
 fn show_progress(progress: &Progress<'_>) {
-    let line = match progress {
-        Progress::Target { target } => format!("sweeping {target}"),
-        Progress::Inventory => "listing what is installed".to_owned(),
-        Progress::Advisories { packages, products } => {
-            format!("fetching advisories for {packages} packages and {products} NVD products")
-        }
-        Progress::Product {
-            done,
-            total,
-            product,
-        } => format!("NVD {done}/{total}: {product}"),
-        Progress::Agent { agent, attempt: 1 } => format!("{agent} is judging the advisories"),
-        Progress::Agent { agent, .. } => format!("{agent} is fixing its rejected findings"),
-    };
-    status(&line);
+    status(&progress.to_string());
 }
 
 #[expect(

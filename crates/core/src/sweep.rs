@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::io::Write as _;
@@ -44,6 +45,7 @@ use crate::findings::Finding;
 use crate::findings::Fix;
 use crate::findings::Issue;
 use crate::findings::Known;
+use crate::findings::Severity;
 use crate::findings::Subject;
 use crate::findings::Verdict;
 use crate::findings::is_forging;
@@ -128,6 +130,27 @@ pub enum Progress<'a> {
     },
 }
 
+impl fmt::Display for Progress<'_> {
+    /// One line for a progress display: "sweeping mac", "NVD 3/12: openssl".
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Target { target } => write!(f, "sweeping {target}"),
+            Self::Inventory => f.write_str("listing what is installed"),
+            Self::Advisories { packages, products } => write!(
+                f,
+                "fetching advisories for {packages} packages and {products} NVD products"
+            ),
+            Self::Product {
+                done,
+                total,
+                product,
+            } => write!(f, "NVD {done}/{total}: {product}"),
+            Self::Agent { agent, attempt: 1 } => write!(f, "{agent} is judging the advisories"),
+            Self::Agent { agent, .. } => write!(f, "{agent} is fixing its rejected findings"),
+        }
+    }
+}
+
 /// The result of a sweep, as written to `report.json`.
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -150,6 +173,16 @@ pub struct Report {
     /// What changed since this target's last sweep with a verdict; `None` without a verdict
     /// now or then.
     pub changes: Option<Changes>,
+    /// Whether this is the target's first sweep with a verdict, so everything in it is new.
+    /// False when an earlier report exists but could not be read: then nothing is known to
+    /// be new, and nothing is notified again.
+    ///
+    /// With `changes` it says one of three things, and only these: changes known
+    /// (`changes: Some`, `first_verdict: false`), first verdict (`None`, `true`), or not known
+    /// (`None`, `false`, which is also every report without a verdict). `sweep_target` sets
+    /// both in one place. They stay two fields, not one enum, because they are the shape of
+    /// `report.json` that its readers use.
+    pub first_verdict: bool,
     /// What could not be checked: failed sources, unknown products, tools not installed.
     pub problems: Vec<String>,
     /// Why the agent's verdict is missing, when it is.
@@ -171,6 +204,7 @@ impl Report {
             findings: Vec::new(),
             issues: Vec::new(),
             changes: None,
+            first_verdict: false,
             problems: Vec::new(),
             failure: None,
             dir,
@@ -294,6 +328,37 @@ pub fn sweep(
         reports.push(shared.sweep_server(&dir, server, progress)?);
     }
     Ok(reports)
+}
+
+/// What a sweep should raise a notification for: each finding and issue that is critical or
+/// high, not dismissed, and new since its target's last sweep with a verdict, as
+/// `target: title`. On a target's first sweep with a verdict, every such one is new; when the
+/// last report could not be read, none is.
+pub fn alerts(reports: &[Report]) -> Vec<String> {
+    let mut alerts = Vec::new();
+    for report in reports.iter().filter(|r| r.failure.is_none()) {
+        let new = |key: FindingKey| match &report.changes {
+            Some(changes) => changes.new.contains(&key),
+            None => report.first_verdict,
+        };
+        let serious = |severity: Severity| severity <= Severity::High;
+        let findings = report
+            .findings
+            .iter()
+            .filter(|f| f.dismissed.is_none() && serious(f.finding.severity) && new(f.key))
+            .map(|f| &f.title);
+        let issues = report
+            .issues
+            .iter()
+            .filter(|i| i.dismissed.is_none() && serious(i.issue.severity) && new(i.key))
+            .map(|i| &i.title);
+        alerts.extend(
+            findings
+                .chain(issues)
+                .map(|t| format!("{}: {t}", report.target)),
+        );
+    }
+    alerts
 }
 
 /// Which targets a sweep covers.
@@ -513,6 +578,7 @@ impl Shared<'_> {
         };
         let (findings, issues) =
             self.keyed(&collected.target, &collected.components, verdict, &fetched);
+        let mut first_verdict = false;
         let changes = if failure.is_some() {
             None
         } else {
@@ -523,10 +589,16 @@ impl Shared<'_> {
             let all = keys().map(|(key, _)| key).collect();
             let active = keys().filter(|(_, d)| !d).map(|(key, _)| key).collect();
             let sweeps = self.data_dir.sweeps_dir();
-            Changes::since_last(&sweeps, &collected.dir_name, &active, &all).unwrap_or_else(|e| {
-                problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
-                None
-            })
+            match Changes::since_last(&sweeps, &collected.dir_name, &active, &all) {
+                Ok(changes) => {
+                    first_verdict = changes.is_none();
+                    changes
+                }
+                Err(e) => {
+                    problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
+                    None
+                }
+            }
         };
 
         let mut report = Report::new(started, collected.target, self.agent, dir.clone());
@@ -535,6 +607,7 @@ impl Shared<'_> {
         report.findings = findings;
         report.issues = issues;
         report.changes = changes;
+        report.first_verdict = first_verdict;
         report.problems = problems.iter().map(|p| plain(p)).collect();
         report.failure = failure;
         save_report(&dir, &mut report);
@@ -1553,10 +1626,126 @@ mod tests {
             findings,
             issues: Vec::new(),
             changes: None,
+            first_verdict: false,
             problems: problems.iter().map(|p| (*p).to_owned()).collect(),
             failure: None,
             dir: PathBuf::from("/tmp/s"),
         }
+    }
+
+    #[test]
+    fn progress_reads_as_one_line_per_step() {
+        let lines = [
+            (Progress::Target { target: "mac" }, "sweeping mac"),
+            (Progress::Inventory, "listing what is installed"),
+            (
+                Progress::Advisories {
+                    packages: 3,
+                    products: 2,
+                },
+                "fetching advisories for 3 packages and 2 NVD products",
+            ),
+            (
+                Progress::Product {
+                    done: 1,
+                    total: 2,
+                    product: "openssl",
+                },
+                "NVD 1/2: openssl",
+            ),
+            (
+                Progress::Agent {
+                    agent: AgentKind::Claude,
+                    attempt: 1,
+                },
+                "claude is judging the advisories",
+            ),
+            (
+                Progress::Agent {
+                    agent: AgentKind::Claude,
+                    attempt: 2,
+                },
+                "claude is fixing its rejected findings",
+            ),
+        ];
+        for (progress, line) in lines {
+            assert_eq!(progress.to_string(), line);
+        }
+    }
+
+    #[test]
+    fn alerts_are_new_open_and_critical_or_high() {
+        let unread = report(
+            vec![
+                report_finding("GHSA-1", "critical", false, "npm:a"),
+                report_finding("GHSA-2", "medium", false, "npm:b"),
+            ],
+            &[],
+        );
+        assert!(
+            alerts(&[unread]).is_empty(),
+            "the last report could not be read: none is new"
+        );
+        let first = Report {
+            first_verdict: true,
+            ..report(
+                vec![
+                    report_finding("GHSA-1", "critical", false, "npm:a"),
+                    report_finding("GHSA-2", "medium", false, "npm:b"),
+                ],
+                &[],
+            )
+        };
+        assert_eq!(
+            alerts(&[first]),
+            ["mac: GHSA-1 in npm:a"],
+            "a first sweep: all are new"
+        );
+
+        let mut first = report(
+            vec![
+                report_finding("GHSA-1", "critical", false, "npm:a"),
+                report_finding("GHSA-3", "high", false, "npm:c"),
+                report_finding("GHSA-4", "high", false, "npm:d"),
+            ],
+            &[],
+        );
+        let [old, new, hidden] = [0, 1, 2].map(|i| first.findings[i].key);
+        first.findings[2].dismissed = Some(Dismissal {
+            reason: "x".to_owned(),
+            at: Timestamp::UNIX_EPOCH,
+            modified: None,
+        });
+        first.changes = Some(Changes {
+            since: Timestamp::UNIX_EPOCH,
+            new: vec![new, hidden],
+            resolved: vec![],
+        });
+        assert!(!first.changes.as_ref().unwrap().new.contains(&old));
+        let issue = |severity: &str, title: &str| ReportIssue {
+            key: FindingKey::new(&[title]),
+            title: title.to_owned(),
+            issue: serde_json::from_value(json!({
+                "subject": {"file": "f"}, "severity": severity, "evidence": "e",
+                "explanation": "x", "fix": {"summary": "s", "steps": [], "commands": []}
+            }))
+            .unwrap(),
+            dismissed: None,
+        };
+        first.issues = vec![issue("high", "file f"), issue("low", "file g")];
+        let changes = first.changes.as_mut().unwrap();
+        changes.new.extend(first.issues.iter().map(|i| i.key));
+        let failed = Report {
+            failure: Some("agent".to_owned()),
+            ..report(
+                vec![report_finding("GHSA-9", "critical", false, "npm:z")],
+                &[],
+            )
+        };
+        assert_eq!(
+            alerts(&[first, failed]),
+            ["mac: GHSA-3 in npm:c", "mac: file f"]
+        );
     }
 
     #[test]

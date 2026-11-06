@@ -1,0 +1,27 @@
+[package]
+name = "ancient-protector-app"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "Ancient Protector's menu-bar app"
+
+[features]
+# Serves the built UI from inside the app instead of the dev server's URL. `cargo tauri build`
+# turns it on; CI turns it on to check the release configuration.
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+ancient-protector-core = { path = "../../crates/core" }
+tauri = { version = "2.12.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2.7.0"
+tauri-plugin-autostart = "2.7.0"
+tauri-plugin-positioner = { version = "2.4.0", features = ["tray-icon"] }
+# std: Timestamp::now for the schedule.
+jiff = { version = "0.2.39", default-features = false, features = ["std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[lints]
+workspace = true

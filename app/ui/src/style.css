@@ -1,0 +1,68 @@
+:root {
+  color-scheme: light dark;
+  font:
+    13px -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+}
+body {
+  margin: 0;
+}
+main {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+h1 {
+  font-size: 14px;
+  margin: 0;
+}
+.status,
+.settings,
+small {
+  opacity: 0.7;
+  margin: 0;
+}
+.problem {
+  color: #d93025;
+  margin: 0;
+}
+ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.target {
+  font-weight: 600;
+}
+.findings li {
+  display: flex;
+  flex-direction: column;
+  border-left: 3px solid gray;
+  padding-left: 6px;
+}
+.findings .critical,
+.findings .high {
+  border-color: #dc322f;
+}
+.findings .medium {
+  border-color: #f0821e;
+}
+.findings .low {
+  border-color: #e6be1e;
+}
+.severity {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}

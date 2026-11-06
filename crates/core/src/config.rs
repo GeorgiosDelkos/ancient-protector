@@ -102,6 +102,34 @@ pub enum Schedule {
     EveryHours(NonZeroU32),
 }
 
+impl fmt::Display for Schedule {
+    /// "manual", "every hour" or "every 6 hours".
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Manual => f.write_str("manual"),
+            Self::EveryHours(hours) if hours.get() == 1 => f.write_str("every hour"),
+            Self::EveryHours(hours) => write!(f, "every {hours} hours"),
+        }
+    }
+}
+
+impl Schedule {
+    /// Whether a sweep is due at `now`, when the last one started at `last` (`None`: never).
+    /// A sweep that failed counts as the last one, so a target that always fails is retried on
+    /// the schedule, not at once. A clock set back makes `now` earlier than `last`; then the
+    /// sweep waits, rather than running at every check.
+    pub fn due(&self, last: Option<Timestamp>, now: Timestamp) -> bool {
+        let Self::EveryHours(hours) = self else {
+            return false;
+        };
+        let Some(last) = last else {
+            return true;
+        };
+        let every = jiff::SignedDuration::from_hours(i64::from(hours.get()));
+        now.duration_since(last) >= every
+    }
+}
+
 /// How far back the first download of each advisory feed goes. Later sweeps fetch only
 /// records modified since the previous sweep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1197,5 +1225,25 @@ mod tests {
                 prop_assert_eq!(slug.to_string(), text);
             }
         }
+    }
+
+    #[test]
+    fn a_schedule_is_due_once_its_interval_has_passed() {
+        let at = |t: &str| t.parse::<Timestamp>().unwrap();
+        let every = Schedule::EveryHours(NonZeroU32::new(6).unwrap());
+        let last = Some(at("2026-11-06T00:00:00Z"));
+        assert!(every.due(None, at("2026-11-06T00:00:00Z")), "never swept");
+        assert!(!every.due(last, at("2026-11-06T05:59:59Z")));
+        assert!(every.due(last, at("2026-11-06T06:00:00Z")));
+        assert!(
+            !every.due(last, at("2026-11-05T00:00:00Z")),
+            "clock set back"
+        );
+        assert!(!Schedule::Manual.due(None, at("2026-11-06T00:00:00Z")));
+
+        assert_eq!(every.to_string(), "every 6 hours");
+        let hourly = Schedule::EveryHours(NonZeroU32::new(1).unwrap());
+        assert_eq!(hourly.to_string(), "every hour");
+        assert_eq!(Schedule::Manual.to_string(), "manual");
     }
 }

@@ -406,6 +406,27 @@ impl Saved {
     }
 }
 
+/// When the newest sweep started, with or without a verdict; `None` before the first. For a
+/// schedule: a sweep that failed still counts, so it is not retried at once.
+///
+/// # Errors
+///
+/// Fails when the sweeps folder cannot be read.
+pub fn last_sweep_started(data_dir: &DataDir) -> Result<Option<Timestamp>, StateError> {
+    // `newest_first` checks only the shape `YYYYMMDDTHHMMSSZ`; a name that is not a real time
+    // (month 13) is skipped, not taken for "never swept", which would make a sweep due at once.
+    Ok(newest_first(&data_dir.sweeps_dir())?
+        .into_iter()
+        .find_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            let civil = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%S", name.get(..15)?).ok()?;
+            civil
+                .to_zoned(jiff::tz::TimeZone::UTC)
+                .ok()
+                .map(|z| z.timestamp())
+        }))
+}
+
 /// The sweep folders under `sweeps`, newest first. A folder is named by its start second,
 /// `20261106T101500Z`, with `-2`, `-3` and so on for later sweeps that started in the same
 /// second; other names are not sweeps. Sorting by name alone would put `-10` before `-2`.
@@ -790,5 +811,27 @@ mod tests {
         );
         assert_eq!(mac.open[0].fix, "up grade", "one line");
         assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
+    }
+
+    #[test]
+    fn the_last_sweep_is_the_newest_folder_with_or_without_a_verdict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        assert_eq!(
+            last_sweep_started(&data_dir).unwrap(),
+            None,
+            "no sweeps folder"
+        );
+        for name in [
+            "20261105T101500Z",
+            "20261106T090000Z-2",
+            "20261106T090000Z",
+            "notes",
+            "20261399T000000Z",
+        ] {
+            fs::create_dir_all(data_dir.sweeps_dir().join(name)).unwrap();
+        }
+        let last = last_sweep_started(&data_dir).unwrap();
+        assert_eq!(last, Some("2026-11-06T09:00:00Z".parse().unwrap()));
     }
 }

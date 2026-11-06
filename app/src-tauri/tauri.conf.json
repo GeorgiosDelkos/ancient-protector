@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ancient Protector",
+  "version": "0.1.0",
+  "identifier": "io.github.georgiosdelkos.ancient-protector",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": { "script": "pnpm dev", "cwd": "../ui", "wait": false },
+    "beforeBuildCommand": { "script": "pnpm build", "cwd": "../ui" }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "popover",
+        "title": "Ancient Protector",
+        "url": "index.html",
+        "width": 380,
+        "height": 520,
+        "visible": false,
+        "decorations": false,
+        "resizable": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.png"],
+    "category": "DeveloperTool"
+  }
+}

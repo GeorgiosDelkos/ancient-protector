@@ -1,0 +1,55 @@
+# The menu-bar app: its web UI (lint, format, types, tests, build) and then its Rust crate in
+# the release configuration (`custom-protocol`), which embeds the built UI, the CSP and the
+# capabilities, so it is checked after the UI is built. The other workflows leave the app
+# out: it is not a default workspace member, and cargo-mutants skips it.
+permissions:
+  contents: read
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+name: app
+jobs:
+  app:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: macos-latest
+    name: macos / app
+    defaults:
+      run:
+        working-directory: app/ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # tag=v6.1.0
+        with:
+          package_json_file: app/ui/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # tag=v7.1.0
+        with:
+          # The Active LTS line (checked 2026-11-06).
+          node-version: "26"
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: lint, format and types
+        run: pnpm check
+      - name: tests
+        run: pnpm test
+      - name: build the UI
+        run: pnpm build
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master
+        with:
+          toolchain: stable
+          components: clippy
+      - name: cargo clippy
+        working-directory: .
+        run: >-
+          cargo clippy --locked -p ancient-protector-app --features custom-protocol
+          --all-targets -- -D warnings
+      - name: cargo test
+        working-directory: .
+        run: cargo test --locked -p ancient-protector-app --features custom-protocol
