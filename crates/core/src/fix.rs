@@ -38,6 +38,7 @@ use crate::findings;
 use crate::findings::Fix;
 use crate::findings::is_forging;
 use crate::lifecycle;
+use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
 use crate::lifecycle::StateError;
 use crate::paths::DataDir;
@@ -59,6 +60,8 @@ const RESULT_SCHEMA: &str = include_str!("fix-result.schema.json");
 #[derive(Debug)]
 pub struct FixPlan {
     key: FindingKey,
+    /// The `report.json` it was read from.
+    report: PathBuf,
     target: String,
     /// Where it runs, for the user: "this Mac", or the repository or the ssh command.
     destination: String,
@@ -74,11 +77,6 @@ pub struct FixPlan {
 }
 
 impl FixPlan {
-    /// Where it applies: `mac`, `github:owner/name` or `server:name`.
-    pub fn target(&self) -> &str {
-        &self.target
-    }
-
     /// Where the agent will work, as the user should read it before confirming.
     pub fn destination(&self) -> &str {
         &self.destination
@@ -108,26 +106,7 @@ impl FixPlan {
 /// dismissed, its fix is malformed, its target is no longer configured, or no agent is
 /// configured or found.
 pub fn plan_fix(data_dir: &DataDir, config: &Config, key: FindingKey) -> Result<FixPlan, FixError> {
-    let sweeps = data_dir.sweeps_dir();
-    let (path, entry) =
-        lifecycle::newest_report(&sweeps, key)?.ok_or(StateError::UnknownKey { key })?;
-    let dir_name = path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|n| n.to_str())
-        .expect("a report sits in a target folder named in UTF-8");
-    let (newest, newest_saved) = lifecycle::newest_verdict(&sweeps, dir_name)?
-        .expect("the report that has the key has a verdict");
-    if newest != path {
-        return Err(FixError::Stale {
-            key,
-            since: newest_saved.started,
-        });
-    }
-    if entry.is_dismissed() {
-        return Err(FixError::Dismissed { key });
-    }
-
+    let path = current_report(data_dir, key)?;
     let read_err = |source| FixError::Read {
         path: path.clone(),
         source,
@@ -165,6 +144,7 @@ pub fn plan_fix(data_dir: &DataDir, config: &Config, key: FindingKey) -> Result<
     });
     Ok(FixPlan {
         key,
+        report: path,
         target: report.target,
         destination,
         found: report.started,
@@ -174,6 +154,36 @@ pub fn plan_fix(data_dir: &DataDir, config: &Config, key: FindingKey) -> Result<
         agent,
         located,
     })
+}
+
+/// The report a fix of `key` comes from: the newest one that has it, which must be the newest
+/// report of its target with a verdict, while the key is not dismissed in
+/// `state/dismissals.json`. Checked when the plan is made and again under the lock, since a
+/// sweep or a dismissal can land while the user reads the question.
+fn current_report(data_dir: &DataDir, key: FindingKey) -> Result<PathBuf, FixError> {
+    let sweeps = data_dir.sweeps_dir();
+    let (path, entry) =
+        lifecycle::newest_report(&sweeps, key)?.ok_or(StateError::UnknownKey { key })?;
+    let dir_name = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .expect("a report sits in a target folder named in UTF-8");
+    let (newest, newest_saved) = lifecycle::newest_verdict(&sweeps, dir_name)?
+        .expect("newest_report returns only reports with a verdict, so there is one");
+    if newest != path {
+        return Err(FixError::Stale {
+            key,
+            since: newest_saved.started,
+        });
+    }
+    if Dismissals::load(data_dir)?
+        .get(key, entry.modified())
+        .is_some()
+    {
+        return Err(FixError::Dismissed { key });
+    }
+    Ok(path)
 }
 
 /// The parts of a saved `report.json` a fix needs.
@@ -273,6 +283,9 @@ pub fn run_fix(
     confirmed: Confirmed,
 ) -> Result<FixRecord, FixError> {
     let _lock = Lock::acquire(&data_dir.sweeps_dir())?;
+    if current_report(data_dir, plan.key)? != plan.report {
+        return Err(FixError::Changed { key: plan.key });
+    }
     let started = Timestamp::now();
     let fixes = data_dir.fixes_dir();
     fs::create_dir_all(&fixes).map_err(|source| FixError::Write {
@@ -421,16 +434,15 @@ fn append(data_dir: &DataDir, record: &FixRecord) -> Result<(), FixError> {
             .append(true)
             .open(&path)
             .and_then(|mut file| {
-                let mut last = [0];
-                if file.metadata()?.len() > 0 {
+                let torn = if file.metadata()?.len() > 0 {
+                    let mut last = [0];
                     file.seek(SeekFrom::End(-1))?;
                     file.read_exact(&mut last)?;
-                }
-                let start = if matches!(last, [0 | b'\n']) {
-                    ""
+                    last[0] != b'\n'
                 } else {
-                    "\n"
+                    false
                 };
+                let start = if torn { "\n" } else { "" };
                 file.write_all(format!("{start}{line}\n").as_bytes())?;
                 file.sync_data()?;
                 if new {
@@ -453,6 +465,12 @@ pub enum FixError {
         key: FindingKey,
         /// When that sweep started.
         since: Timestamp,
+    },
+    /// A sweep found the key again while the user was asked; the shown fix may be out of date.
+    #[error("a sweep ran while {key} was being confirmed; run `fix {key}` again to see its fix")]
+    Changed {
+        /// The key.
+        key: FindingKey,
     },
     /// The finding is dismissed.
     #[error("{key} is dismissed; undismiss it to fix it")]
@@ -663,7 +681,7 @@ mod tests {
         append(&data_dir, &record(1)).unwrap();
         let path = data_dir.state_dir().join("fixes.jsonl");
         let mut text = fs::read_to_string(&path).unwrap();
-        text.push_str(r#"{"key": "cut sh"#);
+        text.push_str("{\"key\": \"cut sh\0\0");
         fs::write(&path, &text).unwrap();
         append(&data_dir, &record(2)).unwrap();
 
@@ -676,8 +694,8 @@ mod tests {
             assert_eq!(value["summary"], format!("run {n}"));
         }
         assert_eq!(
-            lines[1], r#"{"key": "cut sh"#,
-            "the torn line stays as it was"
+            lines[1], "{\"key\": \"cut sh\0\0",
+            "a tail of zeros is torn too"
         );
     }
 }

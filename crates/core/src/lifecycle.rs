@@ -270,7 +270,7 @@ impl Changes {
     }
 }
 
-/// The newest `<sweep>/<dir_name>/report.json` with a verdict, and its start time.
+/// The newest `<sweep>/<dir_name>/report.json` with a verdict, with its contents.
 pub(crate) fn newest_verdict(
     sweeps: &Path,
     dir_name: &str,
@@ -307,9 +307,9 @@ pub(crate) struct SavedEntry {
 }
 
 impl SavedEntry {
-    /// Whether the report marked it dismissed.
-    pub(crate) fn is_dismissed(&self) -> bool {
-        self.dismissed.is_some()
+    /// Its advisory's `modified` time, as the report had it.
+    pub(crate) fn modified(&self) -> Option<Timestamp> {
+        self.modified
     }
 }
 
@@ -388,14 +388,14 @@ fn newest(sweeps: &Path, key: FindingKey) -> Result<Option<SavedEntry>, StateErr
     Ok(newest_report(sweeps, key)?.map(|(_, entry)| entry))
 }
 
-/// The newest `report.json` that has `key`, with the entry.
+/// The newest `report.json` with a verdict that has `key`, with the entry.
 pub(crate) fn newest_report(
     sweeps: &Path,
     key: FindingKey,
 ) -> Result<Option<(PathBuf, SavedEntry)>, StateError> {
     for sweep in newest_first(sweeps)? {
         for target in folders(&sweep)? {
-            let Some(saved) = read_saved(&target)? else {
+            let Some(saved) = read_saved(&target)?.filter(|s| s.failure.is_none()) else {
                 continue;
             };
             if let Some(entry) = saved.entries().find(|e| e.key == key) {

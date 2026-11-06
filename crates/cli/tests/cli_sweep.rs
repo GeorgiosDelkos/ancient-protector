@@ -190,9 +190,8 @@ impl Sandbox {
             .expect("the test binary was built by cargo")
     }
 
-    /// `report.json` of `target` in the newest sweep folder. Folder names are start times,
-    /// then `-2` and so on within one second; by name alone `-10` would sort before `-9`.
-    fn newest_report(&self, target: &str) -> serde_json::Value {
+    /// The path of `report.json` of `target` in the newest sweep folder.
+    fn newest_report_path(&self, target: &str) -> PathBuf {
         let mut dirs: Vec<_> = fs::read_dir(self.path().join("data/sweeps"))
             .expect("a sweep wrote its folder")
             .filter_map(Result::ok)
@@ -214,11 +213,16 @@ impl Sandbox {
                 None => (name, 1),
             }
         });
-        let report = dirs
-            .last()
+        dirs.last()
             .expect("a sweep ran")
             .join(target)
-            .join("report.json");
+            .join("report.json")
+    }
+
+    /// `report.json` of `target` in the newest sweep folder. Folder names are start times,
+    /// then `-2` and so on within one second; by name alone `-10` would sort before `-9`.
+    fn newest_report(&self, target: &str) -> serde_json::Value {
+        let report = self.newest_report_path(target);
         serde_json::from_str(&fs::read_to_string(report).expect("the report was saved"))
             .expect("the report is JSON")
     }
@@ -676,10 +680,54 @@ fn only_a_current_undismissed_finding_is_fixed_and_a_silent_agent_fails() {
             .status
             .success()
     );
-    assert!(sandbox.sweep("issue").status.success());
     let dismissed = sandbox.fix(&[&key, "--yes"], "");
-    assert!(text(&dismissed.stderr).contains(&format!("{key} is dismissed")));
+    assert!(
+        text(&dismissed.stderr).contains(&format!("{key} is dismissed")),
+        "dismissed now, with no sweep since: {}",
+        text(&dismissed.stderr)
+    );
     assert!(sandbox.run(&["undismiss", &key]).status.success());
+
+    // A report edited to carry the heredoc's end word is refused before anything runs.
+    let report = sandbox.newest_report_path("github-o--r");
+    let edited = fs::read_to_string(&report).unwrap().replace(
+        r#""commands": []"#,
+        r#""commands": ["ANCIENT_PROTECTOR_END"]"#,
+    );
+    fs::write(&report, &edited).unwrap();
+    let malformed = sandbox.fix(&[&key, "--yes"], "");
+    assert!(
+        text(&malformed.stderr).contains("ANCIENT_PROTECTOR_END is reserved"),
+        "{}",
+        text(&malformed.stderr)
+    );
+
+    // An agent that cannot start is still recorded.
+    assert!(sandbox.sweep("issue").status.success());
+    sandbox.script("agents/claude", "#!/no/such/interpreter\n");
+    let broken = sandbox.fix(&[&key, "--yes"], "");
+    assert!(!broken.status.success());
+    assert!(text(&broken.stdout).contains("unknown: the agent did not run: cannot start claude"));
+    sandbox.script("agents/claude", FAKE_AGENT);
+
+    // With no agent configured, nothing is asked.
+    fs::write(
+        sandbox.path().join("data/config.toml"),
+        "[github]\nrepos = [\"o/r\"]\n",
+    )
+    .unwrap();
+    let no_agent = sandbox.fix(&[&key], "y\n");
+    assert!(
+        text(&no_agent.stderr).contains("no agent chosen"),
+        "{}",
+        text(&no_agent.stderr)
+    );
+    assert!(!text(&no_agent.stderr).contains("[y/N]"));
+    fs::write(
+        sandbox.path().join("data/config.toml"),
+        "agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n",
+    )
+    .unwrap();
 
     assert!(sandbox.sweep("ok").status.success());
     let stale = sandbox.fix(&[&key, "--yes"], "");
