@@ -176,6 +176,12 @@ pub struct Report {
     /// Whether this is the target's first sweep with a verdict, so everything in it is new.
     /// False when an earlier report exists but could not be read: then nothing is known to
     /// be new, and nothing is notified again.
+    ///
+    /// With `changes` it says one of three things, and only these: changes known
+    /// (`changes: Some`, `first_verdict: false`), first verdict (`None`, `true`), or not known
+    /// (`None`, `false`, which is also every report without a verdict). `sweep_target` sets
+    /// both in one place. They stay two fields, not one enum, because they are the shape of
+    /// `report.json` that its readers use.
     pub first_verdict: bool,
     /// What could not be checked: failed sources, unknown products, tools not installed.
     pub problems: Vec<String>,
