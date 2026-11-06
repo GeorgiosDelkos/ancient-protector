@@ -52,7 +52,7 @@ esac
 /// A fake `ssh`: `web` answers as a Debian 12 server with one OS package and one listening
 /// socket; `down` cannot be reached. The marker is on stdin's first line, `marker=<hex>`.
 const FAKE_SSH: &str = r#"#!/bin/sh
-while [ "$1" != "--" ]; do shift; done
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
 dest=$2
 IFS= read -r first
 m=${first#marker=}

@@ -662,7 +662,7 @@ mod tests {
     const FAKE_SSH: &str = r#"#!/bin/sh
 d=$(dirname "$0")
 printf '%s\n' "$@" >"$d/args"
-while [ "$1" != "--" ]; do shift; done
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
 dest=$2
 shift 2
 case "$dest" in
@@ -1173,43 +1173,45 @@ Version: 1
 
     #[test]
     fn a_bad_byte_spoils_only_its_own_part_and_a_cut_list_is_noted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ssh = fake_ssh(tmp.path());
-        let listing = (0..=LOCKFILES_PER_DIR)
-            .map(|n| format!("/a/{n}/uv.lock"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut text = answer(&[
-            ("os-release", "ID=debian\nVERSION_ID=12", 0),
-            ("kernel", "Linux", 0),
-            (
-                "dpkg",
-                "Package: a\nStatus: install ok installed\nVersion: 1\n",
-                0,
-            ),
-            ("apk", "", 1),
-            ("rpm", "", 127),
-            ("listening", "", 0),
-            ("docker-containers", "", 127),
-            ("docker-images", "", 127),
-            ("dir /a", &listing, 0),
-        ])
-        .into_bytes();
-        text.extend(b"@M@ begin file /a/0/uv.lock\nname = \"\xff\"\n\n@M@ end 0\n");
-        fs::write(tmp.path().join("bad.txt"), text).unwrap();
-        let server = server("[[servers]]\nname = \"b\"\nssh = \"bad\"\ndirs = [\"/a\"]\n");
-
-        let collected = collect(&ssh, &server).unwrap();
-
-        assert_eq!(collected.components.len(), 1, "{:?}", collected.components);
-        assert_eq!(
-            collected.problems[0],
-            format!(
-                "folder /a on the server has more than {LOCKFILES_PER_DIR} lockfiles; only the \
-                 first {LOCKFILES_PER_DIR} were read"
-            )
+        let cut = format!(
+            "folder /a on the server has more than {LOCKFILES_PER_DIR} lockfiles; only the first \
+             {LOCKFILES_PER_DIR} were read"
         );
-        assert_eq!(collected.problems.len(), 1, "{:?}", collected.problems);
+        for (listed, problems) in [
+            (LOCKFILES_PER_DIR, vec![]),
+            (LOCKFILES_PER_DIR + 1, vec![cut]),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ssh = fake_ssh(tmp.path());
+            let listing = (0..listed)
+                .map(|n| format!("/a/{n}/uv.lock"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut text = answer(&[
+                ("os-release", "ID=debian\nVERSION_ID=12", 0),
+                ("kernel", "Linux", 0),
+                (
+                    "dpkg",
+                    "Package: a\nStatus: install ok installed\nVersion: 1\n",
+                    0,
+                ),
+                ("apk", "", 1),
+                ("rpm", "", 127),
+                ("listening", "", 0),
+                ("docker-containers", "", 127),
+                ("docker-images", "", 127),
+                ("dir /a", &listing, 0),
+            ])
+            .into_bytes();
+            text.extend(b"@M@ begin file /a/0/uv.lock\nname = \"\xff\"\n\n@M@ end 0\n");
+            fs::write(tmp.path().join("bad.txt"), text).unwrap();
+            let server = server("[[servers]]\nname = \"b\"\nssh = \"bad\"\ndirs = [\"/a\"]\n");
+
+            let collected = collect(&ssh, &server).unwrap();
+
+            assert_eq!(collected.components.len(), 1, "{:?}", collected.components);
+            assert_eq!(collected.problems, problems, "{listed} files listed");
+        }
     }
 
     #[test]
