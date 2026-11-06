@@ -167,13 +167,24 @@ fn run_sweep(data_dir: &DataDir, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Shows the fix for `key`, asks to run it unless `yes`, and runs it.
+/// Shows the fix for `key`, asks to run it unless `yes`, and runs it. Fails when it is not
+/// confirmed, so a script can tell nothing ran, and when the agent did not report it fixed or
+/// exited with an error.
 fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyhow::Result<()> {
-    let plan = plan_fix(data_dir, key)?;
-    let agent = config
-        .agent
-        .map_or("the agent".to_owned(), |a| a.to_string());
-    let mut text = format!("Fix {key} on {}: {}\n", plan.target(), plan.fix().summary);
+    let plan = plan_fix(data_dir, config, key)?;
+    // The summary may hold line breaks (sweep prose allows them); one line here, so it cannot
+    // pass for a command line in what the user confirms.
+    let summary = plan
+        .fix()
+        .summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut text = format!(
+        "Fix {key} on {} (found by the sweep of {}): {summary}\n",
+        plan.destination(),
+        plan.found()
+    );
     for step in &plan.fix().steps {
         text.push_str(&format!("  - {step}\n"));
     }
@@ -183,30 +194,33 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
     print(&text);
     if !yes {
         status(&format!(
-            "Run this fix now with {agent}, with full access? [y/N]"
+            "Run this fix now with {}, with full access? [y/N]",
+            plan.agent()
         ));
         let mut answer = String::new();
         std::io::stdin()
             .read_line(&mut answer)
             .context("read the answer")?;
         if !matches!(answer.trim(), "y" | "Y" | "yes") {
-            print("not run");
-            return Ok(());
+            anyhow::bail!("not confirmed; nothing was run");
         }
     }
-    let record = run_fix(data_dir, config, &plan)?;
+    let record = run_fix(data_dir, &plan)?;
+    let pull_request = record
+        .pull_request
+        .as_ref()
+        .map_or(String::new(), |url| format!("\npull request: {url}"));
     print(&format!(
-        "{}: {}{}\n(log and files in {})",
+        "{}: {}{pull_request}\n(log and files in {})",
         record.outcome,
         record.summary,
-        record
-            .pull_request
-            .as_ref()
-            .map_or(String::new(), |url| format!("\npull request: {url}")),
         record.dir.display()
     ));
-    if record.outcome != Outcome::Fixed {
-        anyhow::bail!("the fix did not finish: {}", record.outcome);
+    if record.outcome != Outcome::Fixed || record.exit_code != Some(0) {
+        let exit = record
+            .exit_code
+            .map_or("no exit code".to_owned(), |c| format!("exit code {c}"));
+        anyhow::bail!("the fix did not finish: {}, agent {exit}", record.outcome);
     }
     Ok(())
 }

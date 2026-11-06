@@ -1,18 +1,24 @@
 //! Fixing one finding or issue after the user confirms it (spec, "Fix flow").
 //!
-//! The fix the sweep's agent wrote is the plan: [`plan_fix`] reads it from the newest report
-//! that has the key, the user confirms it, and [`run_fix`] has the chosen agent carry it out
-//! with full access in its own folder, `fixes/<start time>-<key>/`. Every run is appended to
-//! `state/fixes.jsonl`, whatever its outcome. A fix holds the sweeps lock, so no sweep or other
-//! fix runs while it changes the target.
+//! The fix the sweep's agent wrote is the plan. [`plan_fix`] reads it from the target's newest
+//! report and checks everything that can be checked before the user is asked: the finding is
+//! still current and not dismissed, its fix passes the sweep's text checks, the target is
+//! still configured, and the agent is installed. The user confirms what [`FixPlan`] shows, and
+//! [`run_fix`] has the agent carry it out with full access in its own folder,
+//! `fixes/<start time>-<key>/`. Every run that starts is appended to `state/fixes.jsonl`,
+//! whatever its outcome. A fix holds the sweeps lock, so no sweep or other fix runs while it
+//! changes the target.
 //!
-//! The agent works on the target the report names, and only one the config still lists: this
-//! Mac, a repository it clones to open a pull request, or a server it reaches with the sweep's
-//! own ssh options.
+//! The agent gets the fix and what it is about (advisories or subject, the component, the
+//! severity), not the sweep's evidence and explanation: those were written from advisory text
+//! and target files, which are untrusted, and the user confirmed the fix, not them.
 
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Read as _;
+use std::io::Seek as _;
+use std::io::SeekFrom;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -20,11 +26,15 @@ use std::path::PathBuf;
 use jiff::Timestamp;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 
 use crate::agent::AgentError;
 use crate::agent::AgentKind;
+use crate::agent::Located;
 use crate::agent::PROMPT_LINE;
 use crate::config::Config;
+use crate::findings;
 use crate::findings::Fix;
 use crate::findings::is_forging;
 use crate::lifecycle;
@@ -40,14 +50,22 @@ use crate::sweep::SweepError;
 /// The JSON Schema of `result.json`, written into each fix folder for the agent.
 const RESULT_SCHEMA: &str = include_str!("fix-result.schema.json");
 
-/// A fix to confirm: what it is about and what it will do.
+/// A checked fix, ready to show the user and, once confirmed, to run.
 #[derive(Debug)]
 pub struct FixPlan {
     key: FindingKey,
     target: String,
+    /// Where it runs, for the user: "this Mac", or the repository or the ssh command.
+    destination: String,
+    /// When the sweep that found it started.
+    found: Timestamp,
     fix: Fix,
-    /// The report entry, as JSON, for the agent.
-    entry: serde_json::Value,
+    /// What the agent is given in `fix.json`.
+    brief: Value,
+    /// The prompt's "Where to work" section.
+    access: String,
+    agent: AgentKind,
+    located: Located,
 }
 
 impl FixPlan {
@@ -56,54 +74,111 @@ impl FixPlan {
         &self.target
     }
 
+    /// Where the agent will work, as the user should read it before confirming.
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    /// When the sweep that found it started.
+    pub fn found(&self) -> Timestamp {
+        self.found
+    }
+
     /// The fix the sweep's agent wrote, which the user confirms.
     pub fn fix(&self) -> &Fix {
         &self.fix
     }
+
+    /// The agent that will run it.
+    pub fn agent(&self) -> AgentKind {
+        self.agent
+    }
 }
 
-/// Reads the fix for `key` from the newest report that has it.
+/// Reads the fix for `key` from the newest report of its target and checks it can run.
 ///
 /// # Errors
 ///
-/// Fails when no report has `key`, or a report cannot be read.
-pub fn plan_fix(data_dir: &DataDir, key: FindingKey) -> Result<FixPlan, FixError> {
-    let (report_path, _) = lifecycle::newest_report(&data_dir.sweeps_dir(), key)?
-        .ok_or(StateError::UnknownKey { key })?;
+/// Fails when no report has `key`, a newer sweep of its target no longer has it, it is
+/// dismissed, its fix is malformed, its target is no longer configured, or no agent is
+/// configured or found.
+pub fn plan_fix(data_dir: &DataDir, config: &Config, key: FindingKey) -> Result<FixPlan, FixError> {
+    let sweeps = data_dir.sweeps_dir();
+    let (path, entry) =
+        lifecycle::newest_report(&sweeps, key)?.ok_or(StateError::UnknownKey { key })?;
+    let dir_name = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .expect("a report sits in a target folder named in UTF-8");
+    let (newest, newest_saved) = lifecycle::newest_verdict(&sweeps, dir_name)?
+        .expect("the report that has the key has a verdict");
+    if newest != path {
+        return Err(FixError::Stale {
+            key,
+            since: newest_saved.started,
+        });
+    }
+    if entry.is_dismissed() {
+        return Err(FixError::Dismissed { key });
+    }
+
     let read_err = |source| FixError::Read {
-        path: report_path.clone(),
+        path: path.clone(),
         source,
     };
-    let text = fs::read_to_string(&report_path).map_err(read_err)?;
-    let report: Saved = serde_json::from_str(&text)
-        .map_err(|e| read_err(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+    let invalid = |e: serde_json::Error| read_err(io::Error::new(io::ErrorKind::InvalidData, e));
+    let report: Saved =
+        serde_json::from_str(&fs::read_to_string(&path).map_err(read_err)?).map_err(invalid)?;
     let entry = report
         .findings
         .into_iter()
         .chain(report.issues)
         .find(|e| e["key"] == key.to_string())
-        .expect("newest_report found the key in this report");
-    let fix = Fix::deserialize(&entry["fix"])
-        .map_err(|e| read_err(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+        .ok_or(StateError::UnknownKey { key })?;
+    let fix = Fix::deserialize(&entry["fix"]).map_err(invalid)?;
+    let mut problems = Vec::new();
+    findings::check_fix("fix", &fix, &mut problems);
+    if !problems.is_empty() {
+        return Err(FixError::Malformed { key, problems });
+    }
+
+    let (destination, access) = access(config, &report.target, key)?;
+    let agent = config.agent.ok_or(SweepError::NoAgent)?;
+    let located = agent.locate()?.ok_or(SweepError::AgentNotFound { agent })?;
+    let brief = json!({
+        "key": key,
+        "target": report.target,
+        "severity": entry["severity"],
+        "advisories": entry.get("advisories"),
+        "installed": entry.get("installed"),
+        "subject": entry.get("subject"),
+        "fix": entry["fix"],
+    });
     Ok(FixPlan {
         key,
         target: report.target,
+        destination,
+        found: report.started,
         fix,
-        entry,
+        brief,
+        access,
+        agent,
+        located,
     })
 }
 
 /// The parts of a saved `report.json` a fix needs.
 #[derive(Debug, Deserialize)]
 struct Saved {
+    started: Timestamp,
     target: String,
-    findings: Vec<serde_json::Value>,
-    issues: Vec<serde_json::Value>,
+    findings: Vec<Value>,
+    issues: Vec<Value>,
 }
 
 /// One fix run, as appended to `state/fixes.jsonl`.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Serialize)]
 pub struct FixRecord {
     /// The finding or issue.
     pub key: FindingKey,
@@ -115,7 +190,7 @@ pub struct FixRecord {
     pub started: Timestamp,
     /// When it finished.
     pub finished: Timestamp,
-    /// The agent's exit code; `None` when a signal ended it.
+    /// The agent's exit code; `None` when a signal ended it or it did not start.
     pub exit_code: Option<i32>,
     /// What the agent reported, or `unknown` when it wrote no valid `result.json`.
     pub outcome: Outcome,
@@ -162,53 +237,61 @@ struct AgentResult {
     pull_request: Option<String>,
 }
 
-/// Runs the confirmed `plan` with the agent named in `config`, with full access, and records
-/// the run in `state/fixes.jsonl`. Call it only after the user confirmed the plan.
+/// Runs the confirmed `plan` with full access and records the run in `state/fixes.jsonl`.
+/// Call it only after the user confirmed what the plan shows.
 ///
-/// Blocks until the agent finishes; there is no time limit.
+/// Blocks until the agent finishes; there is no time limit. An agent that cannot start is
+/// recorded as `unknown` with the reason, like one that writes no result.
 ///
 /// # Errors
 ///
-/// Fails before the agent runs when no agent is configured or found, a sweep or fix is
-/// running, the target is no longer configured, or the fix folder cannot be written; and after
-/// it ran when the record cannot be appended.
-pub fn run_fix(data_dir: &DataDir, config: &Config, plan: &FixPlan) -> Result<FixRecord, FixError> {
-    let agent = config.agent.ok_or(SweepError::NoAgent)?;
-    let located = agent.locate()?.ok_or(SweepError::AgentNotFound { agent })?;
-    let access = access(config, &plan.target, plan.key)?;
+/// Fails before the agent runs when a sweep or fix is running or the fix folder cannot be
+/// written, and after it when the record cannot be appended.
+pub fn run_fix(data_dir: &DataDir, plan: &FixPlan) -> Result<FixRecord, FixError> {
     let _lock = Lock::acquire(&data_dir.sweeps_dir())?;
-
     let started = Timestamp::now();
-    let dir = data_dir.fixes_dir().join(format!(
-        "{}-{}",
-        started.strftime("%Y%m%dT%H%M%SZ"),
-        plan.key
-    ));
-    let prompt = sweep::prompt(data_dir, Prompt::Fix, &plan.target)?.replace("{{access}}", &access);
-    let entry = serde_json::to_string_pretty(&plan.entry).expect("a JSON value serializes");
+    let fixes = data_dir.fixes_dir();
+    fs::create_dir_all(&fixes).map_err(|source| FixError::Write {
+        path: fixes.clone(),
+        source,
+    })?;
+    let stamp = format!("{}-{}", started.strftime("%Y%m%dT%H%M%SZ"), plan.key);
+    let dir = sweep::create_unique_dir(&fixes, &stamp)?;
+    let prompt =
+        sweep::prompt(data_dir, Prompt::Fix, &plan.target)?.replace("{{access}}", &plan.access);
+    let brief = serde_json::to_string_pretty(&plan.brief).expect("a JSON value serializes");
     for (name, text) in [
         ("PROMPT.md", prompt.as_str()),
-        ("fix.json", entry.as_str()),
+        ("fix.json", brief.as_str()),
         ("result.schema.json", RESULT_SCHEMA),
     ] {
         let path = dir.join(name);
-        fs::create_dir_all(&dir)
-            .and_then(|()| fs::write(&path, text))
-            .map_err(|source| FixError::Write { path, source })?;
+        fs::write(&path, text).map_err(|source| FixError::Write { path, source })?;
     }
 
-    let status = agent.run_fix(&located, &dir, PROMPT_LINE, &dir.join("agent.log"))?;
-    let (outcome, summary, pull_request) = match read_result(&dir.join("result.json")) {
+    let ran = plan
+        .agent
+        .run_fix(&plan.located, &dir, PROMPT_LINE, &dir.join("agent.log"));
+    let repo = plan.target.strip_prefix("github:");
+    let (exit_code, result) = match ran {
+        Ok(status) => (status.code(), read_result(&dir.join("result.json"), repo)),
+        Err(e) => (
+            None,
+            Err(format!("the agent did not run: {}", sweep::error_chain(&e))),
+        ),
+    };
+    let (outcome, summary, pull_request) = match result {
         Ok(result) => (result.outcome, result.summary, result.pull_request),
-        Err(why) => (Outcome::Unknown, why, None),
+        // The reason can quote the agent's file (a serde error names its fields).
+        Err(why) => (Outcome::Unknown, why.replace(is_forging, " "), None),
     };
     let record = FixRecord {
         key: plan.key,
         target: plan.target.clone(),
-        agent,
+        agent: plan.agent,
         started,
         finished: Timestamp::now(),
-        exit_code: status.code(),
+        exit_code,
         outcome,
         summary,
         pull_request,
@@ -218,13 +301,15 @@ pub fn run_fix(data_dir: &DataDir, config: &Config, plan: &FixPlan) -> Result<Fi
     Ok(record)
 }
 
-/// The "Where to work" section of the prompt for `target`, which must still be configured.
-fn access(config: &Config, target: &str, key: FindingKey) -> Result<String, FixError> {
+/// Where `target`, which must still be configured, is shown to the user, and the "Where to
+/// work" section of the prompt.
+fn access(config: &Config, target: &str, key: FindingKey) -> Result<(String, String), FixError> {
     let unknown = || FixError::UnknownTarget {
         target: target.to_owned(),
     };
     if target == "mac" {
-        return Ok("This Mac. Run the commands here, as the user.".to_owned());
+        let access = "This Mac. Run the commands here, as the user.".to_owned();
+        return Ok(("this Mac".to_owned(), access));
     }
     if let Some(slug) = target.strip_prefix("github:") {
         let repo = config
@@ -232,7 +317,7 @@ fn access(config: &Config, target: &str, key: FindingKey) -> Result<String, FixE
             .iter()
             .find(|r| r.to_string() == slug)
             .ok_or_else(unknown)?;
-        return Ok(format!(
+        let access = format!(
             "The GitHub repository {repo}, with the user's `gh` login.\n\n\
              - A change to files: clone it into this folder (`gh repo clone {repo} repo`), \
              create the branch `ancient-protector/fix-{key}` from the default branch, make the \
@@ -240,6 +325,10 @@ fn access(config: &Config, target: &str, key: FindingKey) -> Result<String, FixE
              branch, and open a pull request with `gh pr create`. Never push to the default \
              branch.\n\
              - A repository setting: run the confirmed `gh api` commands."
+        );
+        return Ok((
+            format!("the GitHub repository {repo}, as a pull request"),
+            access,
         ));
     }
     if let Some(name) = target.strip_prefix("server:") {
@@ -249,19 +338,21 @@ fn access(config: &Config, target: &str, key: FindingKey) -> Result<String, FixE
             .find(|s| s.name.to_string() == name)
             .ok_or_else(unknown)?;
         let ssh = server::ssh_command_line(&server.conn);
-        return Ok(format!(
+        let access = format!(
             "The server {name}. You are on this Mac; run every command on the server as\n\n\
              ```sh\n{ssh} '<command>'\n```\n\n\
              with exactly these ssh options, and connect to no other host. Use `sudo` where \
              the confirmed command does; if sudo asks for a password, stop and write \
              `failed`."
-        ));
+        );
+        return Ok((format!("the server {name}, through `{ssh}`"), access));
     }
     Err(unknown())
 }
 
-/// Reads and checks `result.json`, or says why it cannot be used.
-fn read_result(path: &Path) -> Result<AgentResult, String> {
+/// Reads and checks `result.json`, or says why it cannot be used. A pull request is only
+/// accepted for a repository fix, as a pull request of that repository.
+fn read_result(path: &Path, repo: Option<&str>) -> Result<AgentResult, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("no result.json: {e}"))?;
     let result: AgentResult =
         serde_json::from_str(&text).map_err(|e| format!("result.json: {e}"))?;
@@ -272,12 +363,16 @@ fn read_result(path: &Path) -> Result<AgentResult, String> {
     if summary.is_empty() || summary.chars().any(is_forging) {
         return Err("result.json: summary must be one line of text".to_owned());
     }
-    // Shown to the user as a link, so only a plain https URL on GitHub.
-    let plain_url = |u: &String| {
-        u.starts_with("https://github.com/") && u.bytes().all(|b| (b'!'..=b'~').contains(&b))
-    };
-    if result.pull_request.as_ref().is_some_and(|u| !plain_url(u)) {
-        return Err("result.json: pull_request must be an https://github.com/ URL".to_owned());
+    if let Some(url) = &result.pull_request {
+        let number = repo
+            .and_then(|r| url.strip_prefix(&format!("https://github.com/{r}/pull/")))
+            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if number.is_none() {
+            return Err(format!(
+                "result.json: pull_request must be a pull request of {}",
+                repo.unwrap_or("the repository; this target has none")
+            ));
+        }
     }
     Ok(AgentResult {
         summary: summary.to_owned(),
@@ -285,20 +380,38 @@ fn read_result(path: &Path) -> Result<AgentResult, String> {
     })
 }
 
-/// Appends `record` to `state/fixes.jsonl` as one line, under the state lock.
+/// Appends `record` to `state/fixes.jsonl` as one line, under the state lock. A last line cut
+/// short by a crash gets its line break first, so the new record is not glued onto it; the
+/// folder is synced when the file is new, as the dismissals writer does.
 fn append(data_dir: &DataDir, record: &FixRecord) -> Result<(), FixError> {
     let line = serde_json::to_string(record).expect("a fix record serializes");
     lifecycle::locked(data_dir, |state| {
         let path = state.join("fixes.jsonl");
-        fs::OpenOptions::new()
+        let new = !path.exists();
+        let written = fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)
             .and_then(|mut file| {
-                file.write_all(format!("{line}\n").as_bytes())?;
-                file.sync_data()
-            })
-            .map_err(|source| StateError::Write { path, source })
+                let mut last = [0];
+                if file.metadata()?.len() > 0 {
+                    file.seek(SeekFrom::End(-1))?;
+                    file.read_exact(&mut last)?;
+                }
+                let start = if matches!(last, [0 | b'\n']) {
+                    ""
+                } else {
+                    "\n"
+                };
+                file.write_all(format!("{start}{line}\n").as_bytes())?;
+                file.sync_data()?;
+                if new {
+                    fs::File::open(state)?.sync_all()?;
+                }
+                Ok(())
+            });
+        written.map_err(|source| StateError::Write { path, source })
     })?;
     Ok(())
 }
@@ -306,6 +419,28 @@ fn append(data_dir: &DataDir, record: &FixRecord) -> Result<(), FixError> {
 /// Error from planning or running a fix.
 #[derive(Debug, thiserror::Error)]
 pub enum FixError {
+    /// A newer sweep of the target no longer has the finding.
+    #[error("a sweep at {since} no longer found {key}; nothing to fix")]
+    Stale {
+        /// The key.
+        key: FindingKey,
+        /// When that sweep started.
+        since: Timestamp,
+    },
+    /// The finding is dismissed.
+    #[error("{key} is dismissed; undismiss it to fix it")]
+    Dismissed {
+        /// The key.
+        key: FindingKey,
+    },
+    /// The fix in the report fails the sweep's checks (the report was edited).
+    #[error("the fix for {key} is malformed: {}", problems.join("; "))]
+    Malformed {
+        /// The key.
+        key: FindingKey,
+        /// What is wrong.
+        problems: Vec<String>,
+    },
     /// The report's target is no longer in config.toml.
     #[error("{target} is not in config.toml any more; add it back to fix it")]
     UnknownTarget {
@@ -359,13 +494,12 @@ mod tests {
              host = \"10.0.0.5\"\nuser = \"ops\"\nidentity_file = \"/k/id_ed\"\n",
         );
         let key = FindingKey::new(&["x"]);
-        assert!(
-            access(&config, "mac", key)
-                .unwrap()
-                .starts_with("This Mac.")
-        );
+        let (shown, mac) = access(&config, "mac", key).unwrap();
+        assert_eq!(shown, "this Mac");
+        assert!(mac.starts_with("This Mac."), "{mac}");
 
-        let repo = access(&config, "github:o/r", key).unwrap();
+        let (shown, repo) = access(&config, "github:o/r", key).unwrap();
+        assert_eq!(shown, "the GitHub repository o/r, as a pull request");
         assert!(repo.contains("`gh repo clone o/r repo`"), "{repo}");
         assert!(
             repo.contains(&format!("`ancient-protector/fix-{key}`")),
@@ -373,10 +507,15 @@ mod tests {
         );
         assert!(repo.contains("Never push to the default branch"), "{repo}");
 
-        let server = access(&config, "server:web", key).unwrap();
+        let (shown, server) = access(&config, "server:web", key).unwrap();
+        let ssh = "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes";
         assert!(
-            server.contains("ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes"),
-            "{server}"
+            shown.starts_with(&format!("the server web, through `{ssh}")),
+            "{shown}"
+        );
+        assert!(
+            shown.ends_with("-- 10.0.0.5`"),
+            "the user sees the host: {shown}"
         );
         assert!(
             server.contains("-l ops -i /k/id_ed -o IdentitiesOnly=yes -- 10.0.0.5 '<command>'"),
@@ -398,53 +537,116 @@ mod tests {
     fn the_result_must_be_a_known_outcome_with_a_plain_summary() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("result.json");
-        let read = |json: &str| {
+        let read = |json: &str, repo: Option<&str>| {
             fs::write(&path, json).unwrap();
-            read_result(&path)
+            read_result(&path, repo)
         };
-        let ok = read(
-            r#"{"outcome": "partial", "summary": " half done ",
-            "pull_request": "https://github.com/o/r/pull/1"}"#,
-        )
-        .unwrap();
+        let pr = r#"{"outcome": "partial", "summary": " half done ",
+            "pull_request": "https://github.com/o/r/pull/12"}"#;
+        let ok = read(pr, Some("o/r")).unwrap();
         assert_eq!(ok.outcome, Outcome::Partial);
         assert_eq!(ok.summary, "half done");
-        assert!(
-            read(r#"{"outcome": "fixed", "summary": "x"}"#)
-                .unwrap()
-                .pull_request
-                .is_none()
+        assert_eq!(
+            ok.pull_request.as_deref(),
+            Some("https://github.com/o/r/pull/12")
         );
+        let plain = read(r#"{"outcome": "fixed", "summary": "x"}"#, None).unwrap();
+        assert!(plain.pull_request.is_none());
 
+        let with_pr = |url: &str| {
+            format!(r#"{{"outcome": "fixed", "summary": "x", "pull_request": "{url}"}}"#)
+        };
         let bad = [
             (
-                r#"{"outcome": "unknown", "summary": "x"}"#,
-                "outcome must be",
+                r#"{"outcome": "unknown", "summary": "x"}"#.to_owned(),
+                Some("o/r"),
+                "outcome",
             ),
-            (r#"{"outcome": "fixed", "summary": " "}"#, "one line"),
-            (r#"{"outcome": "fixed", "summary": "a\nb"}"#, "one line"),
             (
-                r#"{"outcome": "fixed", "summary": "x", "extra": 1}"#,
+                r#"{"outcome": "fixed", "summary": " "}"#.to_owned(),
+                None,
+                "one line",
+            ),
+            (
+                r#"{"outcome": "fixed", "summary": "a\nb"}"#.to_owned(),
+                None,
+                "one line",
+            ),
+            (
+                r#"{"outcome": "fixed", "summary": "x", "e": 1}"#.to_owned(),
+                None,
                 "unknown field",
             ),
             (
-                r#"{"outcome": "fixed", "summary": "x", "pull_request": "http://evil/1"}"#,
-                "https://github.com/ URL",
+                with_pr("https://github.com/o/r/pull/12"),
+                None,
+                "this target has none",
             ),
             (
-                r#"{"outcome": "fixed", "summary": "x", "pull_request": "https://github.com/a b"}"#,
-                "https://github.com/ URL",
+                with_pr("https://github.com/o/other/pull/1"),
+                Some("o/r"),
+                "a pull request of o/r",
+            ),
+            (
+                with_pr("https://github.com/o/r/pull/1x"),
+                Some("o/r"),
+                "a pull request of o/r",
+            ),
+            (
+                with_pr("https://github.com/o/r/pull/"),
+                Some("o/r"),
+                "a pull request of o/r",
             ),
         ];
-        for (json, why) in bad {
-            let err = read(json).unwrap_err();
+        for (json, repo, why) in bad {
+            let err = read(&json, repo).unwrap_err();
             assert!(err.contains(why), "{json}: {err}");
         }
         fs::remove_file(&path).unwrap();
         assert!(
-            read_result(&path)
+            read_result(&path, None)
                 .unwrap_err()
                 .starts_with("no result.json")
+        );
+    }
+
+    fn record(n: u8) -> FixRecord {
+        FixRecord {
+            key: FindingKey::new(&[&n.to_string()]),
+            target: "mac".to_owned(),
+            agent: AgentKind::Claude,
+            started: Timestamp::UNIX_EPOCH,
+            finished: Timestamp::UNIX_EPOCH,
+            exit_code: Some(0),
+            outcome: Outcome::Fixed,
+            summary: format!("run {n}"),
+            pull_request: None,
+            dir: PathBuf::from("/f"),
+        }
+    }
+
+    #[test]
+    fn records_append_one_per_line_even_after_a_torn_last_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        append(&data_dir, &record(1)).unwrap();
+        let path = data_dir.state_dir().join("fixes.jsonl");
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str(r#"{"key": "cut sh"#);
+        fs::write(&path, &text).unwrap();
+        append(&data_dir, &record(2)).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(text.ends_with('\n'));
+        for (line, n) in [(lines[0], 1), (lines[2], 2)] {
+            let value: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(value["summary"], format!("run {n}"));
+        }
+        assert_eq!(
+            lines[1], r#"{"key": "cut sh"#,
+            "the torn line stays as it was"
         );
     }
 }

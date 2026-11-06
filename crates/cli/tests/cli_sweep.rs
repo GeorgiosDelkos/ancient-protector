@@ -565,11 +565,23 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
     let key = report["issues"][0]["key"].as_str().unwrap().to_owned();
     let runs = sandbox.runs();
 
-    let declined = sandbox.fix(&[&key], "n\n");
-    assert!(declined.status.success(), "{}", text(&declined.stderr));
-    assert!(text(&declined.stdout).starts_with(&format!("Fix {key} on github:o/r: s")));
-    assert!(text(&declined.stderr).contains("with full access? [y/N]"));
-    assert!(text(&declined.stdout).ends_with("not run\n"));
+    for answer in ["n\n", ""] {
+        let declined = sandbox.fix(&[&key], answer);
+        assert!(!declined.status.success(), "{answer:?} is not a yes");
+        let stdout = text(&declined.stdout);
+        assert!(
+            stdout.starts_with(&format!(
+                "Fix {key} on the GitHub repository o/r, as a pull request (found by the sweep of"
+            )),
+            "{stdout}"
+        );
+        let stderr = text(&declined.stderr);
+        assert!(stderr.contains("Run this fix now with claude, with full access? [y/N]"));
+        assert!(
+            stderr.contains("not confirmed; nothing was run"),
+            "{stderr}"
+        );
+    }
     assert_eq!(sandbox.runs(), runs, "the agent did not run");
     assert!(!sandbox.path().join("data/state/fixes.jsonl").exists());
 
@@ -599,9 +611,71 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
         !prompt.contains("{{"),
         "every placeholder is filled: {prompt}"
     );
-    let entry = fs::read_to_string(dir.join("fix.json")).unwrap();
-    assert!(entry.contains("github/workflows/ci.yml"), "{entry}");
+    let brief: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("fix.json")).unwrap()).unwrap();
+    assert_eq!(brief["subject"]["file"], "github/workflows/ci.yml");
+    assert!(
+        brief.get("evidence").is_none(),
+        "the sweep's prose stays out: {brief}"
+    );
+
+    // `--yes` asks nothing; a second run in the same second gets its own folder.
+    let again = sandbox.fix(&[&key, "--yes"], "");
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    assert!(!text(&again.stderr).contains("[y/N]"));
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    let dirs: Vec<String> = history
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["dir"].to_string())
+        .collect();
+    assert_eq!(dirs.len(), 2);
+    assert_ne!(dirs[0], dirs[1]);
 
     let unknown = sandbox.fix(&["0123456789abcdef", "--yes"], "");
+    assert!(!unknown.status.success());
     assert!(text(&unknown.stderr).contains("no report has finding 0123456789abcdef"));
+}
+
+#[test]
+fn only_a_current_undismissed_finding_is_fixed_and_a_silent_agent_fails() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    assert!(sandbox.sweep("issue").status.success());
+    let key = sandbox.newest_report("github-o--r")["issues"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let silent = sandbox
+        .command("silent")
+        .args(["fix", &key, "--yes"])
+        .output()
+        .unwrap();
+    assert!(!silent.status.success());
+    assert!(
+        text(&silent.stdout).contains("unknown: no result.json"),
+        "{}",
+        text(&silent.stdout)
+    );
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    assert!(history.contains(r#""outcome":"unknown""#), "{history}");
+
+    assert!(
+        sandbox
+            .run(&["dismiss", &key, "--reason", "accepted"])
+            .status
+            .success()
+    );
+    assert!(sandbox.sweep("issue").status.success());
+    let dismissed = sandbox.fix(&[&key, "--yes"], "");
+    assert!(text(&dismissed.stderr).contains(&format!("{key} is dismissed")));
+    assert!(sandbox.run(&["undismiss", &key]).status.success());
+
+    assert!(sandbox.sweep("ok").status.success());
+    let stale = sandbox.fix(&[&key, "--yes"], "");
+    assert!(!stale.status.success());
+    assert!(
+        text(&stale.stderr).contains(&format!("no longer found {key}; nothing to fix")),
+        "{}",
+        text(&stale.stderr)
+    );
 }

@@ -89,7 +89,7 @@ impl Prompt {
     }
 }
 
-/// How many sweep folders may share one start second before the sweep gives up. Arbitrary:
+/// How many sweep or fix folders may share one start second before the run gives up. Arbitrary:
 /// sweeps run one at a time and each takes seconds at least, so two is already rare.
 const SAME_SECOND_LIMIT: u32 = 100;
 
@@ -608,15 +608,20 @@ fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey
 /// Creates `<sweeps>/<start time>`, or `<start time>-2` and so on when an earlier sweep
 /// started in the same second.
 fn create_sweep_dir(sweeps: &Path, started: Timestamp) -> Result<PathBuf, SweepError> {
-    let stamp = started.strftime("%Y%m%dT%H%M%SZ").to_string();
+    create_unique_dir(sweeps, &started.strftime("%Y%m%dT%H%M%SZ").to_string())
+}
+
+/// Creates `<parent>/<stamp>`, or `<stamp>-2` and so on when that exists: a run never reuses
+/// an earlier run's folder, whose files it would mix with its own.
+pub(crate) fn create_unique_dir(parent: &Path, stamp: &str) -> Result<PathBuf, SweepError> {
     let mut last = None;
     for n in 1..=SAME_SECOND_LIMIT {
         let name = if n == 1 {
-            stamp.clone()
+            stamp.to_owned()
         } else {
             format!("{stamp}-{n}")
         };
-        let path = sweeps.join(name);
+        let path = parent.join(name);
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some((path, e)),
@@ -1152,7 +1157,7 @@ fn component_name(component: &Component) -> String {
 }
 
 /// Renders an error and its sources as `outer: inner`.
-fn error_chain(error: &impl std::error::Error) -> String {
+pub(crate) fn error_chain(error: &impl std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(e) = source {

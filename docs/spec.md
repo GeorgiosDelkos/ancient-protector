@@ -244,19 +244,32 @@ appended to `state/fixes.jsonl` -> the next sweep checks the finding again. Deci
 (see "Lifecycle"): no separate planning run; GitHub fixes open a pull request; server fixes may
 use ssh.
 
-- The target must still be in `config.toml`: the report names it, the config says how to reach
-  it.
-- Each run has a folder `fixes/<utc-timestamp>-<key>/`: `PROMPT.md` (the user's `prompts/fix.md`
+- Before asking, everything that can be checked is: the key is in the newest report of its
+  target with a verdict (a newer sweep without it means it is gone, and an old fix could
+  downgrade a package), it is not dismissed, its fix passes the sweep's text checks again, the
+  target is still in `config.toml`, and the agent is installed. The question shows where the
+  fix runs (for a server, the exact ssh command) and when the sweep found it. A summary is
+  shown on one line, so it cannot pass for a command. Not confirming exits non-zero.
+- The agent gets `fix.json` with the key, target, severity, advisories or subject, the
+  installed component and the fix, not the sweep's evidence and explanation: those were
+  written from untrusted advisory text and files, and the user confirmed the fix, not them.
+  When a confirmed command fails, the agent may adapt it to reach the same goal (decided
+  2026-11-06 for servers: "so it can adapt when a command fails"), and the prompt forbids
+  anything the fix does not name.
+- Each run has a new folder `fixes/<utc-timestamp>-<key>[-n]/`: `PROMPT.md` (the user's `prompts/fix.md`
   with the target and where to work filled in), `fix.json` (the report entry), the schema of
   `result.json`, the agent's `agent.log`, and `result.json`, which the agent writes: `outcome`
   (`fixed`, `partial`, `failed`), a one-line `summary`, and for a repository the
-  `pull_request` URL (`https://github.com/` only, printable ASCII).
+  `pull_request` URL (`https://github.com/<owner>/<name>/pull/<number>` of that repository
+  only).
 - Where to work: this Mac; for a repository, a clone in the fix folder, a branch
   `ancient-protector/fix-<key>`, and a pull request (never a push to the default branch); for a
   server, every command through `ssh` with the sweep's options to that one host.
 - `state/fixes.jsonl` gets one line per run: key, target, agent, start and end, exit code,
-  outcome (`unknown` when `result.json` is missing or invalid, with why), summary, pull
-  request, folder. Appends take `state/.lock`.
+  outcome (`unknown` when `result.json` is missing or invalid or the agent did not start,
+  with why), summary, pull request, folder. Appends take `state/.lock`; a last line cut short
+  by a crash is ended first. The CLI exits non-zero unless the outcome is `fixed` and the
+  agent exited 0.
 - A fix holds `sweeps/.lock`, so no sweep or other fix runs while it changes the target.
 
 ### Agent adapters

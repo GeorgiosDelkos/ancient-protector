@@ -254,32 +254,43 @@ impl Changes {
         active: &BTreeSet<FindingKey>,
         all: &BTreeSet<FindingKey>,
     ) -> Result<Option<Self>, StateError> {
-        for sweep in newest_first(sweeps)? {
-            let Some(last) = read_saved(&sweep.join(dir_name))? else {
-                continue;
-            };
-            if last.failure.is_some() {
-                continue;
-            }
-            let before: BTreeSet<FindingKey> = last
-                .entries()
-                .filter(|e| e.dismissed.is_none())
-                .map(|e| e.key)
-                .collect();
-            return Ok(Some(Self {
-                since: last.started,
-                new: active.difference(&before).copied().collect(),
-                resolved: before.difference(all).copied().collect(),
-            }));
-        }
-        Ok(None)
+        let Some((_, last)) = newest_verdict(sweeps, dir_name)? else {
+            return Ok(None);
+        };
+        let before: BTreeSet<FindingKey> = last
+            .entries()
+            .filter(|e| e.dismissed.is_none())
+            .map(|e| e.key)
+            .collect();
+        Ok(Some(Self {
+            since: last.started,
+            new: active.difference(&before).copied().collect(),
+            resolved: before.difference(all).copied().collect(),
+        }))
     }
+}
+
+/// The newest `<sweep>/<dir_name>/report.json` with a verdict, and its start time.
+pub(crate) fn newest_verdict(
+    sweeps: &Path,
+    dir_name: &str,
+) -> Result<Option<(PathBuf, Saved)>, StateError> {
+    for sweep in newest_first(sweeps)? {
+        let dir = sweep.join(dir_name);
+        let Some(saved) = read_saved(&dir)? else {
+            continue;
+        };
+        if saved.failure.is_none() {
+            return Ok(Some((dir.join("report.json"), saved)));
+        }
+    }
+    Ok(None)
 }
 
 /// What later sweeps and commands read back from a saved `report.json`.
 #[derive(Debug, Deserialize)]
-struct Saved {
-    started: Timestamp,
+pub(crate) struct Saved {
+    pub(crate) started: Timestamp,
     failure: Option<String>,
     findings: Vec<SavedEntry>,
     issues: Vec<SavedEntry>,
@@ -293,6 +304,13 @@ pub(crate) struct SavedEntry {
     /// Only whether it is there matters.
     #[serde(default)]
     dismissed: Option<IgnoredAny>,
+}
+
+impl SavedEntry {
+    /// Whether the report marked it dismissed.
+    pub(crate) fn is_dismissed(&self) -> bool {
+        self.dismissed.is_some()
+    }
 }
 
 impl Saved {
@@ -370,7 +388,7 @@ fn newest(sweeps: &Path, key: FindingKey) -> Result<Option<SavedEntry>, StateErr
     Ok(newest_report(sweeps, key)?.map(|(_, entry)| entry))
 }
 
-/// The newest `report.json` that has `key`, and its entry.
+/// The newest `report.json` that has `key`, with the entry.
 pub(crate) fn newest_report(
     sweeps: &Path,
     key: FindingKey,
