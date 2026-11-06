@@ -16,8 +16,16 @@ name: mutants
 jobs:
   mutants:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: macos-latest
-    name: cargo mutants (PR diff)
+    # Linux, not macOS: the tests use no macOS tool (they fake sw_vers, ssh and the agents), and
+    # Linux runners are faster and more of them run at once. One runner took about 60 s per
+    # mutant, 3.5 hours for the 218 of PR 7, so the mutants are split across shards
+    # (https://mutants.rs/shards.html). The count is arbitrary: about 25 mutants per shard.
+    runs-on: ubuntu-latest
+    name: cargo mutants (PR diff, shard ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
         with:
@@ -37,10 +45,14 @@ jobs:
         with:
           tool: cargo-mutants
       - name: cargo mutants
-        run: cargo mutants --no-shuffle -vV --in-diff git.diff --cargo-arg=--locked
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: >-
+          cargo mutants --no-shuffle -vV --in-diff git.diff --cargo-arg=--locked
+          --shard "$SHARD/8"
       - name: Keep the results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # tag=v7.0.2
         with:
-          name: mutants.out
+          name: mutants.out-${{ matrix.shard }}
           path: mutants.out
