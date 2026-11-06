@@ -16,11 +16,11 @@ name: mutants
 jobs:
   mutants:
     if: ${{ !github.event.pull_request.draft }}
-    # Linux, not macOS: the tests use no macOS tool (they fake sw_vers, ssh and the agents), and
-    # Linux runners are faster and more of them run at once. One runner took about 60 s per
-    # mutant, 3.5 hours for the 218 of PR 7, so the mutants are split across shards
-    # (https://mutants.rs/shards.html). The count is arbitrary: about 25 mutants per shard.
-    runs-on: ubuntu-latest
+    # macOS, as in test.yml: a test runs the server script on the runner itself and expects no
+    # dpkg database there. One runner took about 60 s per mutant, 3.5 hours for the 218 of PR 7,
+    # so the mutants are split across shards (https://mutants.rs/shards.html). The count is
+    # arbitrary: about 25 mutants per shard.
+    runs-on: macos-latest
     name: cargo mutants (PR diff, shard ${{ matrix.shard }})
     strategy:
       fail-fast: false
