@@ -666,7 +666,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let report = json!({
             "started": started, "target": "mac", "failure": null, "issues": [],
-            "findings": [{"key": key, "severity": "high", "modified": null,
+            "findings": [{"key": key, "severity": "high", "modified": "2026-11-01T00:00:00Z",
                 "fix": {"summary": "s", "steps": [], "commands": ["true"]}}],
         });
         fs::write(dir.join("report.json"), report.to_string()).unwrap();
