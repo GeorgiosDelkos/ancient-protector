@@ -424,12 +424,11 @@ fn read_result(path: &Path, repo: Option<&str>) -> Result<AgentResult, String> {
 
 /// Appends `record` to `state/fixes.jsonl` as one line, under the state lock. A last line cut
 /// short by a crash gets its line break first, so the new record is not glued onto it; the
-/// folder is synced when the file is new, as the dismissals writer does.
+/// folder is synced too, as the dismissals writer does.
 fn append(data_dir: &DataDir, record: &FixRecord) -> Result<(), FixError> {
     let line = serde_json::to_string(record).expect("a fix record serializes");
     lifecycle::locked(data_dir, |state| {
         let path = state.join("fixes.jsonl");
-        let new = !path.exists();
         let written = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -447,10 +446,9 @@ fn append(data_dir: &DataDir, record: &FixRecord) -> Result<(), FixError> {
                 let start = if torn { "\n" } else { "" };
                 file.write_all(format!("{start}{line}\n").as_bytes())?;
                 file.sync_data()?;
-                if new {
-                    fs::File::open(state)?.sync_all()?;
-                }
-                Ok(())
+                // Always, not only when the file is new: fixes are rare, and a test cannot
+                // tell the two apart, so the cheaper rule would go unchecked.
+                fs::File::open(state)?.sync_all()
             });
         written.map_err(|source| StateError::Write { path, source })
     })?;
