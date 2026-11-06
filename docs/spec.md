@@ -270,10 +270,10 @@ use ssh.
   clone, which may hold agent instruction files; the repositories are the user's own, and the
   agent's project settings and hooks come from its working folder, the fix folder.
 - `state/fixes.jsonl` gets one line per run: key, target, agent, start and end, exit code,
-  outcome (`unknown` when `result.json` is missing or invalid or the agent did not start,
-  with why), summary, pull request, how it was confirmed (`asked` or `yes_flag`), folder. Appends take `state/.lock`; a last line cut short
-  by a crash is ended first. The CLI exits non-zero unless the outcome is `fixed` and the
-  agent exited 0.
+  outcome (`unknown` when `result.json` is missing or invalid or the agent did not start, with
+  why), summary, pull request, how it was confirmed (`asked` or `yes_flag`), folder. Appends
+  take `state/.lock`; a last line cut short by a crash is ended first. The CLI exits non-zero
+  unless the outcome is `fixed` and the agent exited 0.
 - A fix holds `sweeps/.lock`, so no sweep or other fix runs while it changes the target.
 
 ### Agent adapters
