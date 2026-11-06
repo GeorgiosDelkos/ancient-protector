@@ -233,6 +233,8 @@ pub struct Advisory {
     pub id: String,
     /// Other ids for the same issue; for OSV this usually includes the CVE.
     pub aliases: Vec<String>,
+    /// When the source last changed the record, when it says.
+    pub modified: Option<Timestamp>,
     /// The full record as JSON.
     pub record: Box<RawValue>,
 }

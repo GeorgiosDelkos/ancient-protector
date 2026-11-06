@@ -44,7 +44,7 @@ use crate::findings::Finding;
 use crate::findings::Fix;
 use crate::findings::Issue;
 use crate::findings::Known;
-use crate::findings::Valid;
+use crate::findings::Subject;
 use crate::findings::Verdict;
 use crate::findings::is_forging;
 use crate::github;
@@ -52,6 +52,10 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::Lookup;
+use crate::lifecycle::Changes;
+use crate::lifecycle::Dismissal;
+use crate::lifecycle::Dismissals;
+use crate::lifecycle::FindingKey;
 use crate::paths::DataDir;
 use crate::server;
 
@@ -139,7 +143,10 @@ pub struct Report {
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
     /// Risky settings and files, most severe first.
-    pub issues: Vec<Issue>,
+    pub issues: Vec<ReportIssue>,
+    /// What changed since this target's last sweep with a verdict; `None` without a verdict
+    /// now or then.
+    pub changes: Option<Changes>,
     /// What could not be checked: failed sources, unknown products, tools not installed.
     pub problems: Vec<String>,
     /// Why the agent's verdict is missing, when it is.
@@ -160,6 +167,7 @@ impl Report {
             advisories: 0,
             findings: Vec::new(),
             issues: Vec::new(),
+            changes: None,
             problems: Vec::new(),
             failure: None,
             dir,
@@ -170,11 +178,29 @@ impl Report {
 /// A finding with the component it names spelled out.
 #[derive(Debug, Serialize)]
 pub struct ReportFinding {
+    /// Its key, the same in every sweep that finds it.
+    pub key: FindingKey,
     /// The agent's finding.
     #[serde(flatten)]
     pub finding: Finding,
     /// The affected component.
     pub installed: Component,
+    /// When the primary advisory was last modified, when its source says.
+    pub modified: Option<Timestamp>,
+    /// The user's dismissal, while it holds.
+    pub dismissed: Option<Dismissal>,
+}
+
+/// An issue with its key.
+#[derive(Debug, Serialize)]
+pub struct ReportIssue {
+    /// Its key, the same in every sweep that finds it.
+    pub key: FindingKey,
+    /// The agent's issue.
+    #[serde(flatten)]
+    pub issue: Issue,
+    /// The user's dismissal.
+    pub dismissed: Option<Dismissal>,
 }
 
 /// Sweeps this Mac and every repository in `config.repos`, one after the other, with the
@@ -213,8 +239,16 @@ pub fn sweep(
             None
         }
     };
+    let dismissals = Dismissals::load(data_dir).unwrap_or_else(|e| {
+        notes.push(format!(
+            "dismissals, so dismissed findings show again: {}",
+            error_chain(&e)
+        ));
+        Dismissals::default()
+    });
     let shared = Shared {
         data_dir,
+        dismissals: &dismissals,
         sources: Sources {
             feeds: &feeds,
             history: config.history,
@@ -244,6 +278,7 @@ pub fn sweep(
 #[derive(Debug)]
 struct Shared<'a> {
     data_dir: &'a DataDir,
+    dismissals: &'a Dismissals,
     sources: Sources<'a>,
     agent: AgentKind,
     located: &'a Located,
@@ -419,28 +454,152 @@ impl Shared<'_> {
             Ok(verdict) => (verdict, None),
             Err(failure) => (Verdict::default(), Some(plain(&failure))),
         };
-        let mut findings: Vec<ReportFinding> = verdict
-            .findings
-            .into_iter()
-            .map(|Valid { finding, component }| ReportFinding {
-                finding,
-                installed: collected.components[component].clone(),
+        let (findings, issues) =
+            self.keyed(&collected.target, &collected.components, verdict, &fetched);
+        let changes = if failure.is_some() {
+            None
+        } else {
+            let keys = || {
+                let findings = findings.iter().map(|f| (f.key, f.dismissed.is_some()));
+                findings.chain(issues.iter().map(|i| (i.key, i.dismissed.is_some())))
+            };
+            let all = keys().map(|(key, _)| key).collect();
+            let active = keys().filter(|(_, d)| !d).map(|(key, _)| key).collect();
+            let sweeps = self.data_dir.sweeps_dir();
+            Changes::since_last(&sweeps, &collected.dir_name, &active, &all).unwrap_or_else(|e| {
+                problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
+                None
             })
-            .collect();
-        findings.sort_by_key(|f| f.finding.severity);
-        let mut issues = verdict.issues;
-        issues.sort_by_key(|i| i.severity);
+        };
 
         let mut report = Report::new(started, collected.target, self.agent, dir.clone());
         report.components = collected.components.len();
         report.advisories = entries.len();
         report.findings = findings;
         report.issues = issues;
+        report.changes = changes;
         report.problems = problems.iter().map(|p| plain(p)).collect();
         report.failure = failure;
         save_report(&dir, &mut report);
         Ok(report)
     }
+
+    /// Keys the verdict's findings and issues, marks the dismissed ones, and sorts each list
+    /// most severe first.
+    fn keyed(
+        &self,
+        target: &str,
+        components: &[Component],
+        verdict: Verdict,
+        fetched: &[(Advisory, BTreeSet<usize>)],
+    ) -> (Vec<ReportFinding>, Vec<ReportIssue>) {
+        let modified: BTreeMap<&str, Option<Timestamp>> = fetched
+            .iter()
+            .map(|(a, _)| (a.id.as_str(), a.modified))
+            .collect();
+        let primaries: Vec<(&str, &Component)> = verdict
+            .findings
+            .iter()
+            .map(|v| (v.advisory.as_str(), &components[v.component]))
+            .collect();
+        let keys = finding_keys(target, &primaries);
+        let mut findings: Vec<ReportFinding> = verdict
+            .findings
+            .into_iter()
+            .zip(keys)
+            .map(|(valid, key)| {
+                let modified = modified.get(valid.advisory.as_str()).copied().flatten();
+                ReportFinding {
+                    key,
+                    finding: valid.finding,
+                    installed: components[valid.component].clone(),
+                    modified,
+                    dismissed: self.dismissals.get(key, modified).cloned(),
+                }
+            })
+            .collect();
+        findings.sort_by_key(|f| f.finding.severity);
+        let mut issues: Vec<ReportIssue> = verdict
+            .issues
+            .into_iter()
+            .map(|issue| {
+                // Data, not the `Display` text, so rewording that keeps every key.
+                let (kind, name) = match &issue.subject {
+                    Subject::Setting(key) => ("setting", key),
+                    Subject::File(path) => ("file", path),
+                };
+                let key = FindingKey::new(&[target, kind, name]);
+                ReportIssue {
+                    key,
+                    issue,
+                    dismissed: self.dismissals.get(key, None).cloned(),
+                }
+            })
+            .collect();
+        issues.sort_by_key(|i| i.issue.severity);
+        (findings, issues)
+    }
+}
+
+/// The key of each finding, given as its primary advisory and component: the target, the
+/// advisory, the component's lookup and where it was found. These parts come from data, not
+/// display text, so rewording a message keeps every key. An OS package is keyed by its source
+/// package alone: the binary packages built from it change with installs and renames
+/// (`libssl3` became `libssl3t64`) while the finding stays. Findings that would share a key
+/// (two versions of one package in one lockfile, both affected) get the version too, so each
+/// has its own; a fix of one then changes the other's key, which is accepted.
+fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey> {
+    let parts: Vec<[String; 3]> = findings
+        .iter()
+        .map(|(advisory, c)| {
+            let lookup = match &c.lookup {
+                Lookup::Package(p) => format!("{}:{}", p.ecosystem.osv_name(), p.name),
+                Lookup::Product(p) => format!("product:{p}"),
+            };
+            let found_in = match &c.found_in {
+                FoundIn::MacOs => "macos".to_owned(),
+                FoundIn::HomebrewFormula { name } => format!("homebrew_formula:{name}"),
+                FoundIn::HomebrewCask { token } => format!("homebrew_cask:{token}"),
+                FoundIn::Rustup { toolchain } => format!("rustup:{toolchain}"),
+                FoundIn::CargoInstall => "cargo_install".to_owned(),
+                FoundIn::Node => "node".to_owned(),
+                FoundIn::NpmGlobal => "npm_global".to_owned(),
+                FoundIn::Python => "python".to_owned(),
+                FoundIn::UvTool => "uv_tool".to_owned(),
+                FoundIn::Pipx => "pipx".to_owned(),
+                // A path that is not UTF-8 is spelled by its bytes: lossy text would give two
+                // such paths one key.
+                FoundIn::Lockfile { path } => match path.to_str() {
+                    Some(path) => format!("lockfile:{path}"),
+                    None => format!("lockfile-bytes:{:x?}", path.as_os_str().as_encoded_bytes()),
+                },
+                FoundIn::OsPackage { .. } => "os_package".to_owned(),
+                FoundIn::DependencyGraph { repo } => format!("dependency_graph:{repo}"),
+            };
+            [(*advisory).to_owned(), lookup, found_in]
+        })
+        .collect();
+    let mut counts: BTreeMap<&[String; 3], usize> = BTreeMap::new();
+    for p in &parts {
+        *counts.entry(p).or_default() += 1;
+    }
+    parts
+        .iter()
+        .zip(findings)
+        .map(|(p, (_, c))| {
+            let [advisory, lookup, found_in] = p;
+            let mut key = vec![
+                target,
+                advisory.as_str(),
+                lookup.as_str(),
+                found_in.as_str(),
+            ];
+            if counts[p] > 1 {
+                key.push(&c.version);
+            }
+            FindingKey::new(&key)
+        })
+        .collect()
 }
 
 /// Creates `<sweeps>/<start time>`, or `<start time>-2` and so on when an earlier sweep
@@ -772,7 +931,19 @@ pub fn report_markdown(report: &Report) -> String {
         report.target, report.started, report.agent, report.components, report.advisories
     );
     out.push_str(&headline(report));
-    for group in by_component(&report.findings) {
+    if let Some(changes) = &report.changes {
+        out.push_str(&format!(
+            "Since the sweep of {}: {} new, {} resolved.\n\n",
+            changes.since,
+            changes.new.len(),
+            changes.resolved.len()
+        ));
+    }
+    let (findings, dismissed_findings): (Vec<&ReportFinding>, Vec<&ReportFinding>) =
+        report.findings.iter().partition(|f| f.dismissed.is_none());
+    let (issues, dismissed_issues): (Vec<&ReportIssue>, Vec<&ReportIssue>) =
+        report.issues.iter().partition(|i| i.dismissed.is_none());
+    for group in by_component(&findings) {
         let first = group[0];
         let advisories = if group.len() == 1 {
             "1 advisory".to_owned()
@@ -787,14 +958,51 @@ pub fn report_markdown(report: &Report) -> String {
             escape(&first.installed.found_in.to_string()),
         ));
         for f in group {
-            out.push_str(&finding_markdown(&f.finding));
+            out.push_str(&finding_markdown(f.key, &f.finding));
         }
     }
-    if !report.issues.is_empty() {
+    if !issues.is_empty() {
         out.push_str("## Settings and files\n\n");
-        for issue in &report.issues {
-            out.push_str(&issue_markdown(issue));
+        for issue in issues {
+            out.push_str(&issue_markdown(issue.key, &issue.issue));
         }
+    }
+    let dismissed = dismissed_findings
+        .iter()
+        .map(|f| {
+            let what = format!(
+                "{} {} in {}",
+                f.finding.advisories.join(", "),
+                component_name(&f.installed),
+                f.installed.found_in
+            );
+            let reason = &f
+                .dismissed
+                .as_ref()
+                .expect("partitioned on dismissed")
+                .reason;
+            (f.key, f.finding.severity, what, reason)
+        })
+        .chain(dismissed_issues.iter().map(|i| {
+            let what = i.issue.subject.to_string();
+            let reason = &i
+                .dismissed
+                .as_ref()
+                .expect("partitioned on dismissed")
+                .reason;
+            (i.key, i.issue.severity, what, reason)
+        }));
+    let mut dismissed = dismissed.peekable();
+    if dismissed.peek().is_some() {
+        out.push_str("## Dismissed\n\n");
+        for (key, severity, what, reason) in dismissed {
+            out.push_str(&format!(
+                "- {severity} {} (key {key}): {}\n",
+                escape(&what),
+                escape(reason)
+            ));
+        }
+        out.push('\n');
     }
     if !report.problems.is_empty() {
         out.push_str("## Not checked\n\n");
@@ -810,7 +1018,8 @@ fn headline(report: &Report) -> String {
     if let Some(failure) = &report.failure {
         return format!("**No verdict:** {}\n\n", escape(failure));
     }
-    let nothing_found = report.findings.is_empty() && report.issues.is_empty();
+    let nothing_found = report.findings.iter().all(|f| f.dismissed.is_some())
+        && report.issues.iter().all(|i| i.dismissed.is_some());
     match (nothing_found, report.problems.is_empty()) {
         (true, true) => "Nothing affected or risky was found.\n\n".to_owned(),
         (true, false) => "Nothing affected or risky was found in what was checked; some things \
@@ -823,9 +1032,9 @@ fn headline(report: &Report) -> String {
 /// Groups findings by component (same lookup, version and place found), in the order of each
 /// group's first finding. Findings are sorted most severe first, so each group starts with its
 /// worst finding and the groups come worst first.
-fn by_component(findings: &[ReportFinding]) -> Vec<Vec<&ReportFinding>> {
+fn by_component<'a>(findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
     let mut groups: Vec<Vec<&ReportFinding>> = Vec::new();
-    for f in findings {
+    for &f in findings {
         let key = component_key(&f.installed);
         match groups
             .iter_mut()
@@ -847,14 +1056,14 @@ fn component_key(component: &Component) -> String {
     )
 }
 
-fn finding_markdown(finding: &Finding) -> String {
+fn finding_markdown(key: FindingKey, finding: &Finding) -> String {
     let exploited = if finding.known_exploited {
         ", known exploited"
     } else {
         ""
     };
     let mut out = format!(
-        "### {} {} ({}{exploited})\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
+        "### {} {} ({}{exploited})\n\nKey: {key}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
         finding.severity,
         escape(&finding.advisories.join(", ")),
         finding.confidence,
@@ -866,9 +1075,9 @@ fn finding_markdown(finding: &Finding) -> String {
     out
 }
 
-fn issue_markdown(issue: &Issue) -> String {
+fn issue_markdown(key: FindingKey, issue: &Issue) -> String {
     let mut out = format!(
-        "### {} {}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
+        "### {} {}\n\nKey: {key}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
         issue.severity,
         escape(&issue.subject.to_string()),
         escape(&issue.explanation),
@@ -1035,6 +1244,8 @@ pub enum SweepError {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::PermissionsExt as _;
 
     use serde_json::Value;
@@ -1044,6 +1255,8 @@ mod tests {
     use crate::feeds::Endpoints;
     use crate::feeds::test_server::Request;
     use crate::feeds::test_server::TestServer;
+    use crate::package::Ecosystem;
+    use crate::package::Package;
 
     fn component(lookup: &str, version: &str) -> Component {
         let lookup = if lookup.contains(':') {
@@ -1168,8 +1381,74 @@ mod tests {
         assert!(seen[1].contains("done: 1, total: 2"), "{seen:?}");
     }
 
+    #[test]
+    fn finding_keys_survive_upgrades_and_package_lists_but_not_collisions() {
+        let os = |version: &str, packages: &[&str]| Component {
+            found_in: FoundIn::OsPackage {
+                packages: packages.iter().map(|p| (*p).to_owned()).collect(),
+            },
+            lookup: Lookup::Package(Package {
+                ecosystem: Ecosystem::Debian { release: 12 },
+                name: "openssl".to_owned(),
+            }),
+            version: version.to_owned(),
+        };
+        let before = finding_keys("server:web", &[("DSA-1", &os("3.0.1", &["libssl3"]))]);
+        let after = finding_keys(
+            "server:web",
+            &[("DSA-1", &os("3.0.2", &["libssl3t64", "openssl"]))],
+        );
+        assert_eq!(
+            before, after,
+            "a version bump or a renamed binary package keeps the key"
+        );
+        assert_ne!(
+            before,
+            finding_keys("server:db", &[("DSA-1", &os("3.0.1", &[]))])
+        );
+        assert_ne!(
+            before,
+            finding_keys("server:web", &[("DSA-2", &os("3.0.1", &[]))])
+        );
+
+        let lock = |version: &str, path: &str| Component {
+            found_in: FoundIn::Lockfile {
+                path: PathBuf::from(path),
+            },
+            ..component("crates.io:syn", version)
+        };
+        let (one, two) = (
+            lock("1.0.109", "/p/Cargo.lock"),
+            lock("2.0.1", "/p/Cargo.lock"),
+        );
+        let keys = finding_keys("mac", &[("GHSA-1", &one), ("GHSA-1", &two)]);
+        assert_ne!(keys[0], keys[1], "two versions in one lockfile");
+        let other = lock("1.0.109", "/q/Cargo.lock");
+        let keys = finding_keys("mac", &[("GHSA-1", &one), ("GHSA-1", &other)]);
+        assert_ne!(keys[0], keys[1], "one version in two lockfiles");
+        assert_eq!(
+            keys[0],
+            finding_keys("mac", &[("GHSA-1", &one)])[0],
+            "no collision, no version"
+        );
+
+        // Not UTF-8, and differing only in bytes that lossy text would replace alike.
+        let raw = |bytes: &[u8]| Component {
+            found_in: FoundIn::Lockfile {
+                path: PathBuf::from(OsStr::from_bytes(bytes)),
+            },
+            ..component("crates.io:syn", "1.0.109")
+        };
+        let (ff, fe) = (raw(b"/p/\xff/Cargo.lock"), raw(b"/p/\xfe/Cargo.lock"));
+        let keys = finding_keys("mac", &[("GHSA-1", &ff), ("GHSA-1", &fe)]);
+        assert_ne!(keys[0], keys[1]);
+    }
+
     fn report_finding(id: &str, severity: &str, kev: bool, lookup: &str) -> ReportFinding {
         ReportFinding {
+            key: FindingKey::new(&[id, lookup]),
+            modified: None,
+            dismissed: None,
             finding: serde_json::from_value(json!({
                 "advisories": [id],
                 "component": "c1",
@@ -1195,6 +1474,7 @@ mod tests {
             advisories: 1,
             findings,
             issues: Vec::new(),
+            changes: None,
             problems: problems.iter().map(|p| (*p).to_owned()).collect(),
             failure: None,
             dir: PathBuf::from("/tmp/s"),
@@ -1247,13 +1527,20 @@ mod tests {
         }))
         .unwrap();
         let with_issue = Report {
-            issues: vec![issue],
+            issues: vec![ReportIssue {
+                key: FindingKey::new(&["issue"]),
+                issue,
+                dismissed: None,
+            }],
             ..report(vec![], &[])
         };
         let text = report_markdown(&with_issue);
         assert!(text.contains("## Settings and files\n\n"), "{text}");
         assert!(
-            text.contains("### medium setting default\\_branch\\_protection\n\nWhy: Anyone"),
+            text.contains(&format!(
+                "### medium setting default\\_branch\\_protection\n\nKey: {}\n\nWhy: Anyone",
+                FindingKey::new(&["issue"])
+            )),
             "{text}"
         );
         assert!(text.contains("```sh\ngh api -X PUT x\n```"), "{text}");
@@ -1502,10 +1789,10 @@ mod markdown_properties {
                 "fix": {"summary": summary, "steps": [], "commands": commands}
             }))
             .unwrap();
-            let text = finding_markdown(&finding);
+            let text = finding_markdown(FindingKey::new(&[]), &finding);
             let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
             prop_assert!(lines[0].starts_with("### low GHSA-1 (likely)"));
-            for (line, label) in lines[1..4].iter().zip(["Why:", "Evidence:", "Fix:"]) {
+            for (line, label) in lines[1..5].iter().zip(["Key:", "Why:", "Evidence:", "Fix:"]) {
                 prop_assert!(line.starts_with(label), "{:?}", line);
             }
 
@@ -1517,7 +1804,7 @@ mod markdown_properties {
                 .skip(2)
                 .collect();
             if commands.is_empty() {
-                prop_assert_eq!(lines.len(), 4, "{:?}", text);
+                prop_assert_eq!(lines.len(), 5, "{:?}", text);
             } else {
                 let fence = body[0].strip_suffix("sh").unwrap();
                 prop_assert!(fence.len() >= 3 && fence.bytes().all(|b| b == b'`'));
