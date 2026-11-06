@@ -122,6 +122,21 @@ pub(crate) fn collect(ssh: &str, server: &Server) -> Result<Collected, ServerErr
     read_answer(&output.stdout, &marker)
 }
 
+/// The ssh command a fix runs server commands with: `ssh`, the sweep's options and the
+/// destination. No word needs quoting for `sh`: the options are fixed, and the config allows
+/// only plain characters in hosts, users and identity paths (see `SshWord`).
+pub(crate) fn ssh_command_line(conn: &SshConn) -> String {
+    let (_, args) = ssh_args(conn);
+    for word in &args {
+        assert!(
+            word.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_=./:".contains(&b)),
+            "config validation keeps ssh words shell-safe: {word:?}"
+        );
+    }
+    format!("ssh {}", args.join(" "))
+}
+
 /// ssh's options for `conn`, ending with `--` and the destination, and the destination alone.
 fn ssh_args(conn: &SshConn) -> (String, Vec<String>) {
     let mut args: Vec<String> = [

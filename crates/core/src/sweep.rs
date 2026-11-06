@@ -62,10 +62,11 @@ use crate::server;
 /// Which built-in prompt a target uses. Each is copied to the data directory's `prompts/`
 /// folder on first use, so the user can edit it.
 #[derive(Debug, Clone, Copy)]
-enum Prompt {
+pub(crate) enum Prompt {
     Mac,
     GitHub,
     Server,
+    Fix,
 }
 
 impl Prompt {
@@ -74,6 +75,7 @@ impl Prompt {
             Self::Mac => "sweep.md",
             Self::GitHub => "sweep-github.md",
             Self::Server => "sweep-server.md",
+            Self::Fix => "fix.md",
         }
     }
 
@@ -82,6 +84,7 @@ impl Prompt {
             Self::Mac => include_str!("prompts/sweep.md"),
             Self::GitHub => include_str!("prompts/sweep-github.md"),
             Self::Server => include_str!("prompts/sweep-server.md"),
+            Self::Fix => include_str!("prompts/fix.md"),
         }
     }
 }
@@ -860,7 +863,7 @@ fn target_name(inventory: &Inventory) -> String {
 
 /// The user's copy of `kind`'s prompt, created from the built-in one on first use, with the
 /// target filled in.
-fn prompt(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<String, SweepError> {
+pub(crate) fn prompt(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<String, SweepError> {
     let dir = data_dir.prompts_dir();
     let path = dir.join(kind.file_name());
     let template = match fs::read_to_string(&path) {
@@ -1164,12 +1167,12 @@ fn error_chain(error: &impl std::error::Error) -> String {
 /// The file is never deleted: a sweep that deleted it could let the next one lock a new file of
 /// the same name while a third still holds the old one.
 #[derive(Debug)]
-struct Lock {
+pub(crate) struct Lock {
     _file: fs::File,
 }
 
 impl Lock {
-    fn acquire(sweeps: &Path) -> Result<Self, SweepError> {
+    pub(crate) fn acquire(sweeps: &Path) -> Result<Self, SweepError> {
         let path = sweeps.join(".lock");
         let write_err = |source| SweepError::Write {
             path: path.clone(),

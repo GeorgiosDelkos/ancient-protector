@@ -9,8 +9,8 @@
 //! gemini can write anywhere in the bundle, which is the app's own copy, and codex may run any
 //! command its sandbox allows; the app trusts nothing in the bundle but its own files and
 //! `findings.json`, which it validates. Fixes, which change the Mac after the user confirms them,
-//! are a separate run with full access. The flags per CLI are in the spec's "Agent adapters"
-//! table, with what was verified on this Mac.
+//! are a separate run with full access ([`AgentKind::run_fix`]). The flags per CLI are in the
+//! spec's "Agent adapters" table, with what was verified on this Mac.
 
 use std::env;
 use std::ffi::OsString;
@@ -171,6 +171,45 @@ impl AgentKind {
         command
     }
 
+    /// Builds the full-access fix command for `prompt`, run in `dir`: no permission prompts,
+    /// no sandbox. Only for a fix the user confirmed (spec, "Fix flow"). The flags were checked
+    /// on 2026-11-06 in each CLI's `--help` (codex, not installed here, in its CLI reference).
+    fn fix_command(self, located: &Located, dir: &Path, prompt: &str) -> Command {
+        let mut command = Command::new(&located.binary);
+        command.current_dir(dir).env("PATH", &located.path);
+        match self {
+            Self::Claude => {
+                command.args(["-p", prompt, "--permission-mode", "bypassPermissions"]);
+            }
+            Self::Grok => {
+                command.args([
+                    "-p",
+                    prompt,
+                    "--permission-mode",
+                    "bypassPermissions",
+                    "--cwd",
+                ]);
+                command.arg(dir);
+            }
+            Self::Codex => {
+                command.args([
+                    "exec",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--skip-git-repo-check",
+                ]);
+                command.arg("-C").arg(dir).arg(prompt);
+            }
+            Self::Gemini => {
+                command.args(["-p", prompt, "--approval-mode", "yolo", "--skip-trust"]);
+            }
+            Self::Opencode => {
+                command.args(["run", "--dangerously-skip-permissions", "--dir"]);
+                command.arg(dir).arg(prompt);
+            }
+        }
+        command
+    }
+
     /// Runs a restricted sweep in `bundle` with `prompt`, writing the agent's stdout and stderr
     /// to `log`, and waits for it. Returns its exit status: what a failure means depends on
     /// whether it wrote `findings.json`, which is the caller's to check. There is no time limit:
@@ -186,13 +225,33 @@ impl AgentKind {
         prompt: &str,
         log: &Path,
     ) -> Result<ExitStatus, AgentError> {
+        self.run_logged(self.sweep_command(located, bundle, prompt), log)
+    }
+
+    /// Runs a confirmed fix with full access in `dir`, like [`Self::run_sweep`]: output to
+    /// `log`, no time limit.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the log cannot be created or the agent cannot start.
+    pub(crate) fn run_fix(
+        self,
+        located: &Located,
+        dir: &Path,
+        prompt: &str,
+        log: &Path,
+    ) -> Result<ExitStatus, AgentError> {
+        self.run_logged(self.fix_command(located, dir, prompt), log)
+    }
+
+    fn run_logged(self, mut command: Command, log: &Path) -> Result<ExitStatus, AgentError> {
         let log_err = |source| AgentError::Log {
             path: log.to_owned(),
             source,
         };
         let out = fs::File::create(log).map_err(log_err)?;
         let err = out.try_clone().map_err(log_err)?;
-        self.sweep_command(located, bundle, prompt)
+        command
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err)
@@ -311,6 +370,62 @@ mod tests {
             let parsed: AgentKind = toml::Value::String(name.into()).try_into().unwrap();
             assert_eq!(parsed, kind);
             assert_eq!(kind.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn fixes_use_the_full_access_flags() {
+        let at = located(Path::new("/bin/x"));
+        let args = |kind: AgentKind| -> Vec<String> {
+            kind.fix_command(&at, Path::new("/f"), "P")
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let expected: [(AgentKind, &[&str]); 5] = [
+            (
+                AgentKind::Claude,
+                &["-p", "P", "--permission-mode", "bypassPermissions"],
+            ),
+            (
+                AgentKind::Grok,
+                &[
+                    "-p",
+                    "P",
+                    "--permission-mode",
+                    "bypassPermissions",
+                    "--cwd",
+                    "/f",
+                ],
+            ),
+            (
+                AgentKind::Codex,
+                &[
+                    "exec",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--skip-git-repo-check",
+                    "-C",
+                    "/f",
+                    "P",
+                ],
+            ),
+            (
+                AgentKind::Gemini,
+                &["-p", "P", "--approval-mode", "yolo", "--skip-trust"],
+            ),
+            (
+                AgentKind::Opencode,
+                &["run", "--dangerously-skip-permissions", "--dir", "/f", "P"],
+            ),
+        ];
+        for (kind, flags) in expected {
+            assert_eq!(args(kind), flags, "{kind}");
+            let command = kind.fix_command(&at, Path::new("/f"), "P");
+            assert_eq!(command.get_current_dir(), Some(Path::new("/f")));
+            let config = command
+                .get_envs()
+                .any(|(k, _)| k == "OPENCODE_CONFIG_CONTENT");
+            assert!(!config, "{kind}: no sweep permissions on a fix");
         }
     }
 

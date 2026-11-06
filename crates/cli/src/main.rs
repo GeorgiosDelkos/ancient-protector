@@ -12,13 +12,16 @@ use ancient_protector_core::Inventory;
 use ancient_protector_core::LoadConfigError;
 use ancient_protector_core::NvdAccess;
 use ancient_protector_core::OsvQuery;
+use ancient_protector_core::Outcome;
 use ancient_protector_core::Package;
 use ancient_protector_core::Product;
 use ancient_protector_core::Progress;
 use ancient_protector_core::Schedule;
 use ancient_protector_core::SshConn;
 use ancient_protector_core::dismiss;
+use ancient_protector_core::plan_fix;
 use ancient_protector_core::report_markdown;
+use ancient_protector_core::run_fix;
 use ancient_protector_core::sweep;
 use ancient_protector_core::undismiss;
 use anyhow::Context as _;
@@ -92,6 +95,18 @@ enum Command {
         /// The finding's key.
         key: FindingKey,
     },
+    /// Show the fix for a finding or issue, and run it with the chosen agent once confirmed.
+    ///
+    /// The agent gets full access: on this Mac it runs the commands, for a repository it
+    /// opens a pull request, for a server it runs them over ssh. Each run is recorded in the
+    /// data directory's state/fixes.jsonl.
+    Fix {
+        /// The finding's key, as shown in the report.
+        key: FindingKey,
+        /// Run without asking; for scripts that already showed the fix to the user.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -124,6 +139,10 @@ fn main() -> anyhow::Result<()> {
                 "dismissed {key}; it is left out of reports from the next sweep"
             ));
         }
+        Command::Fix { key, yes } => {
+            let config = load_config(&data_dir, &home()?)?;
+            fix(&data_dir, &config, key, yes)?;
+        }
         Command::Undismiss { key } => {
             undismiss(&data_dir, key)?;
             print(&format!("{key} shows again from the next sweep"));
@@ -144,6 +163,50 @@ fn run_sweep(data_dir: &DataDir, config: &Config) -> anyhow::Result<()> {
     }
     if !failures.is_empty() {
         anyhow::bail!("sweep incomplete: {}", failures.join("; "));
+    }
+    Ok(())
+}
+
+/// Shows the fix for `key`, asks to run it unless `yes`, and runs it.
+fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyhow::Result<()> {
+    let plan = plan_fix(data_dir, key)?;
+    let agent = config
+        .agent
+        .map_or("the agent".to_owned(), |a| a.to_string());
+    let mut text = format!("Fix {key} on {}: {}\n", plan.target(), plan.fix().summary);
+    for step in &plan.fix().steps {
+        text.push_str(&format!("  - {step}\n"));
+    }
+    for command in &plan.fix().commands {
+        text.push_str(&format!("  $ {command}\n"));
+    }
+    print(&text);
+    if !yes {
+        status(&format!(
+            "Run this fix now with {agent}, with full access? [y/N]"
+        ));
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .context("read the answer")?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            print("not run");
+            return Ok(());
+        }
+    }
+    let record = run_fix(data_dir, config, &plan)?;
+    print(&format!(
+        "{}: {}{}\n(log and files in {})",
+        record.outcome,
+        record.summary,
+        record
+            .pull_request
+            .as_ref()
+            .map_or(String::new(), |url| format!("\npull request: {url}")),
+        record.dir.display()
+    ));
+    if record.outcome != Outcome::Fixed {
+        anyhow::bail!("the fix did not finish: {}", record.outcome);
     }
     Ok(())
 }

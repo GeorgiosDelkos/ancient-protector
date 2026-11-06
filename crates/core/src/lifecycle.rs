@@ -160,11 +160,10 @@ pub fn undismiss(data_dir: &DataDir, key: FindingKey) -> Result<Dismissal, State
     })
 }
 
-/// Changes the dismissals under `state/.lock` and writes them back whole, unless `change`
-/// fails. Returns what `change` returned.
-fn update<T>(
+/// Runs `change` holding `state/.lock`, which every write to the state folder takes.
+pub(crate) fn locked<T>(
     data_dir: &DataDir,
-    change: impl FnOnce(&mut BTreeMap<FindingKey, Dismissal>) -> Result<T, StateError>,
+    change: impl FnOnce(&Path) -> Result<T, StateError>,
 ) -> Result<T, StateError> {
     let state = data_dir.state_dir();
     let write_err = |path: &Path| {
@@ -179,9 +178,28 @@ fn update<T>(
         .write(true)
         .open(&lock_path)
         .map_err(write_err(&lock_path))?;
-    // Blocks: the other holder is a dismiss or undismiss command, which takes milliseconds.
+    // Blocks: every holder writes one small file and lets go within milliseconds.
     lock.lock().map_err(write_err(&lock_path))?;
+    change(&state)
+}
 
+/// Changes the dismissals under `state/.lock` and writes them back whole, unless `change`
+/// fails. Returns what `change` returned.
+fn update<T>(
+    data_dir: &DataDir,
+    change: impl FnOnce(&mut BTreeMap<FindingKey, Dismissal>) -> Result<T, StateError>,
+) -> Result<T, StateError> {
+    locked(data_dir, |state| write_dismissals(state, change))
+}
+
+fn write_dismissals<T>(
+    state: &Path,
+    change: impl FnOnce(&mut BTreeMap<FindingKey, Dismissal>) -> Result<T, StateError>,
+) -> Result<T, StateError> {
+    let write_err = |path: &Path| {
+        let path = path.to_owned();
+        move |source| StateError::Write { path, source }
+    };
     let path = state.join(DISMISSALS);
     let mut all = read_dismissals(&path)?;
     let changed = change(&mut all)?;
@@ -195,7 +213,7 @@ fn update<T>(
         })
         .and_then(|()| fs::rename(&partial, &path))
         // Syncs the folder too, so a crash after this returns cannot undo the rename.
-        .and_then(|()| fs::File::open(&state)?.sync_all())
+        .and_then(|()| fs::File::open(state)?.sync_all())
         .map_err(write_err(&path))?;
     Ok(changed)
 }
@@ -268,7 +286,7 @@ struct Saved {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-struct SavedEntry {
+pub(crate) struct SavedEntry {
     key: FindingKey,
     #[serde(default)]
     modified: Option<Timestamp>,
@@ -349,13 +367,21 @@ fn folders(dir: &Path) -> Result<Vec<PathBuf>, StateError> {
 
 /// The entry for `key` in the newest report that has it.
 fn newest(sweeps: &Path, key: FindingKey) -> Result<Option<SavedEntry>, StateError> {
+    Ok(newest_report(sweeps, key)?.map(|(_, entry)| entry))
+}
+
+/// The newest `report.json` that has `key`, and its entry.
+pub(crate) fn newest_report(
+    sweeps: &Path,
+    key: FindingKey,
+) -> Result<Option<(PathBuf, SavedEntry)>, StateError> {
     for sweep in newest_first(sweeps)? {
         for target in folders(&sweep)? {
             let Some(saved) = read_saved(&target)? else {
                 continue;
             };
             if let Some(entry) = saved.entries().find(|e| e.key == key) {
-                return Ok(Some(*entry));
+                return Ok(Some((target.join("report.json"), *entry)));
             }
         }
     }
