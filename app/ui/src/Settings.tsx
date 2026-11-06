@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import { For, Match, Show, Switch, createMemo, createResource, createSignal } from "solid-js";
 
+import { Icon } from "./icons.tsx";
 import {
   AGENT_NAMES,
   homeOf,
@@ -12,8 +12,6 @@ import {
   type SettingsData,
   type Setting,
 } from "./settings.ts";
-
-type Section = "agent" | "schedule" | "mac" | "github" | "servers" | "nvd";
 
 const SECTIONS: readonly [Section, string][] = [
   ["agent", "Agent"],
@@ -37,9 +35,12 @@ const TOOL_NAMES: Readonly<Record<string, string>> = {
   ssh: "ssh",
 };
 
-export function Settings() {
+export type Section = "agent" | "schedule" | "mac" | "github" | "servers" | "nvd";
+
+/** Settings inside the popover: a list of sections, each opening on its own with Back. */
+export function Settings(props: { start: Section | null; onClose: () => void }) {
   const [data, { refetch }] = createResource(() => invoke<SettingsData>("settings_data"));
-  const [section, setSection] = createSignal<Section>("agent");
+  const [section, setSection] = createSignal<Section | null>(props.start);
   const [error, setError] = createSignal<string | null>(null);
   const [saved, setSaved] = createSignal(false);
 
@@ -53,101 +54,113 @@ export function Settings() {
       })
       .catch((e: unknown) => setError(String(e)));
   };
+  const title = () => SECTIONS.find(([id]) => id === section())?.[1] ?? "Settings";
 
   return (
-    <div class="settings">
-      <nav class="sidebar" aria-label="Sections">
-        <div class="drag" data-tauri-drag-region />
-        <For each={SECTIONS}>
-          {([id, label]) => (
-            <button
-              type="button"
-              class={section() === id ? "on" : ""}
-              aria-current={section() === id ? "page" : undefined}
-              onClick={() => setSection(id)}
-            >
-              <span class={`sicon ${id}`} aria-hidden="true">
-                {label.slice(0, 1)}
-              </span>
-              {label}
-              <Show when={data()}>{(d) => <Badge section={id} data={d()} />}</Show>
-            </button>
-          )}
-        </For>
-      </nav>
-      <main class="pane">
-        <div class="drag" data-tauri-drag-region />
-        <Show when={error()}>{(e) => <p class="banner bad">{e()}</p>}</Show>
-        <Show when={data()} fallback={<p class="quiet">Looking at what this Mac has…</p>}>
-          {(d) => (
-            <Show
-              when={d().config}
-              fallback={
-                <p class="banner bad">
-                  {d().problem} Fix config.toml by hand, or delete it to start from the default.
-                </p>
-              }
-            >
-              {(config) => (
-                <Switch>
-                  <Match when={section() === "agent"}>
-                    <Agent data={d()} config={config()} save={save} />
-                  </Match>
-                  <Match when={section() === "schedule"}>
-                    <ScheduleSection config={config()} save={save} />
-                  </Match>
-                  <Match when={section() === "mac"}>
-                    <Mac data={d()} config={config()} save={save} onError={setError} />
-                  </Match>
-                  <Match when={section() === "github"}>
-                    <GitHub data={d()} config={config()} save={save} />
-                  </Match>
-                  <Match when={section() === "servers"}>
-                    <Servers data={d()} config={config()} save={save} />
-                  </Match>
-                  <Match when={section() === "nvd"}>
-                    <Nvd data={d()} onSaved={() => void refetch()} onError={setError} />
-                  </Match>
-                </Switch>
-              )}
-            </Show>
-          )}
+    <section class="settings-view">
+      <div class="nav">
+        <button
+          type="button"
+          class="back"
+          onClick={() => (section() === null ? props.onClose() : setSection(null))}
+        >
+          <Icon name="chev" />
+          {section() === null ? "Done" : "Settings"}
+        </button>
+        <span class="navtitle">{title()}</span>
+        <Show when={saved()} fallback={<span class="navside" />}>
+          <span class="navside savedtag">Saved</span>
         </Show>
-        <footer class="sfoot">
-          <span class="path">{data()?.path ?? ""}</span>
-          <Show when={saved()}>
-            <span class="savedtag">Saved</span>
+      </div>
+      <Show when={error()}>{(e) => <p class="banner bad">{e()}</p>}</Show>
+      <Show when={data()} fallback={<p class="quiet">Looking at what this Mac has…</p>}>
+        {(d) => (
+          <Show
+            when={d().config}
+            fallback={
+              <p class="banner bad">
+                {d().problem} Fix config.toml by hand, or delete it to start from the default.
+              </p>
+            }
+          >
+            {(config) => (
+              <Switch>
+                <Match when={section() === null}>
+                  <div class="group list">
+                    <For each={SECTIONS}>
+                      {([id, label]) => (
+                        <button type="button" class="srow nav-row" onClick={() => setSection(id)}>
+                          <span class={`sicon ${id}`} aria-hidden="true">
+                            {label.slice(0, 1)}
+                          </span>
+                          <span class="t">{label}</span>
+                          <span class="sum">
+                            <Summary section={id} data={d()} config={config()} />
+                            <Icon name="chev" />
+                          </span>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <p class="note">
+                    Saved to config.toml as you change it.{" "}
+                    <button type="button" class="link" onClick={() => void invoke("open_config")}>
+                      Open config.toml
+                    </button>
+                  </p>
+                </Match>
+                <Match when={section() === "agent"}>
+                  <Agent data={d()} config={config()} save={save} />
+                </Match>
+                <Match when={section() === "schedule"}>
+                  <ScheduleSection config={config()} save={save} />
+                </Match>
+                <Match when={section() === "mac"}>
+                  <Mac data={d()} config={config()} save={save} onError={setError} />
+                </Match>
+                <Match when={section() === "github"}>
+                  <GitHub data={d()} config={config()} save={save} />
+                </Match>
+                <Match when={section() === "servers"}>
+                  <Servers data={d()} config={config()} save={save} />
+                </Match>
+                <Match when={section() === "nvd"}>
+                  <Nvd data={d()} onSaved={() => void refetch()} onError={setError} />
+                </Match>
+              </Switch>
+            )}
           </Show>
-          <button type="button" class="btn small" onClick={() => void invoke("open_config")}>
-            Open config.toml
-          </button>
-        </footer>
-      </main>
-    </div>
+        )}
+      </Show>
+    </section>
   );
 }
 
-function Badge(props: { section: Section; data: SettingsData }) {
-  const config = () => props.data.config;
-  const count = (): number | null => {
+/** `n` with the right word: "1 folder", "2 folders". */
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** The value shown beside a section in the list. */
+function Summary(props: { section: Section; data: SettingsData; config: Current }) {
+  const text = (): [string, string] => {
+    const c = props.config;
     switch (props.section) {
+      case "agent":
+        return c.agent === null ? ["Choose one", "warn"] : [AGENT_NAMES[c.agent] ?? c.agent, ""];
+      case "schedule":
+        return [c.every_hours === null ? "Manual" : `Every ${c.every_hours} h`, ""];
       case "mac":
-        return config()?.project_dirs.length ?? null;
+        return [count(c.project_dirs.length, "folder", "folders"), ""];
       case "github":
-        return config()?.repos.length ?? null;
+        return [count(c.repos.length, "repository", "repositories"), ""];
       case "servers":
-        return config()?.servers.length ?? null;
-      default:
-        return null;
+        return [count(c.servers.length, "server", "servers"), ""];
+      case "nvd":
+        return props.data.detected.nvd_key ? ["In Keychain", ""] : ["Not set", "warn"];
     }
   };
-  if (props.section === "agent") {
-    return <span class={`sdot ${config()?.agent ? "ok" : "warn"}`} />;
-  }
-  if (props.section === "nvd") {
-    return <span class={`sdot ${props.data.detected.nvd_key ? "ok" : "warn"}`} />;
-  }
-  return <Show when={count()}>{(n) => <span class="count">{n()}</span>}</Show>;
+  return <span class={text()[1]}>{text()[0]}</span>;
 }
 
 type Props = { data: SettingsData; config: Current; save: (setting: Setting) => void };
@@ -155,9 +168,7 @@ type Props = { data: SettingsData; config: Current; save: (setting: Setting) => 
 function Agent(props: Props) {
   return (
     <section class="section">
-      <h1>
-        Agent <small>runs sweeps and, after you confirm, fixes</small>
-      </h1>
+      <p class="lead">runs sweeps and, after you confirm, fixes</p>
       <div class="group">
         <For each={props.data.detected.agents}>
           {(agent) => {
@@ -199,7 +210,6 @@ function ScheduleSection(props: { config: Current; save: (setting: Setting) => v
   const all = () => props.config.since === "all";
   return (
     <section class="section">
-      <h1>Schedule</h1>
       <div class="line">
         <span class="seg">
           <button
@@ -275,9 +285,9 @@ function Mac(props: Props & { onError: (e: string) => void }) {
     props.data.detected.folders.map((f) => tilde(f, home())).filter((f) => !dirs().includes(f));
   const setDirs = (next: string[]) => props.save({ kind: "project_dirs", dirs: next });
   const pick = () => {
-    open({ directory: true, multiple: false })
+    invoke<string | null>("pick_folder")
       .then((picked) => {
-        if (typeof picked === "string") {
+        if (picked !== null) {
           setDirs(toggled(dirs(), tilde(picked, home())));
         }
       })
@@ -285,9 +295,7 @@ function Mac(props: Props & { onError: (e: string) => void }) {
   };
   return (
     <section class="section">
-      <h1>
-        This Mac <small>folders searched for lockfiles</small>
-      </h1>
+      <p class="lead">folders searched for lockfiles</p>
       <Show when={dirs().length > 0 || suggested().length > 0}>
         <div class="group">
           <For each={dirs()}>
@@ -349,15 +357,24 @@ function GitHub(props: Props) {
   const setRepos = (next: string[]) => props.save({ kind: "repos", repos: next });
   return (
     <section class="section">
-      <h1>
-        GitHub
+      <div class="status-line">
         <Show
           when={props.data.detected.gh_login}
-          fallback={<span class="state warn right">gh not logged in</span>}
+          fallback={
+            <>
+              <span class="lead">Run gh auth login in a terminal to list your repositories.</span>
+              <span class="state warn right">gh not logged in</span>
+            </>
+          }
         >
-          {(login) => <small>gh as {login()}</small>}
+          {(login) => (
+            <>
+              <span class="lead">Your repositories, with your gh login {login()}.</span>
+              <span class="state ok right">gh ready</span>
+            </>
+          )}
         </Show>
-      </h1>
+      </div>
       <div class="group scroll">
         <For each={extra()}>
           {(repo) => (
@@ -421,9 +438,7 @@ function Servers(props: Props) {
   const hosts = () => props.data.detected.ssh_hosts.filter((h) => !configured().has(h.alias));
   return (
     <section class="section">
-      <h1>
-        Servers <small>read over SSH with a fixed, read-only script</small>
-      </h1>
+      <p class="lead">read over SSH with a fixed, read-only script</p>
       <div class="group scroll">
         <For each={props.config.servers}>
           {(server) => (
@@ -488,15 +503,15 @@ function Nvd(props: { data: SettingsData; onSaved: () => void; onError: (e: stri
   const [key, setKey] = createSignal("");
   return (
     <section class="section">
-      <h1>
-        NVD API key <small>optional</small>
+      <div class="status-line">
+        <span class="lead">Optional, and free from nvd.nist.gov.</span>
         <span class={`state right ${props.data.detected.nvd_key ? "ok" : "warn"}`}>
           {props.data.detected.nvd_key ? "In Keychain" : "Not set"}
         </span>
-      </h1>
+      </div>
       <p class="lead">
         Without a key, NVD allows 5 requests per 30 seconds, so a first sweep of a Mac with many
-        Homebrew formulae takes several minutes. A free key from nvd.nist.gov raises that to 50.
+        Homebrew formulae takes several minutes. A key raises that to 50.
       </p>
       <form
         class="line"

@@ -1,50 +1,33 @@
-/* The settings window: the popover's Obsidian tokens (style.css), a narrow sidebar and one
-   section at a time, sized for a compact 640 by 460 window. The title bar is an overlay, so
-   the top strip of each column is a drag region and the sidebar clears the traffic lights. */
-.in-settings .pop {
-  display: none;
-}
-.settings {
-  height: 100%;
-  display: grid;
-  grid-template-columns: 168px minmax(0, 1fr);
-  background: var(--tint);
-}
-.drag {
-  height: 28px;
-  flex: none;
-}
-.sidebar {
+/* Settings inside the popover, on the same Obsidian tokens as style.css: a nav bar with Back
+   and the section's title, the sections as one grouped list with their current value, and
+   each section on its own below the nav. Sized for the 360 pixel popover. */
+.settings-view {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 10px 8px;
-  background: rgba(0, 0, 0, 0.16);
-  border-right: 0.5px solid var(--hair);
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
 }
-.sidebar button {
-  display: flex;
+.settings-view .nav {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 9px;
-  border: 0;
-  background: none;
-  padding: 6px 9px;
-  border-radius: 7px;
-  color: var(--l2);
-  font-size: 13px;
-  text-align: left;
+  padding: 2px 4px 0;
 }
-.sidebar button:hover {
-  color: var(--l1);
+.navtitle {
+  font: 600 13px/1 var(--ui);
 }
-.sidebar button.on {
-  background: rgba(255, 255, 255, 0.12);
-  color: var(--l1);
+.navside {
+  justify-self: end;
+  font-size: 11.5px;
+}
+.savedtag {
+  color: var(--ok);
 }
 .sicon {
-  width: 20px;
-  height: 20px;
-  border-radius: 5px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   display: grid;
   place-items: center;
   font: 700 11px/1 var(--ui);
@@ -69,79 +52,7 @@
 .sicon.nvd {
   background: #b8642a;
 }
-.sdot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  margin-left: auto;
-}
-.sdot.ok {
-  background: var(--ok);
-}
-.sdot.warn {
-  background: var(--medium);
-}
-.count {
-  margin-left: auto;
-  font-size: 10.5px;
-  color: var(--l3);
-  font-variant-numeric: tabular-nums;
-}
 
-.pane {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 0 18px 10px;
-}
-.pane > .banner {
-  margin-bottom: 8px;
-}
-.section {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-height: 0;
-  flex: 1;
-  overflow-y: auto;
-  padding-bottom: 8px;
-}
-.section h1 {
-  margin: 0;
-  font: 600 15px/1.2 var(--ui);
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.section h1 small {
-  font-weight: 400;
-  font-size: 12px;
-  color: var(--l3);
-}
-.section h2 {
-  margin: 6px 0 0;
-  font: 600 12.5px/1.2 var(--ui);
-  color: var(--l2);
-}
-.lead {
-  margin: 0;
-  font-size: 12px;
-  color: var(--l2);
-  max-width: 60ch;
-}
-.note {
-  margin: 0;
-  font-size: 11.5px;
-  color: var(--l3);
-}
-.right {
-  margin-left: auto;
-}
-.group.scroll {
-  overflow-y: auto;
-  max-height: 250px;
-  flex: none;
-}
 .srow {
   position: relative;
   display: grid;
@@ -149,11 +60,14 @@
   gap: 10px;
   align-items: center;
   width: 100%;
-  padding: 8px 12px;
+  padding: 8px 11px;
   border: 0;
   background: transparent;
   text-align: left;
-  font-size: 13px;
+  font-size: 12.5px;
+}
+.srow.nav-row {
+  grid-template-columns: 22px minmax(0, 1fr) auto;
 }
 .srow + .srow::before {
   content: "";
@@ -163,6 +77,9 @@
   right: 0;
   height: 0.5px;
   background: var(--hair);
+}
+.srow.nav-row + .srow.nav-row::before {
+  left: 43px;
 }
 button.srow:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.05);
@@ -174,9 +91,57 @@ button.srow:hover:not(:disabled) {
   font-weight: 500;
 }
 .srow .s {
-  font: 11px/1.3 var(--mono);
+  font: 10.5px/1.3 var(--mono);
   color: var(--l3);
   overflow-wrap: anywhere;
+}
+.sum {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--l3);
+  font-size: 12px;
+}
+.sum .warn {
+  color: var(--medium);
+}
+.sum .icon {
+  width: 12px;
+  height: 12px;
+  transform: rotate(180deg);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.section h2 {
+  margin: 4px 0 0;
+  font: 600 12px/1.2 var(--ui);
+  color: var(--l2);
+}
+.lead {
+  margin: 0;
+  font-size: 12px;
+  color: var(--l2);
+}
+.note {
+  margin: 0 4px;
+  font-size: 11.5px;
+  color: var(--l3);
+}
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.right {
+  margin-left: auto;
+}
+.group.scroll {
+  overflow-y: auto;
+  max-height: 300px;
 }
 .radio {
   width: 16px;
@@ -208,7 +173,7 @@ button.srow:hover:not(:disabled) {
   transform: rotate(-45deg) translate(1px, -1px);
 }
 .state {
-  font: 600 11px/1 var(--ui);
+  font: 600 10.5px/1 var(--ui);
   padding: 3px 7px;
   border-radius: 999px;
   white-space: nowrap;
@@ -238,11 +203,17 @@ button.srow:hover:not(:disabled) {
 .dim {
   color: var(--l2);
 }
-.seg button {
+.seg.inline {
+  display: inline-grid;
+}
+.section .seg {
+  display: inline-grid;
+}
+.section .seg button {
   font-size: 12px;
   padding: 5px 11px;
 }
-.seg button.on {
+.section .seg button.on {
   background: rgba(255, 255, 255, 0.13);
   color: var(--l1);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
@@ -258,7 +229,7 @@ button.srow:hover:not(:disabled) {
   user-select: text;
 }
 .field.num {
-  width: 64px;
+  width: 60px;
   font-variant-numeric: tabular-nums;
 }
 .field.grow {
@@ -271,6 +242,13 @@ button.srow:hover:not(:disabled) {
 .btn.small {
   padding: 4px 8px;
   font-size: 11.5px;
+}
+.link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--run);
+  font-size: inherit;
 }
 .tools {
   display: flex;
@@ -298,24 +276,4 @@ button.srow:hover:not(:disabled) {
 }
 .tool.no i {
   background: var(--l4);
-}
-.sfoot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding-top: 8px;
-  border-top: 0.5px solid var(--hair);
-  font-size: 11px;
-  color: var(--l3);
-}
-.sfoot .path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono);
-}
-.savedtag {
-  color: var(--ok);
 }

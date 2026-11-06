@@ -59,7 +59,7 @@ fn main() {
             settings::settings_data,
             settings::save,
             settings::set_nvd_key,
-            settings::open_settings
+            settings::pick_folder
         ])
         .setup(|app| {
             // A menu-bar app: no Dock icon and no app menu (LSUIElement).
@@ -69,10 +69,8 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // The popover closes when it loses focus, like a menu; settings is a window.
-            if window.label() == tray::POPOVER
-                && let WindowEvent::Focused(false) = event
-            {
+            // The popover closes when it loses focus, like a menu.
+            if let WindowEvent::Focused(false) = event {
                 tray::hide_on_blur(window);
             }
         })
@@ -105,7 +103,7 @@ struct Overview {
 fn overview(runner: State<'_, Runner>) -> Overview {
     let status = runner.status();
     let config_path = runner.data_dir().config_file();
-    let config = match Config::load(&config_path, runner.home()) {
+    let config = match Config::load_or_default(&config_path, runner.home()) {
         Ok(config) => config,
         Err(e) => {
             return Overview {
@@ -199,8 +197,8 @@ fn fix_preview(runner: State<'_, Runner>, key: String) -> Result<FixPreview, Str
     let key: FindingKey = key
         .parse()
         .map_err(|e: ParseFindingKeyError| e.to_string())?;
-    let config =
-        Config::load(&runner.data_dir().config_file(), runner.home()).map_err(|e| e.to_string())?;
+    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+        .map_err(|e| e.to_string())?;
     let plan = plan_fix(runner.data_dir(), &config, key).map_err(|e| e.to_string())?;
     Ok(FixPreview {
         destination: plan.destination().to_owned(),

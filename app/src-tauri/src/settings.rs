@@ -1,7 +1,9 @@
-//! The settings window: what the Mac has, what the config says, and changes to it.
+//! Settings, shown inside the popover: what the Mac has, what the config says, and changes
+//! to it.
 //!
 //! Detection and config edits are the core's (`detect`, `save_setting`); this module turns
-//! them into commands and opens the window. The commands marked `async` are plain blocking
+//! them into commands. A missing config reads as the default one, which the first change
+//! writes. The commands marked `async` are plain blocking
 //! functions that Tauri runs off the main thread, since detection runs the login shell and
 //! `gh`; none of them is a future.
 
@@ -20,20 +22,13 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Manager as _;
 use tauri::State;
-use tauri::TitleBarStyle;
-use tauri::WebviewUrl;
-use tauri::WebviewWindowBuilder;
-use tauri::window::Effect;
-use tauri::window::EffectState;
-use tauri::window::EffectsBuilder;
+use tauri_plugin_dialog::DialogExt as _;
 
 use crate::runner;
 use crate::runner::Runner;
+use crate::tray;
 
-/// The window's label.
-const WINDOW: &str = "settings";
-
-/// What the settings window shows.
+/// What the settings view shows.
 #[derive(Debug, Serialize)]
 pub(crate) struct SettingsData {
     detected: Detected,
@@ -45,7 +40,7 @@ pub(crate) struct SettingsData {
     path: PathBuf,
 }
 
-/// The config's values, as the window shows them.
+/// The config's values, as the settings view shows them.
 #[derive(Debug, Serialize)]
 struct Current {
     agent: Option<String>,
@@ -111,7 +106,7 @@ impl ServerView {
 )]
 pub(crate) fn settings_data(runner: State<'_, Runner>) -> SettingsData {
     let path = runner.data_dir().config_file();
-    let (config, problem) = match Config::load(&path, runner.home()) {
+    let (config, problem) = match Config::load_or_default(&path, runner.home()) {
         Ok(config) => (Some(Current::of(&config)), None),
         Err(e) => (None, Some(error_chain(&e))),
     };
@@ -146,35 +141,20 @@ pub(crate) fn set_nvd_key(key: String) -> Result<(), String> {
     NvdAccess::save_to_keychain(&key).map_err(|e| e.to_string())
 }
 
-/// Shows the settings window, creating it the first time.
-#[tauri::command]
+/// Lets the user pick a folder, keeping the popover open while the system's picker has the
+/// focus. `None` when the user cancels.
+#[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
-pub(crate) fn open_settings(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(WINDOW) {
-        window.show().map_err(|e| e.to_string())?;
-        return window.set_focus().map_err(|e| e.to_string());
-    }
-    let effects = EffectsBuilder::new()
-        .effect(Effect::HudWindow)
-        .state(EffectState::Active)
-        .build();
-    // Compact on purpose (the owner asked for a small window): a sidebar and one section.
-    let url = WebviewUrl::App("index.html#settings".into());
-    let window = WebviewWindowBuilder::new(&app, WINDOW, url)
-        .title("Ancient Protector Settings")
-        .inner_size(640.0, 460.0)
-        .resizable(false)
-        .transparent(true)
-        .title_bar_style(TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .effects(effects)
-        .center()
-        .build()
-        .map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())
+pub(crate) fn pick_folder(app: AppHandle) -> Option<PathBuf> {
+    let _held = tray::hold_popover(&app);
+    app.dialog()
+        .file()
+        .set_title("Add a folder to search for lockfiles")
+        .blocking_pick_folder()
+        .and_then(|picked| picked.into_path().ok())
 }
 
 /// An error and its sources as one line, `outer: inner`.

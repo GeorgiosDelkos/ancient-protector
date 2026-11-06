@@ -4,6 +4,8 @@
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -13,6 +15,7 @@ use ancient_protector_core::latest;
 use tauri::AppHandle;
 use tauri::Emitter as _;
 use tauri::Manager as _;
+use tauri::State;
 use tauri::Window;
 use tauri::image::Image;
 use tauri::tray::MouseButton;
@@ -26,7 +29,7 @@ use crate::runner::Runner;
 use crate::runner::Status;
 
 const TRAY_ID: &str = "main";
-pub(crate) const POPOVER: &str = "popover";
+const POPOVER: &str = "popover";
 
 /// How soon after the popover hid on losing focus a tray click counts as the same gesture.
 /// Clicking the icon while the popover is open first takes focus from it, which hides it,
@@ -34,10 +37,33 @@ pub(crate) const POPOVER: &str = "popover";
 /// between the two events, shorter than a deliberate second click.
 const CLICK_AFTER_BLUR: Duration = Duration::from_millis(300);
 
-/// When the popover last hid because it lost focus.
+/// When the popover last hid because it lost focus, and whether it is held open.
 #[derive(Debug, Default)]
 pub(crate) struct Popover {
     hidden_on_blur: Mutex<Option<Instant>>,
+    /// Set while a system dialog the popover opened (the folder picker) has the focus, which
+    /// would otherwise hide the popover and the view that asked for it.
+    held: AtomicBool,
+}
+
+/// Holds the popover open until dropped.
+#[derive(Debug)]
+pub(crate) struct Held<'a> {
+    popover: State<'a, Popover>,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        // Relaxed: the flag guards no other data; the next blur reads whatever is set by then.
+        self.popover.held.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Keeps the popover open while the result lives, as a system dialog takes the focus.
+pub(crate) fn hold_popover(app: &AppHandle) -> Held<'_> {
+    let popover = app.state::<Popover>();
+    popover.held.store(true, Ordering::Relaxed);
+    Held { popover }
 }
 
 impl Popover {
@@ -51,7 +77,11 @@ impl Popover {
 
 /// Hides the popover because it lost focus, as a menu closes.
 pub(crate) fn hide_on_blur(window: &Window) {
-    *window.state::<Popover>().last_blur() = Some(Instant::now());
+    let popover = window.state::<Popover>();
+    if popover.held.load(Ordering::Relaxed) {
+        return;
+    }
+    *popover.last_blur() = Some(Instant::now());
     // Best effort: a window that will not hide stays until the next click.
     drop(window.hide());
 }
@@ -136,7 +166,8 @@ fn look(app: &AppHandle) -> Look {
         Status::Failed { .. } => return Look::Failed,
         Status::Idle => {}
     }
-    let Ok(config) = Config::load(&runner.data_dir().config_file(), runner.home()) else {
+    let Ok(config) = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+    else {
         return Look::Failed;
     };
     let Ok(targets) = latest(runner.data_dir(), &config) else {

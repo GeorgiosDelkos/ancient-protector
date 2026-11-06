@@ -14,6 +14,7 @@ import {
 } from "solid-js";
 
 import type { FixDone, FixPreview, Overview, Status, Target } from "./overview.ts";
+import { Settings, type Section } from "./Settings.tsx";
 import { Glyph, Icon } from "./icons.tsx";
 import {
   SEVERITIES,
@@ -37,6 +38,8 @@ export function App() {
   const [selected, setSelected] = createSignal<string | null>(null);
   const [done, setDone] = createSignal<FixDone | null>(null);
   const [error, setError] = createSignal<string | null>(null);
+  // Settings open in the popover, at a section or at the list; `undefined` when closed.
+  const [settings, setSettings] = createSignal<Section | null | undefined>(undefined);
 
   // Registered synchronously, so Solid runs the cleanups; the listeners resolve later.
   const unlisten: Promise<() => void>[] = [
@@ -81,6 +84,15 @@ export function App() {
       <Show when={overview()} fallback={<p class="quiet">Reading the last sweep…</p>}>
         {(o) => (
           <Switch>
+            <Match when={settings() !== undefined}>
+              <Settings
+                start={settings() ?? null}
+                onClose={() => {
+                  setSettings(undefined);
+                  void refetch();
+                }}
+              />
+            </Match>
             <Match when={chosen()}>
               {(item) => (
                 <Detail
@@ -96,7 +108,20 @@ export function App() {
               <Busy status={o().status} now={now()} />
             </Match>
             <Match when={o().problem !== null && o().targets.length === 0}>
-              <Problem text={o().problem ?? ""} onEdit={() => run(() => invoke("open_settings"))} />
+              <Problem
+                title="Settings need a look"
+                text={o().problem ?? ""}
+                action="Open settings"
+                onAction={() => setSettings(null)}
+              />
+            </Match>
+            <Match when={o().agent === null}>
+              <Problem
+                title="Choose an agent to start"
+                text="Ancient Protector has a coding agent judge which advisories affect you. Pick one of those installed on this Mac."
+                action="Choose an agent"
+                onAction={() => setSettings("agent")}
+              />
             </Match>
             <Match when={listed().length === 0 && lastSwept(o().targets) !== null}>
               <AllClear overview={o()} now={now()} />
@@ -134,7 +159,9 @@ export function App() {
           </Switch>
         )}
       </Show>
-      <Footer overview={overview()} now={now()} onError={setError} />
+      <Show when={settings() === undefined}>
+        <Footer overview={overview()} onSettings={() => setSettings(null)} onError={setError} />
+      </Show>
     </main>
   );
 }
@@ -551,13 +578,13 @@ function AllClear(props: { overview: Overview; now: Date }) {
   );
 }
 
-function Problem(props: { text: string; onEdit: () => void }) {
+function Problem(props: { title: string; text: string; action: string; onAction: () => void }) {
   return (
     <section class="clear">
-      <h1>Set up Ancient Protector</h1>
+      <h1>{props.title}</h1>
       <p>{props.text}</p>
-      <button type="button" class="btn primary" onClick={() => props.onEdit()}>
-        Open settings
+      <button type="button" class="btn primary" onClick={() => props.onAction()}>
+        {props.action}
       </button>
     </section>
   );
@@ -565,7 +592,7 @@ function Problem(props: { text: string; onEdit: () => void }) {
 
 function Footer(props: {
   overview: Overview | undefined;
-  now: Date;
+  onSettings: () => void;
   onError: (error: string) => void;
 }) {
   const [login, setLogin] = createSignal(false);
@@ -613,7 +640,7 @@ function Footer(props: {
               role="menuitem"
               onClick={() => {
                 setMenu(false);
-                invoke("open_settings").catch((e: unknown) => props.onError(String(e)));
+                props.onSettings();
               }}
             >
               Settings…

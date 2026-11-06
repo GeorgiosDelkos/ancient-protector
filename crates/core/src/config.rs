@@ -84,6 +84,20 @@ impl Config {
         Self::from_text(path, &text, home)
     }
 
+    /// Reads the config at `path` like [`Config::load`], or the default config when there is
+    /// no file yet: before the first setting is saved, the app shows the defaults rather than
+    /// an error.
+    ///
+    /// # Errors
+    ///
+    /// As [`Config::load`], except that a missing file is not an error.
+    pub fn load_or_default(path: &Path, home: &Path) -> Result<Self, LoadConfigError> {
+        match Self::load(path, home) {
+            Err(LoadConfigError::Missing { .. }) => Self::from_text(path, DEFAULT_CONFIG, home),
+            loaded => loaded,
+        }
+    }
+
     /// Parses and validates `text` as the config at `path`, as [`Config::load`] does after
     /// reading it; for a change checked before it is written.
     pub(crate) fn from_text(path: &Path, text: &str, home: &Path) -> Result<Self, LoadConfigError> {
@@ -1251,5 +1265,20 @@ mod tests {
         let hourly = Schedule::EveryHours(NonZeroU32::new(1).unwrap());
         assert_eq!(hourly.to_string(), "every hour");
         assert_eq!(Schedule::Manual.to_string(), "manual");
+    }
+
+    #[test]
+    fn a_missing_config_reads_as_the_default_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let config = Config::load_or_default(&path, Path::new("/home")).unwrap();
+        assert_eq!(config.agent, None);
+        assert_eq!(config.schedule, Schedule::Manual);
+        assert!(!path.exists(), "nothing is written");
+        fs::write(&path, "agent = ").unwrap();
+        assert!(matches!(
+            Config::load_or_default(&path, Path::new("/home")),
+            Err(LoadConfigError::Parse { .. })
+        ));
     }
 }

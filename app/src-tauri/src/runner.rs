@@ -154,7 +154,7 @@ impl Runner {
 /// Fails when a sweep or a fix started from the app is already running.
 pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
     let runner = app.state::<Runner>();
-    let pending = Config::load(&runner.data_dir().config_file(), runner.home())
+    let pending = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
         .map(|config| target_names(&config))
         .unwrap_or_default();
     runner.claim(Status::Sweeping {
@@ -184,7 +184,7 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
 fn run(app: &AppHandle) -> Status {
     let runner = app.state::<Runner>();
     let config_path = runner.data_dir().config_file();
-    let swept = Config::load(&config_path, runner.home())
+    let swept = Config::load_or_default(&config_path, runner.home())
         .map_err(|e| e.to_string())
         .and_then(|config| {
             let mut progress = |p: Progress<'_>| {
@@ -277,8 +277,8 @@ pub(crate) fn start_fix(
 
 fn fix(app: &AppHandle, key: FindingKey) -> Result<FixRecord, String> {
     let runner = app.state::<Runner>();
-    let config =
-        Config::load(&runner.data_dir().config_file(), runner.home()).map_err(|e| e.to_string())?;
+    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+        .map_err(|e| e.to_string())?;
     let plan = plan_fix(runner.data_dir(), &config, key).map_err(|e| e.to_string())?;
     run_fix(runner.data_dir(), &plan, Confirmed::Asked).map_err(|e| e.to_string())
 }
@@ -325,7 +325,9 @@ pub(crate) fn schedule(app: AppHandle) {
         loop {
             thread::sleep(SCHEDULE_CHECK);
             let runner = app.state::<Runner>();
-            let Ok(config) = Config::load(&runner.data_dir().config_file(), runner.home()) else {
+            let Ok(config) =
+                Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+            else {
                 continue;
             };
             let on_disk = match last_sweep_started(runner.data_dir()) {
