@@ -467,6 +467,35 @@ mod tests {
     }
 
     #[test]
+    fn which_looks_on_the_newest_search_path() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for dir in [&first, &second] {
+            let probe = dir.path().join("ancient-protector-probe");
+            fs::write(&probe, "").unwrap();
+            fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SEARCH_PATH is the process's, and tests run in parallel: each path keeps /bin and
+        // /usr/bin, so `which("sh")` in the other test still resolves.
+        let set = |dir: &Path| {
+            use_search_path(
+                env::join_paths([dir, Path::new("/bin"), Path::new("/usr/bin")]).unwrap(),
+            );
+        };
+        set(first.path());
+        assert_eq!(
+            which("ancient-protector-probe"),
+            Some(first.path().join("ancient-protector-probe"))
+        );
+        set(second.path());
+        assert_eq!(
+            which("ancient-protector-probe"),
+            Some(second.path().join("ancient-protector-probe")),
+            "replaced, as after Look again"
+        );
+    }
+
+    #[test]
     fn which_finds_programs() {
         let dir = tempfile::tempdir().unwrap();
         let plain = dir.path().join("plain");

@@ -79,7 +79,7 @@ pub enum Setting {
 }
 
 /// Applies `setting` to the config in `data_dir`, writes it, and returns the config as the
-/// file now has it.
+/// file now has it. Waits for any other save to finish first.
 ///
 /// # Errors
 ///
@@ -91,10 +91,9 @@ pub fn save_setting(
     setting: &Setting,
 ) -> Result<Config, SaveSettingError> {
     let path = data_dir.config_file();
-    // Read, edit and write are one step: two changes at once (two quick clicks, or the app and
-    // the CLI) would each edit the same text, and the later write would drop the earlier
-    // change. An exclusive lock on a file beside the config keeps them apart across
-    // processes; it is released when the file closes.
+    // Read, edit and write are one step: two quick clicks would each edit the same text, and
+    // the later write would drop the earlier change. A file lock rather than a static Mutex,
+    // so a save from another process is kept apart too; it is released when the file closes.
     let _saving = lock(&path)?;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -125,6 +124,16 @@ pub enum Shape {
     Array,
     /// `[[servers]]` tables.
     Tables,
+}
+
+impl Shape {
+    fn describe(self, key: &str) -> String {
+        match self {
+            Self::Section => format!("a [{key}] section"),
+            Self::Array => "a list".to_owned(),
+            Self::Tables => format!("[[{key}]] tables"),
+        }
+    }
 }
 
 /// The key a change cannot edit, and how it must be written instead.
@@ -295,13 +304,14 @@ fn servers(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, NotEditable> {
 
 /// Takes the exclusive lock that keeps saves apart, creating the config's folder first.
 fn lock(path: &Path) -> Result<fs::File, SaveSettingError> {
+    let dir = path.parent().expect("the config file has a folder");
+    let lock_path = dir.join(".config.toml.lock");
     let lock_err = |source| SaveSettingError::Write {
-        path: path.to_owned(),
+        path: lock_path.clone(),
         source,
     };
-    let dir = path.parent().expect("the config file has a folder");
     fs::create_dir_all(dir).map_err(lock_err)?;
-    let file = fs::File::create(dir.join(".config.toml.lock")).map_err(lock_err)?;
+    let file = fs::File::create(&lock_path).map_err(lock_err)?;
     file.lock().map_err(lock_err)?;
     Ok(file)
 }
@@ -313,8 +323,8 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
         path: path.to_owned(),
         source,
     };
+    // `lock` created the folder.
     let dir = path.parent().expect("the config file has a folder");
-    fs::create_dir_all(dir).map_err(write_err)?;
     // One name is enough: saves hold the lock from `save_setting` while writing it.
     let partial = dir.join(".config.toml.partial");
     fs::File::create(&partial)
@@ -325,16 +335,6 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
         .and_then(|()| fs::rename(&partial, path))
         .inspect_err(|_| drop(fs::remove_file(&partial)))
         .map_err(write_err)
-}
-
-impl Shape {
-    fn describe(self, key: &str) -> String {
-        match self {
-            Self::Section => format!("a [{key}] section"),
-            Self::Array => "a list".to_owned(),
-            Self::Tables => format!("[[{key}]] tables"),
-        }
-    }
 }
 
 /// Error from changing the config.

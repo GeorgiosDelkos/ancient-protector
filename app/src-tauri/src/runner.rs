@@ -251,7 +251,7 @@ pub(crate) struct FixDone {
 pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> Result<(), String> {
     let plan = plan(app, key)?;
     if plan.found() != found {
-        return Err("a newer sweep changed this finding; open it again to see its fix".to_owned());
+        return Err("a newer sweep ran; open the finding again to see its fix".to_owned());
     }
     let title = plan.fix().summary.clone();
     app.state::<Runner>().claim(Status::Fixing { title })?;

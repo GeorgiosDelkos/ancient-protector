@@ -446,8 +446,8 @@ Built in step 9b (2026-11-06):
 - Each detection also sets the `PATH` every tool and agent then runs with, so a tool found
   by "Look again" is the one the next sweep runs. Until the first detection at start ends,
   tools run with macOS's minimal `PATH` (accepted: a sweep that early is rare).
-- Saves take an exclusive lock on `.config.toml.lock`, so two at once (quick clicks, or the
-  app and the CLI) both land. A key written another way than a change expects (an inline
+- Saves take an exclusive lock on `.config.toml.lock`, so two at once (quick clicks; any
+  other process that saves later) both land. A key written another way than a change expects (an inline
   table, `repos = "o/r"`) is refused with what to change, never replaced.
 - A confirmed fix carries the preview's `found`; the app refuses it when a newer sweep
   changed the finding, and the confirm shows the commands that will run.

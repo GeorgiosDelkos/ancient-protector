@@ -266,7 +266,7 @@ fn ssh_hosts(config: &str) -> Vec<SshHost> {
                 }
             }
             "match" => block.clear(),
-            "hostname" => {
+            "hostname" if !rest.is_empty() => {
                 for &i in &block {
                     hosts[i].host_name.get_or_insert_with(|| rest.to_owned());
                 }
@@ -338,6 +338,8 @@ Host web
 # Host commented-out
 Host db-2 # the new database
   HostName 10.0.0.7 # behind the VPN
+Host db-3
+  HostName=#none
 ";
         assert_eq!(
             ssh_hosts(config),
@@ -357,6 +359,10 @@ Host db-2 # the new database
                 SshHost {
                     alias: "db-2".to_owned(),
                     host_name: Some("10.0.0.7".to_owned())
+                },
+                SshHost {
+                    alias: "db-3".to_owned(),
+                    host_name: None
                 },
             ]
         );

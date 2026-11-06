@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write as _;
 use std::process::Command;
+use std::process::Output;
 use std::process::Stdio;
 use std::str::FromStr;
 use std::thread;
@@ -114,7 +115,7 @@ impl NvdAccess {
             .write_all(script.as_bytes())
             .map_err(KeychainError::Run)?;
         let output = child.wait_with_output().map_err(KeychainError::Run)?;
-        saved(output.status.success(), &output.stderr)
+        saved(&output)
     }
 }
 
@@ -122,8 +123,8 @@ impl NvdAccess {
 /// prints the error or its usage on stderr (observed on macOS 26 with a scratch keychain), so
 /// any stderr is a failure. The text is not shown, since it could quote the command and with
 /// it the key.
-fn saved(exited_ok: bool, stderr: &[u8]) -> Result<(), KeychainError> {
-    match (exited_ok, stderr.is_empty()) {
+fn saved(output: &Output) -> Result<(), KeychainError> {
+    match (output.status.success(), output.stderr.is_empty()) {
         (true, true) => Ok(()),
         (true, false) => Err(KeychainError::Save("security reported an error".to_owned())),
         (false, _) => Err(KeychainError::Save("security failed".to_owned())),
@@ -604,6 +605,19 @@ mod tests {
     }
 
     #[test]
+    fn stderr_from_security_is_a_failed_save() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let output = |code: i32, stderr: &[u8]| Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        };
+        assert!(saved(&output(0, b"")).is_ok());
+        assert!(saved(&output(0, b"Usage: add-generic-password")).is_err());
+        assert!(saved(&output(1, b"")).is_err());
+    }
+
+    #[test]
     fn only_an_nvd_key_reaches_the_keychain_command() {
         let key = "1a2b3c4d-0000-4000-8000-0123456789ab";
         assert_eq!(
@@ -612,9 +626,6 @@ mod tests {
                 "add-generic-password -U -s {KEYCHAIN_SERVICE} -a {KEYCHAIN_ACCOUNT} -w {key}\n"
             )
         );
-        assert!(saved(true, b"").is_ok());
-        assert!(saved(true, b"Usage: add-generic-password").is_err());
-        assert!(saved(false, b"").is_err());
         for bad in ["", "-U", "a b", "a\nb", "a\"b", "key;rm", &"a".repeat(129)] {
             assert_eq!(keychain_script(bad), None, "{bad:?}");
         }

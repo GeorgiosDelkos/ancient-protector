@@ -137,7 +137,7 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
         needs_you,
         exploited: findings.iter().filter(|f| f.open.known_exploited).count(),
         counts: Counts::of(findings.iter().map(|f| &f.open)),
-        headline: headline(needs_you, findings.len()),
+        headline: headline(needs_you, findings.len(), last_swept),
         all_clear: findings.is_empty() && last_swept.is_some(),
         target_count: match targets.len() {
             1 => "1 target".to_owned(),
@@ -188,8 +188,9 @@ fn needs_you(open: &Open) -> bool {
     open.known_exploited || matches!(open.severity, Severity::Critical | Severity::High)
 }
 
-fn headline(needs_you: usize, open: usize) -> String {
+fn headline(needs_you: usize, open: usize, last_swept: Option<Timestamp>) -> String {
     match (needs_you, open) {
+        (0, 0) if last_swept.is_none() => "Not swept yet".to_owned(),
         (1, _) => "1 finding needs you".to_owned(),
         (0, 0) => "All clear".to_owned(),
         (0, n) => format!("{n} open, none urgent"),
@@ -310,13 +311,23 @@ mod tests {
 
     #[test]
     fn the_headline_names_what_needs_the_user() {
-        assert_eq!(headline(0, 0), "All clear");
-        assert_eq!(headline(0, 1), "1 open, none urgent");
-        assert_eq!(headline(0, 3), "3 open, none urgent");
-        assert_eq!(headline(1, 4), "1 finding needs you");
-        assert_eq!(headline(2, 4), "2 findings need you");
+        assert_eq!(headline(0, 0, Some(Timestamp::UNIX_EPOCH)), "All clear");
+        assert_eq!(headline(0, 0, None), "Not swept yet");
+        assert_eq!(
+            headline(0, 1, Some(Timestamp::UNIX_EPOCH)),
+            "1 open, none urgent"
+        );
+        assert_eq!(
+            headline(0, 3, Some(Timestamp::UNIX_EPOCH)),
+            "3 open, none urgent"
+        );
+        assert_eq!(
+            headline(1, 4, Some(Timestamp::UNIX_EPOCH)),
+            "1 finding needs you"
+        );
+        assert_eq!(headline(2, 4, None), "2 findings need you");
         let view = popover_view(Vec::new());
-        assert_eq!(view.headline, "All clear");
+        assert_eq!(view.headline, "Not swept yet");
         assert_eq!(view.last_swept, None);
         assert!(!view.all_clear, "nothing was swept yet");
         assert_eq!(view.target_count, "0 targets");
