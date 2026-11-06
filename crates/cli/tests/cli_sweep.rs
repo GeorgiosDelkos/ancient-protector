@@ -808,33 +808,6 @@ fn findings_list_what_is_open_and_one_target_can_be_swept() {
     assert_eq!(lines[1]["open"], serde_json::json!([]));
     assert_eq!(lines[1]["dismissed"], 1);
 
-    let unknown = sandbox
-        .command("ok")
-        .args(["sweep", "--target", "github:o/x"])
-        .output()
-        .unwrap();
-    assert!(!unknown.status.success());
-    assert!(text(&unknown.stderr).contains("github:o/x is not a configured target"));
-    let sweeps = || {
-        fs::read_dir(sandbox.path().join("data/sweeps"))
-            .unwrap()
-            .count()
-    };
-    let (folders, runs) = (sweeps(), sandbox.runs());
-    for name in ["github:o", "github:O/R", "server:web"] {
-        let out = sandbox
-            .command("ok")
-            .args(["sweep", "--target", name])
-            .output()
-            .unwrap();
-        assert!(!out.status.success(), "{name} matches nothing");
-    }
-    assert_eq!(
-        (sweeps(), sandbox.runs()),
-        (folders, runs),
-        "nothing ran for unknown names"
-    );
-
     assert!(sandbox.run(&["undismiss", &key]).status.success());
     let json = text(&sandbox.run(&["findings", "--json"]).stdout);
     let repo: serde_json::Value = serde_json::from_str(json.lines().nth(1).unwrap()).unwrap();
@@ -867,4 +840,36 @@ fn findings_list_what_is_open_and_one_target_can_be_swept() {
     assert!(!text(&mac.stdout).contains("# Sweep of github:o/r"));
     let listed = text(&sandbox.run(&["findings"]).stdout);
     assert!(listed.starts_with("mac (swept "), "{listed}");
+}
+
+#[test]
+fn a_target_name_that_matches_nothing_runs_nothing() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    assert!(sandbox.sweep("ok").status.success());
+    let unknown = sandbox
+        .command("ok")
+        .args(["sweep", "--target", "github:o/x"])
+        .output()
+        .unwrap();
+    assert!(!unknown.status.success());
+    assert!(text(&unknown.stderr).contains("github:o/x is not a configured target"));
+    let sweeps = || {
+        fs::read_dir(sandbox.path().join("data/sweeps"))
+            .unwrap()
+            .count()
+    };
+    let (folders, runs) = (sweeps(), sandbox.runs());
+    for name in ["github:o", "github:O/R", "server:web"] {
+        let out = sandbox
+            .command("ok")
+            .args(["sweep", "--target", name])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{name} matches nothing");
+    }
+    assert_eq!(
+        (sweeps(), sandbox.runs()),
+        (folders, runs),
+        "nothing ran for unknown names"
+    );
 }
