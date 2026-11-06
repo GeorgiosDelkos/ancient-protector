@@ -610,11 +610,9 @@ mod tests {
         fs::create_dir_all(data_dir.config_file().parent().unwrap()).unwrap();
         fs::write(data_dir.config_file(), text).unwrap();
         let err = save(&data_dir, repo_added("o/b")).unwrap_err();
-        assert!(
-            err.to_string()
-                .ends_with("github.repos is not written as a list, so it cannot be changed here; edit it by hand"),
-            "{err}"
-        );
+        let expected = "github.repos is not written as a list, so it cannot be changed here; \
+                        edit it by hand";
+        assert!(err.to_string().ends_with(expected), "{err}");
         assert_eq!(fs::read_to_string(data_dir.config_file()).unwrap(), text);
         let err = SaveSettingError::NotEditable {
             path: PathBuf::from("c.toml"),
