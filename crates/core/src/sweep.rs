@@ -173,6 +173,10 @@ pub struct Report {
     /// What changed since this target's last sweep with a verdict; `None` without a verdict
     /// now or then.
     pub changes: Option<Changes>,
+    /// Whether this is the target's first sweep with a verdict, so everything in it is new.
+    /// False when an earlier report exists but could not be read: then nothing is known to
+    /// be new, and nothing is notified again.
+    pub first_verdict: bool,
     /// What could not be checked: failed sources, unknown products, tools not installed.
     pub problems: Vec<String>,
     /// Why the agent's verdict is missing, when it is.
@@ -194,6 +198,7 @@ impl Report {
             findings: Vec::new(),
             issues: Vec::new(),
             changes: None,
+            first_verdict: false,
             problems: Vec::new(),
             failure: None,
             dir,
@@ -321,11 +326,15 @@ pub fn sweep(
 
 /// What a sweep should raise a notification for: each finding and issue that is critical or
 /// high, not dismissed, and new since its target's last sweep with a verdict, as
-/// `target: title`. On a target's first sweep with a verdict, every such one is new.
+/// `target: title`. On a target's first sweep with a verdict, every such one is new; when the
+/// last report could not be read, none is.
 pub fn alerts(reports: &[Report]) -> Vec<String> {
     let mut alerts = Vec::new();
     for report in reports.iter().filter(|r| r.failure.is_none()) {
-        let new = |key: FindingKey| report.changes.as_ref().is_none_or(|c| c.new.contains(&key));
+        let new = |key: FindingKey| match &report.changes {
+            Some(changes) => changes.new.contains(&key),
+            None => report.first_verdict,
+        };
         let serious = |severity: Severity| severity <= Severity::High;
         let findings = report
             .findings
@@ -563,6 +572,7 @@ impl Shared<'_> {
         };
         let (findings, issues) =
             self.keyed(&collected.target, &collected.components, verdict, &fetched);
+        let mut first_verdict = false;
         let changes = if failure.is_some() {
             None
         } else {
@@ -573,10 +583,16 @@ impl Shared<'_> {
             let all = keys().map(|(key, _)| key).collect();
             let active = keys().filter(|(_, d)| !d).map(|(key, _)| key).collect();
             let sweeps = self.data_dir.sweeps_dir();
-            Changes::since_last(&sweeps, &collected.dir_name, &active, &all).unwrap_or_else(|e| {
-                problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
-                None
-            })
+            match Changes::since_last(&sweeps, &collected.dir_name, &active, &all) {
+                Ok(changes) => {
+                    first_verdict = changes.is_none();
+                    changes
+                }
+                Err(e) => {
+                    problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
+                    None
+                }
+            }
         };
 
         let mut report = Report::new(started, collected.target, self.agent, dir.clone());
@@ -585,6 +601,7 @@ impl Shared<'_> {
         report.findings = findings;
         report.issues = issues;
         report.changes = changes;
+        report.first_verdict = first_verdict;
         report.problems = problems.iter().map(|p| plain(p)).collect();
         report.failure = failure;
         save_report(&dir, &mut report);
@@ -1603,6 +1620,7 @@ mod tests {
             findings,
             issues: Vec::new(),
             changes: None,
+            first_verdict: false,
             problems: problems.iter().map(|p| (*p).to_owned()).collect(),
             failure: None,
             dir: PathBuf::from("/tmp/s"),
@@ -1651,20 +1669,34 @@ mod tests {
 
     #[test]
     fn alerts_are_new_open_and_critical_or_high() {
-        let mut first = report(
+        let unread = report(
             vec![
                 report_finding("GHSA-1", "critical", false, "npm:a"),
                 report_finding("GHSA-2", "medium", false, "npm:b"),
             ],
             &[],
         );
+        assert!(
+            alerts(&[unread]).is_empty(),
+            "the last report could not be read: none is new"
+        );
+        let first = Report {
+            first_verdict: true,
+            ..report(
+                vec![
+                    report_finding("GHSA-1", "critical", false, "npm:a"),
+                    report_finding("GHSA-2", "medium", false, "npm:b"),
+                ],
+                &[],
+            )
+        };
         assert_eq!(
             alerts(&[first]),
             ["mac: GHSA-1 in npm:a"],
             "a first sweep: all are new"
         );
 
-        first = report(
+        let mut first = report(
             vec![
                 report_finding("GHSA-1", "critical", false, "npm:a"),
                 report_finding("GHSA-3", "high", false, "npm:c"),

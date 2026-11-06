@@ -38,6 +38,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_positioner::init())
         .manage(Runner::new(data_dir, home))
+        .manage(tray::Popover::default())
         .invoke_handler(tauri::generate_handler![
             overview,
             sweep_now,
@@ -54,7 +55,7 @@ fn main() {
         .on_window_event(|window, event| {
             // The popover closes when it loses focus, like a menu.
             if let WindowEvent::Focused(false) = event {
-                drop(window.hide());
+                tray::hide_on_blur(window);
             }
         })
         .run(tauri::generate_context!())
