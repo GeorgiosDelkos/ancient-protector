@@ -224,8 +224,8 @@ impl fmt::Display for ServerName {
 
 /// An absolute folder on a server: 1 to 1024 bytes of ASCII letters, digits, `/`, `.`, `-` and
 /// `_`, starting with `/`, with no `..` part. The app hands it to the server script in single
-/// quotes, which this character set cannot end, and it cannot climb out of what the user named. Only
-/// [`Config::load`] constructs one.
+/// quotes, which this character set cannot end, and it cannot climb out of what the user named.
+/// Only [`Config::load`] constructs one.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RemoteDir(String);
 
