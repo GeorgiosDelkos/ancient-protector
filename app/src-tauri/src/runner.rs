@@ -362,6 +362,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_new_target_finishes_the_one_before_it() {
+        let mut status = Status::Sweeping {
+            step: "starting".to_owned(),
+            current: None,
+            done: Vec::new(),
+            pending: vec!["mac".to_owned(), "server:web".to_owned()],
+            started: Timestamp::UNIX_EPOCH,
+        };
+        advance(&mut status, &Progress::Target { target: "mac" });
+        advance(&mut status, &Progress::Inventory);
+        advance(
+            &mut status,
+            &Progress::Target {
+                target: "server:web",
+            },
+        );
+        let Status::Sweeping {
+            step,
+            current,
+            done,
+            pending,
+            ..
+        } = status
+        else {
+            panic!("still sweeping");
+        };
+        assert_eq!(step, "sweeping server:web");
+        assert_eq!(current.as_deref(), Some("server:web"));
+        assert_eq!(done, ["mac"]);
+        assert_eq!(pending, Vec::<String>::new());
+
+        let mut idle = Status::Idle;
+        advance(&mut idle, &Progress::Inventory);
+        assert!(
+            matches!(idle, Status::Idle),
+            "only a running sweep advances"
+        );
+    }
+
+    #[test]
     fn a_notification_names_up_to_three_alerts() {
         assert_eq!(notification(&[]), None);
         let one = vec!["mac: CVE-1".to_owned()];
