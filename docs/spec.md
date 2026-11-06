@@ -256,8 +256,8 @@ use ssh.
   When a confirmed command fails, the agent may adapt it to reach the same goal (decided
   2026-11-06 for servers: "so it can adapt when a command fails"), and the prompt forbids
   anything the fix does not name.
-- Each run has a new folder `fixes/<utc-timestamp>-<key>[-n]/`: `PROMPT.md` (the user's `prompts/fix.md`
-  with the target and where to work filled in), `fix.json` (the report entry), the schema of
+- Each run has a new folder `fixes/<utc-timestamp>-<key>[-n]/`: `PROMPT.md` (the user's
+  `prompts/fix.md` with the target and where to work filled in), `fix.json` (the report entry), the schema of
   `result.json`, the agent's `agent.log`, and `result.json`, which the agent writes: `outcome`
   (`fixed`, `partial`, `failed`), a one-line `summary`, and for a repository the
   `pull_request` URL (`https://github.com/<owner>/<name>/pull/<number>` of that repository
