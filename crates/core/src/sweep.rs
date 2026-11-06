@@ -54,6 +54,7 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::Lookup;
+use crate::lifecycle;
 use crate::lifecycle::Changes;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
@@ -208,6 +209,13 @@ pub struct ReportFinding {
     pub key: FindingKey,
     /// One line naming it: the advisories, the component and where it was found.
     pub title: String,
+    /// The component's name, without its ecosystem (`lodash`, `openssl`).
+    pub name: String,
+    /// Where it was found, one line (`lockfile ~/code/shop/package-lock.json`).
+    pub place: String,
+    /// When a sweep of this target first found it, in the run of reports that has had it
+    /// since.
+    pub first_seen: Timestamp,
     /// The agent's finding.
     #[serde(flatten)]
     pub finding: Finding,
@@ -226,6 +234,10 @@ pub struct ReportIssue {
     pub key: FindingKey,
     /// One line naming it: its subject.
     pub title: String,
+    /// The setting key or file path it is about.
+    pub name: String,
+    /// When a sweep of this target first found it.
+    pub first_seen: Timestamp,
     /// The agent's issue.
     #[serde(flatten)]
     pub issue: Issue,
@@ -561,8 +573,24 @@ impl Shared<'_> {
             Ok(verdict) => (verdict, None),
             Err(failure) => (Verdict::default(), Some(plain(&failure))),
         };
-        let (findings, issues) =
+        let (mut findings, mut issues) =
             self.keyed(&collected.target, &collected.components, verdict, &fetched);
+        // Each keeps the first-seen time the target's last report gave it, or is new now.
+        let sweeps = self.data_dir.sweeps_dir();
+        let seen = lifecycle::first_seen(&sweeps, &collected.dir_name).unwrap_or_else(|e| {
+            problems.push(format!(
+                "when findings were first seen: {}",
+                error_chain(&e)
+            ));
+            BTreeMap::new()
+        });
+        let first = |key: FindingKey| seen.get(&key).copied().unwrap_or(started);
+        for f in &mut findings {
+            f.first_seen = first(f.key);
+        }
+        for i in &mut issues {
+            i.first_seen = first(i.key);
+        }
         let changes = if failure.is_some() {
             None
         } else {
@@ -625,9 +653,17 @@ impl Shared<'_> {
                     installed.version,
                     installed.found_in
                 ));
+                let name = match &installed.lookup {
+                    Lookup::Package(p) => p.name.clone(),
+                    Lookup::Product(p) => p.to_string(),
+                };
                 ReportFinding {
                     key,
                     title,
+                    name: plain(&name),
+                    place: plain(&installed.found_in.to_string()),
+                    // Set by the caller from the last report; see `sweep_target`.
+                    first_seen: Timestamp::UNIX_EPOCH,
                     finding: valid.finding,
                     installed,
                     modified,
@@ -649,6 +685,8 @@ impl Shared<'_> {
                 ReportIssue {
                     key,
                     title: plain(&issue.subject.to_string()),
+                    name: plain(name),
+                    first_seen: Timestamp::UNIX_EPOCH,
                     issue,
                     dismissed: self.dismissals.get(key, None).cloned(),
                 }
@@ -1575,6 +1613,9 @@ mod tests {
         ReportFinding {
             key: FindingKey::new(&[id, lookup]),
             title: format!("{id} in {lookup}"),
+            name: lookup.to_owned(),
+            place: "macOS".to_owned(),
+            first_seen: Timestamp::UNIX_EPOCH,
             modified: None,
             dismissed: None,
             finding: serde_json::from_value(json!({
@@ -1687,6 +1728,8 @@ mod tests {
         let issue = |severity: &str, title: &str| ReportIssue {
             key: FindingKey::new(&[title]),
             title: title.to_owned(),
+            name: "f".to_owned(),
+            first_seen: Timestamp::UNIX_EPOCH,
             issue: serde_json::from_value(json!({
                 "subject": {"file": "f"}, "severity": severity, "evidence": "e",
                 "explanation": "x", "fix": {"summary": "s", "steps": [], "commands": []}
@@ -1759,6 +1802,8 @@ mod tests {
             issues: vec![ReportIssue {
                 key: FindingKey::new(&["issue"]),
                 title: "setting default_branch_protection".to_owned(),
+                name: "default_branch_protection".to_owned(),
+                first_seen: Timestamp::UNIX_EPOCH,
                 issue,
                 dismissed: None,
             }],
