@@ -19,6 +19,8 @@ use std::io;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 use jiff::Timestamp;
 use serde::Serialize;
@@ -54,6 +56,7 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::Lookup;
+use crate::lifecycle;
 use crate::lifecycle::Changes;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
@@ -90,6 +93,11 @@ impl Prompt {
         }
     }
 }
+
+/// How often [`Lock::acquire`] tries, and how long it waits between tries. Arbitrary: 100 ms in
+/// all is far longer than starting a process takes, and nothing a user would notice.
+const LOCK_TRIES: u32 = 5;
+const LOCK_RETRY: Duration = Duration::from_millis(20);
 
 /// How many sweep or fix folders may share one start second before the run gives up. Arbitrary:
 /// sweeps run one at a time and each takes seconds at least, so two is already rare.
@@ -219,6 +227,13 @@ pub struct ReportFinding {
     pub key: FindingKey,
     /// One line naming it: the advisories, the component and where it was found.
     pub title: String,
+    /// The component's name, without its ecosystem (`lodash`, `openssl`).
+    pub name: String,
+    /// Where it was found, one line (`lockfile ~/code/shop/package-lock.json`).
+    pub place: String,
+    /// When a sweep of this target first found it, in the run of reports that has had it
+    /// since.
+    pub first_seen: Timestamp,
     /// The agent's finding.
     #[serde(flatten)]
     pub finding: Finding,
@@ -237,6 +252,10 @@ pub struct ReportIssue {
     pub key: FindingKey,
     /// One line naming it: its subject.
     pub title: String,
+    /// The setting key or file path it is about.
+    pub name: String,
+    /// When a sweep of this target first found it.
+    pub first_seen: Timestamp,
     /// The agent's issue.
     #[serde(flatten)]
     pub issue: Issue,
@@ -368,6 +387,15 @@ pub enum Targets<'a> {
     All,
     /// One of them, by its report name: `mac`, `github:owner/name` or `server:name`.
     Only(&'a str),
+}
+
+/// The report names of every configured target, in the order a sweep takes them: `mac`, then
+/// `github:owner/name` for each repository, then `server:name` for each server.
+pub fn target_names(config: &Config) -> Vec<String> {
+    configured_targets(config)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// Every configured target, in sweep order, by report name and folder name.
@@ -576,8 +604,24 @@ impl Shared<'_> {
             Ok(verdict) => (verdict, None),
             Err(failure) => (Verdict::default(), Some(plain(&failure))),
         };
-        let (findings, issues) =
+        let (mut findings, mut issues) =
             self.keyed(&collected.target, &collected.components, verdict, &fetched);
+        // Each keeps the first-seen time the target's last report gave it, or is new now.
+        let sweeps = self.data_dir.sweeps_dir();
+        let seen = lifecycle::first_seen(&sweeps, &collected.dir_name).unwrap_or_else(|e| {
+            problems.push(format!(
+                "when findings were first seen: {}",
+                error_chain(&e)
+            ));
+            BTreeMap::new()
+        });
+        let first = |key: FindingKey| seen.get(&key).copied().unwrap_or(started);
+        for f in &mut findings {
+            f.first_seen = first(f.key);
+        }
+        for i in &mut issues {
+            i.first_seen = first(i.key);
+        }
         let mut first_verdict = false;
         let changes = if failure.is_some() {
             None
@@ -648,9 +692,17 @@ impl Shared<'_> {
                     installed.version,
                     installed.found_in
                 ));
+                let name = match &installed.lookup {
+                    Lookup::Package(p) => p.name.clone(),
+                    Lookup::Product(p) => p.to_string(),
+                };
                 ReportFinding {
                     key,
                     title,
+                    name: plain(&name),
+                    place: plain(&installed.found_in.to_string()),
+                    // Set by the caller from the last report; see `sweep_target`.
+                    first_seen: Timestamp::UNIX_EPOCH,
                     finding: valid.finding,
                     installed,
                     modified,
@@ -672,6 +724,8 @@ impl Shared<'_> {
                 ReportIssue {
                     key,
                     title: plain(&issue.subject.to_string()),
+                    name: plain(name),
+                    first_seen: Timestamp::UNIX_EPOCH,
                     issue,
                     dismissed: self.dismissals.get(key, None).cloned(),
                 }
@@ -1326,11 +1380,17 @@ impl Lock {
             .write(true)
             .open(&path)
             .map_err(write_err)?;
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(fs::TryLockError::WouldBlock) => Err(SweepError::Busy { lock: path }),
-            Err(fs::TryLockError::Error(e)) => Err(write_err(e)),
+        // A few tries, briefly apart: a process another thread is starting holds a copy of
+        // every open file until it runs its program, so a lock released a moment ago can still
+        // look held. A sweep that really holds it holds it for minutes.
+        for _ in 0..LOCK_TRIES {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(fs::TryLockError::WouldBlock) => thread::sleep(LOCK_RETRY),
+                Err(fs::TryLockError::Error(e)) => return Err(write_err(e)),
+            }
         }
+        Err(SweepError::Busy { lock: path })
     }
 }
 
@@ -1402,6 +1462,18 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn target_names_list_the_mac_then_repositories_then_servers() {
+        let text = "[github]\nrepos = [\"o/a\", \"o/b\"]\n\
+                    [[servers]]\nname = \"web\"\nssh = \"web\"\n";
+        let config =
+            Config::from_text(Path::new("/c/config.toml"), text, Path::new("/home")).unwrap();
+        assert_eq!(
+            target_names(&config),
+            ["mac", "github:o/a", "github:o/b", "server:web"]
+        );
+    }
     use crate::feeds::Endpoints;
     use crate::feeds::test_server::Request;
     use crate::feeds::test_server::TestServer;
@@ -1598,6 +1670,9 @@ mod tests {
         ReportFinding {
             key: FindingKey::new(&[id, lookup]),
             title: format!("{id} in {lookup}"),
+            name: lookup.to_owned(),
+            place: "macOS".to_owned(),
+            first_seen: Timestamp::UNIX_EPOCH,
             modified: None,
             dismissed: None,
             finding: serde_json::from_value(json!({
@@ -1725,6 +1800,8 @@ mod tests {
         let issue = |severity: &str, title: &str| ReportIssue {
             key: FindingKey::new(&[title]),
             title: title.to_owned(),
+            name: "f".to_owned(),
+            first_seen: Timestamp::UNIX_EPOCH,
             issue: serde_json::from_value(json!({
                 "subject": {"file": "f"}, "severity": severity, "evidence": "e",
                 "explanation": "x", "fix": {"summary": "s", "steps": [], "commands": []}
@@ -1797,6 +1874,8 @@ mod tests {
             issues: vec![ReportIssue {
                 key: FindingKey::new(&["issue"]),
                 title: "setting default_branch_protection".to_owned(),
+                name: "default_branch_protection".to_owned(),
+                first_seen: Timestamp::UNIX_EPOCH,
                 issue,
                 dismissed: None,
             }],

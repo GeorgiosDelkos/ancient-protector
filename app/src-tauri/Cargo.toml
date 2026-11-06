@@ -15,9 +15,12 @@ tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
 ancient-protector-core = { path = "../../crates/core" }
-tauri = { version = "2.12.5", features = ["tray-icon", "image-png"] }
+# macos-private-api: the transparent window the HUD material shows through.
+tauri = { version = "2.12.5", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-notification = "2.7.0"
 tauri-plugin-autostart = "2.7.0"
+# The folder picker in settings.
+tauri-plugin-dialog = "2.8.3"
 tauri-plugin-positioner = { version = "2.4.0", features = ["tray-icon"] }
 # std: Timestamp::now for the schedule.
 jiff = { version = "0.2.39", default-features = false, features = ["std"] }

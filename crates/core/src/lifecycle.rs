@@ -273,6 +273,21 @@ impl Changes {
     }
 }
 
+/// When each finding and issue in the target's newest report with a verdict was first seen:
+/// its own `first_seen`, or that report's start for one saved before the field existed.
+pub(crate) fn first_seen(
+    sweeps: &Path,
+    dir_name: &str,
+) -> Result<BTreeMap<FindingKey, Timestamp>, StateError> {
+    let Some((_, last)) = newest_verdict(sweeps, dir_name)? else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(last
+        .entries()
+        .map(|e| (e.key, e.first_seen.unwrap_or(last.started)))
+        .collect())
+}
+
 /// The newest `<sweep>/<dir_name>/report.json` with a verdict, with its contents.
 pub(crate) fn newest_verdict(
     sweeps: &Path,
@@ -297,6 +312,8 @@ pub struct Latest {
     pub target: String,
     /// When that sweep started; `None` when the target has no report with a verdict yet.
     pub swept: Option<Timestamp>,
+    /// How many components that sweep checked.
+    pub components: usize,
     /// The findings and issues not dismissed, most severe first.
     pub open: Vec<Open>,
     /// How many are dismissed.
@@ -312,8 +329,26 @@ pub struct Open {
     pub severity: Severity,
     /// One line naming it.
     pub title: String,
+    /// The component's name, or the setting or file an issue is about.
+    pub name: String,
+    /// The installed version; `None` for an issue.
+    pub version: Option<String>,
+    /// The advisory ids, primary first; empty for an issue.
+    pub advisories: Vec<String>,
+    /// Where it was found, one line; empty for an issue.
+    pub place: String,
+    /// Exploited in the wild (CISA KEV).
+    pub known_exploited: bool,
+    /// What it means, in the agent's words.
+    pub explanation: String,
     /// One line: what the fix does.
     pub fix: String,
+    /// The fix's exact commands.
+    pub commands: Vec<String>,
+    /// When a sweep first found it; `None` in a report saved before that was kept.
+    pub first_seen: Option<Timestamp>,
+    /// Whether the newest sweep is the first to find it since the one before.
+    pub new: bool,
 }
 
 /// Each configured target's open findings and issues, in sweep order. Whether one is
@@ -333,6 +368,7 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
             all.push(Latest {
                 target,
                 swept: None,
+                components: 0,
                 open: Vec::new(),
                 dismissed: 0,
             });
@@ -341,22 +377,16 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
         let (dismissed, open): (Vec<_>, Vec<_>) = saved
             .entries()
             .partition(|e| dismissals.get(e.key, e.modified).is_some());
+        let new = |key: FindingKey| saved.changes.as_ref().is_some_and(|c| c.new.contains(&key));
         let mut open: Vec<Open> = open
             .into_iter()
-            .map(|e| Open {
-                key: e.key,
-                severity: e.severity,
-                title: sweep::plain(&e.title),
-                fix: e
-                    .fix
-                    .as_ref()
-                    .map_or(String::new(), |f| sweep::plain(&f.summary)),
-            })
+            .map(|e| open_entry(e, new(e.key)))
             .collect();
         open.sort_by_key(|o| o.severity);
         all.push(Latest {
             target,
             swept: Some(saved.started),
+            components: saved.components,
             open,
             dismissed: dismissed.len(),
         });
@@ -364,13 +394,47 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
     Ok(all)
 }
 
+/// `entry` as shown. Every text is a plain line: it holds agent text and names from the
+/// target. Commands passed the sweep's printable-ASCII check.
+fn open_entry(entry: &SavedEntry, new: bool) -> Open {
+    let plain = |text: &str| sweep::plain(text);
+    Open {
+        key: entry.key,
+        severity: entry.severity,
+        title: plain(&entry.title),
+        name: plain(&entry.name),
+        version: entry.installed.as_ref().map(|i| plain(&i.version)),
+        advisories: entry.advisories.iter().map(|a| plain(a)).collect(),
+        place: plain(&entry.place),
+        known_exploited: entry.known_exploited,
+        explanation: plain(&entry.explanation),
+        fix: entry
+            .fix
+            .as_ref()
+            .map_or(String::new(), |f| plain(&f.summary)),
+        commands: entry.fix.as_ref().map_or(Vec::new(), |f| {
+            f.commands.iter().map(|c| plain(c)).collect()
+        }),
+        first_seen: entry.first_seen,
+        new,
+    }
+}
+
 /// What later sweeps and commands read back from a saved `report.json`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Saved {
     pub(crate) started: Timestamp,
     failure: Option<String>,
+    #[serde(default)]
+    components: usize,
     findings: Vec<SavedEntry>,
     issues: Vec<SavedEntry>,
+    changes: Option<SavedChanges>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SavedChanges {
+    new: Vec<FindingKey>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -380,6 +444,20 @@ pub(crate) struct SavedEntry {
     /// Empty in a report saved before entries had titles.
     #[serde(default)]
     title: String,
+    /// Absent, like `place` and `first_seen`, in a report saved before entries had them.
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    place: String,
+    first_seen: Option<Timestamp>,
+    /// A finding's; an issue has none.
+    #[serde(default)]
+    advisories: Vec<String>,
+    #[serde(default)]
+    known_exploited: bool,
+    #[serde(default)]
+    explanation: String,
+    installed: Option<SavedInstalled>,
     fix: Option<SavedFix>,
     #[serde(default)]
     modified: Option<Timestamp>,
@@ -391,6 +469,13 @@ pub(crate) struct SavedEntry {
 #[derive(Debug, Clone, Deserialize)]
 struct SavedFix {
     summary: String,
+    #[serde(default)]
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SavedInstalled {
+    version: String,
 }
 
 impl SavedEntry {
@@ -767,6 +852,36 @@ mod tests {
             Changes::since_last(sweeps, "mac", &BTreeSet::new(), &BTreeSet::new()),
             Err(StateError::Read { path, .. }) if path == broken
         ));
+    }
+
+    #[test]
+    fn first_seen_comes_from_the_newest_verdict_or_its_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path();
+        assert!(
+            first_seen(sweeps, "mac").unwrap().is_empty(),
+            "no sweeps yet"
+        );
+        let [old, unseen] = [1, 2].map(FindingKey);
+        let entry = |key: FindingKey| json!({"key": key, "severity": "low", "title": "t"});
+        let mut seen = entry(old);
+        seen["first_seen"] = json!("2026-10-01T00:00:00Z");
+        let report = json!({
+            "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
+            "findings": [seen], "issues": [entry(unseen)],
+        });
+        save(sweeps, "20261105T000000Z/mac", &report);
+        let failed = json!({"started": "2026-11-06T00:00:00Z", "target": "mac",
+            "failure": "agent", "findings": [], "issues": []});
+        save(sweeps, "20261106T000000Z/mac", &failed);
+        let first = first_seen(sweeps, "mac").unwrap();
+        let at = |s: &str| s.parse::<Timestamp>().unwrap();
+        assert_eq!(first.get(&old), Some(&at("2026-10-01T00:00:00Z")));
+        assert_eq!(
+            first.get(&unseen),
+            Some(&at("2026-11-05T00:00:00Z")),
+            "saved before the field: the report's start; the failed sweep after it is skipped"
+        );
     }
 
     #[test]

@@ -4,11 +4,21 @@
 //! the caller's folder (`rust-toolchain.toml`, `.nvmrc`, `.python-version`) changes which tool
 //! version answers, and rustup cannot decide to install a toolchain a project pins. Closed
 //! stdin and the time limit keep a tool that prompts or hangs from stopping the sweep.
+//!
+//! Tools are found on [`search_path`]: the process's `PATH`, unless the menu-bar app set the
+//! login shell's with [`use_search_path`]. An app started at login or from Finder gets only
+//! `/usr/bin:/bin:/usr/sbin:/sbin`, without Homebrew, nvm or `~/.local/bin`, so without this
+//! a sweep from the app would find no `brew`, `npm` or `gh`. It is process-wide, set once at
+//! startup, because every collector runs tools and threading it through each would change
+//! every signature for one caller; the CLI, started from a terminal, never sets it.
 
 use std::env;
+use std::ffi::OsString;
+use std::fs;
 use std::io;
 use std::io::Read as _;
 use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -16,6 +26,8 @@ use std::process::Child;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -116,6 +128,26 @@ struct RawOutput {
     command: String,
 }
 
+/// The login shell's `PATH`, once detection read it. Replaced by each later detection, so a
+/// tool installed since ("Look again") is found by the next sweep as the settings show it.
+static SEARCH_PATH: RwLock<Option<OsString>> = RwLock::new(None);
+
+/// Makes every tool the core runs from now on be found on `path` instead of the process's
+/// `PATH`.
+pub(crate) fn use_search_path(path: OsString) {
+    // A poisoned lock holds a whole value: it is only ever replaced whole.
+    *SEARCH_PATH.write().unwrap_or_else(PoisonError::into_inner) = Some(path);
+}
+
+/// Where tools are looked up: the login shell's `PATH` when set, otherwise the process's.
+fn search_path() -> Option<OsString> {
+    let set = SEARCH_PATH
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    set.or_else(|| env::var_os("PATH"))
+}
+
 /// Runs `program` with `input` on stdin, which is closed once it is written (at once when
 /// `input` is empty).
 fn run_raw(
@@ -125,7 +157,12 @@ fn run_raw(
     timeout: Duration,
 ) -> Result<Option<RawOutput>, InventoryError> {
     let command = command_line(program, args);
-    let child = Command::new(program)
+    let mut command_builder = Command::new(program);
+    // On Unix the child's `PATH` is also where `program` is searched, so this finds it too.
+    if let Some(path) = search_path() {
+        command_builder.env("PATH", path);
+    }
+    let child = command_builder
         .args(args)
         .current_dir("/")
         // Its own process group, so a timeout can stop the helpers it starts as well.
@@ -265,12 +302,18 @@ fn stop(child: &mut Child, command: &str, detail: String) -> InventoryError {
 /// Returns the file `program` runs: itself if it names a path, else the first match on `PATH`.
 pub(crate) fn which(program: &str) -> Option<PathBuf> {
     if program.contains('/') {
-        return Path::new(program).exists().then(|| PathBuf::from(program));
+        return executable(Path::new(program)).then(|| PathBuf::from(program));
     }
-    let path = env::var_os("PATH")?;
+    let path = search_path()?;
     env::split_paths(&path)
         .map(|dir| dir.join(program))
-        .find(|candidate| candidate.exists())
+        .find(|candidate| executable(candidate))
+}
+
+/// Whether `path` is a file someone may execute, as a shell's lookup requires: a directory or
+/// a plain file of the same name earlier on `PATH` is skipped.
+fn executable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 fn command_line(program: &str, args: &[&str]) -> String {
@@ -282,7 +325,6 @@ fn command_line(program: &str, args: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
 
@@ -425,7 +467,42 @@ mod tests {
     }
 
     #[test]
+    fn which_looks_on_the_newest_search_path() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for dir in [&first, &second] {
+            let probe = dir.path().join("ancient-protector-probe");
+            fs::write(&probe, "").unwrap();
+            fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SEARCH_PATH is the process's and is left set, and tests run in parallel: each path
+        // keeps /bin and /usr/bin, so every test that runs a tool by name (sh, echo, cat, ...)
+        // still finds it.
+        let set = |dir: &Path| {
+            use_search_path(
+                env::join_paths([dir, Path::new("/bin"), Path::new("/usr/bin")]).unwrap(),
+            );
+        };
+        set(first.path());
+        assert_eq!(
+            which("ancient-protector-probe"),
+            Some(first.path().join("ancient-protector-probe"))
+        );
+        set(second.path());
+        assert_eq!(
+            which("ancient-protector-probe"),
+            Some(second.path().join("ancient-protector-probe")),
+            "replaced, as after Look again"
+        );
+    }
+
+    #[test]
     fn which_finds_programs() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        fs::write(&plain, "").unwrap();
+        assert_eq!(which(plain.to_str().unwrap()), None, "not executable");
+        assert_eq!(which(dir.path().to_str().unwrap()), None, "a directory");
         assert!(which("sh").is_some());
         assert_eq!(which("/bin/sh"), Some(PathBuf::from("/bin/sh")));
         assert_eq!(which("ancient-protector-no-such-tool"), None);

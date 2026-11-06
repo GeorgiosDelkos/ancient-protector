@@ -12,7 +12,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Write as _;
 use std::process::Command;
+use std::process::Output;
+use std::process::Stdio;
 use std::str::FromStr;
 use std::thread;
 use std::time::Instant;
@@ -74,6 +77,73 @@ impl NvdAccess {
             .map_err(KeychainError::Run)?;
         from_security_output(output.status.code(), &output.stdout)
     }
+
+    /// Whether an API key is stored in the Keychain. Asks without `-w`, so the key itself is
+    /// never read; any failure counts as no key.
+    pub(crate) fn has_keychain_key() -> bool {
+        Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
+            .args(["-a", KEYCHAIN_ACCOUNT])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Stores `key` as the NVD API key in the login Keychain, replacing any earlier one.
+    ///
+    /// Through `/usr/bin/security`, the same program [`NvdAccess::from_keychain`] reads with, so
+    /// the item's access list trusts the reader and a sweep is not prompted. The command goes
+    /// to `security -i` on stdin: `security add-generic-password -w <key>` as arguments would
+    /// put the key on a command line other processes can read.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the key is not an NVD key (letters, digits and dashes), or the Keychain
+    /// refuses it.
+    pub fn save_to_keychain(key: &str) -> Result<(), KeychainError> {
+        let script = keychain_script(key).ok_or(KeychainError::NotAKey)?;
+        let mut child = Command::new("/usr/bin/security")
+            .arg("-i")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(KeychainError::Run)?;
+        child
+            .stdin
+            .take()
+            .expect("stdin was piped above")
+            .write_all(script.as_bytes())
+            .map_err(KeychainError::Run)?;
+        let output = child.wait_with_output().map_err(KeychainError::Run)?;
+        saved(&output)
+    }
+}
+
+/// Whether `security -i` stored the key. It exits 0 even when the command fails, and then
+/// prints the error or its usage on stderr (observed on macOS 26 with a scratch keychain), so
+/// any stderr is a failure. The text is not shown, since it could quote the command and with
+/// it the key.
+fn saved(output: &Output) -> Result<(), KeychainError> {
+    match (output.status.success(), output.stderr.is_empty()) {
+        (true, true) => Ok(()),
+        (true, false) => Err(KeychainError::Save("security reported an error".to_owned())),
+        (false, _) => Err(KeychainError::Save("security failed".to_owned())),
+    }
+}
+
+/// The `security -i` command that stores `key`, or `None` when `key` is not an NVD key. NVD's
+/// keys are UUIDs; accepting only letters, digits and inner dashes means the key needs no
+/// quoting and cannot end the command or start an option.
+fn keychain_script(key: &str) -> Option<String> {
+    let key = key.trim();
+    // 128 is arbitrary: NVD keys are 36 characters, and the bound only keeps out what is
+    // plainly not a key.
+    let plain = (1..=128).contains(&key.len())
+        && !key.starts_with('-')
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    plain.then(|| {
+        format!("add-generic-password -U -s {KEYCHAIN_SERVICE} -a {KEYCHAIN_ACCOUNT} -w {key}\n")
+    })
 }
 
 /// The key is a secret: it never appears in `Debug` output or logs.
@@ -102,7 +172,7 @@ fn from_security_output(code: Option<i32>, stdout: &[u8]) -> Result<NvdAccess, K
     }
 }
 
-/// Error from [`NvdAccess::from_keychain`].
+/// Error from reading or saving the NVD key in the Keychain.
 #[derive(Debug, thiserror::Error)]
 pub enum KeychainError {
     /// `/usr/bin/security` could not be started.
@@ -117,6 +187,14 @@ pub enum KeychainError {
     /// `security` was killed by a signal.
     #[error("security find-generic-password was killed by a signal")]
     Signal,
+    /// The text given is not an API key.
+    #[error("an NVD API key is one line of letters, digits and dashes; paste it again")]
+    NotAKey,
+    /// The Keychain refused to store the key.
+    #[error(
+        "the Keychain did not store the key: {0}; allow access in Keychain Access and try again"
+    )]
+    Save(String),
 }
 
 /// A CPE product, such as `openssl`, matched under any vendor, or `vendor:product`, such as
@@ -484,6 +562,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
     use crate::feeds::Endpoints;
     use crate::feeds::test_server::Request;
     use crate::feeds::test_server::TestServer;
@@ -523,6 +602,33 @@ mod tests {
 
     fn product(name: &str) -> Product {
         name.parse().unwrap()
+    }
+
+    #[test]
+    fn stderr_from_security_is_a_failed_save() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let output = |code: i32, stderr: &[u8]| Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        };
+        assert!(saved(&output(0, b"")).is_ok());
+        assert!(saved(&output(0, b"Usage: add-generic-password")).is_err());
+        assert!(saved(&output(1, b"")).is_err());
+    }
+
+    #[test]
+    fn only_an_nvd_key_reaches_the_keychain_command() {
+        let key = "1a2b3c4d-0000-4000-8000-0123456789ab";
+        assert_eq!(
+            keychain_script(&format!(" {key}\n")).unwrap(),
+            format!(
+                "add-generic-password -U -s {KEYCHAIN_SERVICE} -a {KEYCHAIN_ACCOUNT} -w {key}\n"
+            )
+        );
+        for bad in ["", "-U", "a b", "a\nb", "a\"b", "key;rm", &"a".repeat(129)] {
+            assert_eq!(keychain_script(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

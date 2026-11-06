@@ -6,8 +6,15 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": { "script": "pnpm dev", "cwd": "../ui", "wait": false },
-    "beforeBuildCommand": { "script": "pnpm build", "cwd": "../ui" }
+    "beforeDevCommand": {
+      "script": "pnpm dev",
+      "cwd": "../ui",
+      "wait": false
+    },
+    "beforeBuildCommand": {
+      "script": "pnpm build",
+      "cwd": "../ui"
+    }
   },
   "app": {
     "windows": [
@@ -15,23 +22,37 @@
         "label": "popover",
         "title": "Ancient Protector",
         "url": "index.html",
-        "width": 380,
-        "height": 520,
+        "width": 360,
+        "height": 620,
         "visible": false,
         "decorations": false,
         "resizable": false,
         "skipTaskbar": true,
-        "alwaysOnTop": true
+        "alwaysOnTop": true,
+        "transparent": true,
+        "shadow": true,
+        "windowEffects": {
+          "effects": [
+            "hudWindow"
+          ],
+          "state": "active",
+          "radius": 20
+        }
       }
     ],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
-    "icon": ["icons/icon.png"],
+    "targets": [
+      "app"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ],
     "category": "DeveloperTool"
   }
 }

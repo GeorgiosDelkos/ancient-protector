@@ -4,6 +4,8 @@
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -34,10 +36,56 @@ const POPOVER: &str = "popover";
 /// between the two events, shorter than a deliberate second click.
 const CLICK_AFTER_BLUR: Duration = Duration::from_millis(300);
 
-/// When the popover last hid because it lost focus.
+/// When the popover last hid because it lost focus, and whether it is held open.
 #[derive(Debug, Default)]
 pub(crate) struct Popover {
     hidden_on_blur: Mutex<Option<Instant>>,
+    /// How many holds are alive. Each covers a time a system dialog can take the focus, which
+    /// would otherwise hide the popover and the view that caused it: the folder picker, and
+    /// the privacy and Keychain prompts macOS shows while detection reads `~/Documents` and
+    /// runs `gh`. A count, since detection and the picker can overlap.
+    held: AtomicUsize,
+}
+
+/// Holds the popover open until dropped.
+#[derive(Debug)]
+pub(crate) struct Held<'a> {
+    app: &'a AppHandle,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        // Relaxed: the count guards no other data; the next blur reads whatever is set by then.
+        let left = self
+            .app
+            .state::<Popover>()
+            .held
+            .fetch_sub(1, Ordering::Relaxed);
+        if left != 1 {
+            return;
+        }
+        // A blur while held was ignored, so the last hold closes a popover that lost the focus
+        // meanwhile (the user clicked elsewhere, or a prompt kept it), as that blur would have.
+        // On the main thread, where blurs are handled, so this never waits on it, and with the
+        // count read again there: a hold taken since keeps the popover open. Best effort: a
+        // popover left open closes on the next click elsewhere or on the icon.
+        let app = self.app.clone();
+        drop(self.app.run_on_main_thread(move || {
+            if app.state::<Popover>().held.load(Ordering::Relaxed) == 0
+                && let Some(window) = app.get_webview_window(POPOVER)
+                && window.is_visible().unwrap_or(false)
+                && !window.is_focused().unwrap_or(true)
+            {
+                drop(window.hide());
+            }
+        }));
+    }
+}
+
+/// Keeps the popover open while the result lives, as a system dialog takes the focus.
+pub(crate) fn hold_popover(app: &AppHandle) -> Held<'_> {
+    app.state::<Popover>().held.fetch_add(1, Ordering::Relaxed);
+    Held { app }
 }
 
 impl Popover {
@@ -51,7 +99,11 @@ impl Popover {
 
 /// Hides the popover because it lost focus, as a menu closes.
 pub(crate) fn hide_on_blur(window: &Window) {
-    *window.state::<Popover>().last_blur() = Some(Instant::now());
+    let popover = window.state::<Popover>();
+    if popover.held.load(Ordering::Relaxed) > 0 {
+        return;
+    }
+    *popover.last_blur() = Some(Instant::now());
     // Best effort: a window that will not hide stays until the next click.
     drop(window.hide());
 }
@@ -132,11 +184,12 @@ pub(crate) fn refresh(app: &AppHandle) {
 fn look(app: &AppHandle) -> Look {
     let runner = app.state::<Runner>();
     match runner.status() {
-        Status::Sweeping { .. } => return Look::Sweeping,
+        Status::Sweeping { .. } | Status::Fixing { .. } => return Look::Sweeping,
         Status::Failed { .. } => return Look::Failed,
         Status::Idle => {}
     }
-    let Ok(config) = Config::load(&runner.data_dir().config_file(), runner.home()) else {
+    let Ok(config) = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+    else {
         return Look::Failed;
     };
     let Ok(targets) = latest(runner.data_dir(), &config) else {

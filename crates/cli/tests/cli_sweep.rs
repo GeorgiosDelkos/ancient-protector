@@ -808,6 +808,44 @@ fn findings_list_what_is_open_and_one_target_can_be_swept() {
     assert_eq!(lines[1]["open"], serde_json::json!([]));
     assert_eq!(lines[1]["dismissed"], 1);
 
+    assert!(sandbox.run(&["undismiss", &key]).status.success());
+    let json = text(&sandbox.run(&["findings", "--json"]).stdout);
+    let repo: serde_json::Value = serde_json::from_str(json.lines().nth(1).unwrap()).unwrap();
+    let open = &repo["open"][0];
+    assert_eq!(repo["open"].as_array().map(Vec::len), Some(1), "{repo}");
+    for (field, value) in [
+        ("key", serde_json::json!(key)),
+        ("severity", serde_json::json!("medium")),
+        ("title", serde_json::json!("file github/workflows/ci.yml")),
+        ("name", serde_json::json!("github/workflows/ci.yml")),
+        ("version", serde_json::Value::Null),
+        ("advisories", serde_json::json!([])),
+        ("known_exploited", serde_json::json!(false)),
+        ("explanation", serde_json::json!("x")),
+        ("fix", serde_json::json!("s")),
+        ("commands", serde_json::json!([])),
+        ("new", serde_json::json!(false)),
+    ] {
+        assert_eq!(open[field], value, "{field}: {open}");
+    }
+    assert!(open["first_seen"].is_string(), "{open}");
+    assert!(repo["components"].as_u64().is_some(), "{repo}");
+
+    let mac = sandbox
+        .command("ok")
+        .args(["sweep", "--target", "mac"])
+        .output()
+        .unwrap();
+    assert!(mac.status.success(), "{}", text(&mac.stderr));
+    assert!(!text(&mac.stdout).contains("# Sweep of github:o/r"));
+    let listed = text(&sandbox.run(&["findings"]).stdout);
+    assert!(listed.starts_with("mac (swept "), "{listed}");
+}
+
+#[test]
+fn a_target_name_that_matches_nothing_runs_nothing() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    assert!(sandbox.sweep("ok").status.success());
     let unknown = sandbox
         .command("ok")
         .args(["sweep", "--target", "github:o/x"])
@@ -834,23 +872,4 @@ fn findings_list_what_is_open_and_one_target_can_be_swept() {
         (folders, runs),
         "nothing ran for unknown names"
     );
-
-    assert!(sandbox.run(&["undismiss", &key]).status.success());
-    let json = text(&sandbox.run(&["findings", "--json"]).stdout);
-    let repo: serde_json::Value = serde_json::from_str(json.lines().nth(1).unwrap()).unwrap();
-    assert_eq!(
-        repo["open"],
-        serde_json::json!([{"key": key, "severity": "medium",
-            "title": "file github/workflows/ci.yml", "fix": "s"}])
-    );
-
-    let mac = sandbox
-        .command("ok")
-        .args(["sweep", "--target", "mac"])
-        .output()
-        .unwrap();
-    assert!(mac.status.success(), "{}", text(&mac.stderr));
-    assert!(!text(&mac.stdout).contains("# Sweep of github:o/r"));
-    let listed = text(&sandbox.run(&["findings"]).stdout);
-    assert!(listed.starts_with("mac (swept "), "{listed}");
 }

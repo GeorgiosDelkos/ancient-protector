@@ -96,6 +96,17 @@ impl AgentKind {
         }
     }
 
+    /// The agent's name as people know it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Grok => "Grok",
+            Self::Codex => "Codex",
+            Self::Gemini => "Gemini CLI",
+            Self::Opencode => "opencode",
+        }
+    }
+
     /// Finds the agent's executable the way a login shell would (zsh reads `.zprofile`, not
     /// `.zshrc`), since an app started at login gets a `PATH` without `~/.local/bin`, nvm or
     /// Homebrew. Returns `None` when the shell cannot find it as a file (an alias or a shell

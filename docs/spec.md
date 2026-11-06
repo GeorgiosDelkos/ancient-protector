@@ -32,7 +32,7 @@ and the user can approve a fix the agent then performs.
 | Surfacing | Tray icon state, macOS notification on new critical/high, JSON + Markdown report per sweep |
 | Lifecycle | Dismiss with reason, diff vs last sweep, fix history (see "Lifecycle") |
 | Concurrency | One agent run per target, sequential |
-| UI | Tauri 2 + SolidJS/TS; popover + details/settings window; follows system light/dark |
+| UI | Tauri 2 + SolidJS/TS; one popover holding findings, details and settings; every value it shows is worked out in Rust, the UI only lays it out |
 | Storage | Files in `~/Library/Application Support/ancient-protector/` |
 | CLI | Yes, thin CLI over the same core |
 | Distribution | Personal build first; signed + notarized DMG later; launch at login |
@@ -393,9 +393,8 @@ not an OSV ecosystem, so formulae go through NVD.
 
 Built in step 9a (2026-11-06):
 
-- Settings are shown, not edited: the popover lists the agent and schedule, and "Edit settings"
-  opens `config.toml` in the user's text editor (decided 2026-11-06), so the file stays the one
-  source of truth for the app, the CLI and agents. The config is read again on every refresh.
+- Settings were first only shown, with "Edit settings" opening `config.toml`; step 9b edits
+  them in the popover. The config is read again on every refresh.
 - The tray icon is a coloured dot: green (nothing open), yellow, orange or red (worst open
   severity), blue (sweeping), grey (the last sweep failed or a target got no verdict).
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
@@ -426,6 +425,42 @@ Built in step 9a (2026-11-06):
   sweep that panics leaves a failed status, not a stuck "sweeping".
 - Run it: `cargo tauri dev` from `app/src-tauri` (starts the UI dev server), or `cargo tauri
   build` for `Ancient Protector.app`.
+
+Built in step 9b (2026-11-06):
+
+- Settings live inside the popover (a section list with Back, sized to the popover) and are
+  saved into `config.toml` through `toml_edit`, so its comments stay. A missing config is the
+  default one; the first change writes it. Each change is one `Setting` (add or remove a
+  folder, repository or server; set the agent, schedule or history) checked like a loaded
+  config before it is written.
+- Every value the UI shows is worked out in Rust (owner's rule, 2026-11-06): the core's
+  `popover_view` ranks findings (exploited, then severity, then newest), counts them, writes
+  the headline and the target lines; `settings_view` writes each section's summary, the
+  choices and which are chosen, folders as `~/...`, and whether a host can be added. The UI
+  lays these out and sends `Setting`s; the only formatting left in TypeScript is "5 min ago",
+  which follows the popover's clock.
+- Detection (agents and tools on the login shell's `PATH`, the gh login and repositories,
+  `~/.ssh/config` hosts, project folders, the Keychain key) takes about two seconds, so it
+  runs once as the app starts and again only on "Look again". A change returns the new view
+  at once instead of detecting again.
+- Each detection also sets the `PATH` every tool and agent then runs with, so a tool found
+  by "Look again" is the one the next sweep runs. Until the first detection at start ends,
+  tools run with macOS's minimal `PATH` (accepted: a sweep that early is rare).
+- Saves take an exclusive lock on `.config.toml.lock`, so two at once (quick clicks; any
+  other process that saves later) both land. A key written another way than a change expects (an inline
+  table, `repos = "o/r"`) is refused with what to change, never replaced.
+- A confirmed fix carries the preview's `found`; the app refuses it when a newer sweep
+  changed the finding, and the confirm shows the commands that will run.
+- The NVD key is saved with `/usr/bin/security -i`, the command on stdin, so the program
+  that reads it before each sweep is the one that created it and is trusted without a
+  prompt. Accepted: a key saved by an earlier build through Security.framework may prompt
+  once; "Always Allow" or saving it again fixes that.
+- The popover stays open while detection or the folder picker runs: macOS asks for Documents
+  or Keychain access then, and the prompt would take the focus and hide it.
+- Tests: the views and changes have Rust unit tests in the core (mutation-tested in CI); the
+  popover and settings have component tests (Vitest, jsdom, `@solidjs/testing-library`) with
+  the Tauri commands mocked, checking that each control sends the right command and shows
+  what Rust returns.
 
 ### CLI
 

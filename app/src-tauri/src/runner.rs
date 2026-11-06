@@ -17,13 +17,19 @@ use std::thread;
 use std::time::Duration;
 
 use ancient_protector_core::Config;
+use ancient_protector_core::Confirmed;
 use ancient_protector_core::DataDir;
+use ancient_protector_core::FindingKey;
+use ancient_protector_core::FixPlan;
 use ancient_protector_core::Progress;
 use ancient_protector_core::Report;
 use ancient_protector_core::Targets;
 use ancient_protector_core::alerts;
 use ancient_protector_core::last_sweep_started;
+use ancient_protector_core::plan_fix;
+use ancient_protector_core::run_fix;
 use ancient_protector_core::sweep;
+use ancient_protector_core::target_names;
 use jiff::Timestamp;
 use serde::Serialize;
 use tauri::AppHandle;
@@ -68,6 +74,19 @@ pub(crate) enum Status {
     Sweeping {
         /// Its current step, one line.
         step: String,
+        /// The target it is on.
+        current: Option<String>,
+        /// The targets it has finished, in order.
+        done: Vec<String>,
+        /// The targets still to come, in order.
+        pending: Vec<String>,
+        /// When it started.
+        started: Timestamp,
+    },
+    /// A confirmed fix is running.
+    Fixing {
+        /// What it fixes, one line.
+        title: String,
     },
     /// The last sweep stopped, a target in it got no verdict, or the schedule could not be
     /// checked.
@@ -101,6 +120,22 @@ impl Runner {
         self.lock().status.clone()
     }
 
+    /// Claims the runner for a sweep or a fix, unless one is already running: one check and
+    /// one write under one lock.
+    fn claim(&self, status: Status) -> Result<(), &'static str> {
+        let mut shared = self.lock();
+        match shared.status {
+            Status::Sweeping { .. } => return Err("a sweep is running"),
+            Status::Fixing { .. } => return Err("a fix is running"),
+            Status::Idle | Status::Failed { .. } => {}
+        }
+        if matches!(status, Status::Sweeping { .. }) {
+            shared.started = Some(Timestamp::now());
+        }
+        shared.status = status;
+        Ok(())
+    }
+
     fn set(&self, status: Status) {
         self.lock().status = status;
     }
@@ -116,19 +151,19 @@ impl Runner {
 ///
 /// # Errors
 ///
-/// Fails when a sweep started from the app is already running.
+/// Fails when a sweep or a fix started from the app is already running.
 pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
     let runner = app.state::<Runner>();
-    {
-        let mut shared = runner.lock();
-        if matches!(shared.status, Status::Sweeping { .. }) {
-            return Err("a sweep is already running");
-        }
-        shared.status = Status::Sweeping {
-            step: "starting".to_owned(),
-        };
-        shared.started = Some(Timestamp::now());
-    }
+    let pending = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+        .map(|config| target_names(&config))
+        .unwrap_or_default();
+    runner.claim(Status::Sweeping {
+        step: "starting".to_owned(),
+        current: None,
+        done: Vec::new(),
+        pending,
+        started: Timestamp::now(),
+    })?;
     changed(app);
     let app = app.clone();
     thread::spawn(move || {
@@ -149,13 +184,11 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
 fn run(app: &AppHandle) -> Status {
     let runner = app.state::<Runner>();
     let config_path = runner.data_dir().config_file();
-    let swept = Config::load(&config_path, runner.home())
+    let swept = Config::load_or_default(&config_path, runner.home())
         .map_err(|e| e.to_string())
         .and_then(|config| {
             let mut progress = |p: Progress<'_>| {
-                runner.set(Status::Sweeping {
-                    step: p.to_string(),
-                });
+                advance(&mut runner.lock().status, &p);
                 changed(app);
             };
             sweep(runner.data_dir(), &config, Targets::All, &mut progress)
@@ -171,6 +204,91 @@ fn run(app: &AppHandle) -> Status {
         }
         Err(error) => Status::Failed { error },
     }
+}
+
+/// Moves a running sweep's status on by one progress event: a new target finishes the one
+/// before it.
+fn advance(status: &mut Status, progress: &Progress<'_>) {
+    let Status::Sweeping {
+        step,
+        current,
+        done,
+        pending,
+        ..
+    } = status
+    else {
+        return;
+    };
+    if let Progress::Target { target } = progress {
+        done.extend(current.take());
+        pending.retain(|t| t != target);
+        *current = Some((*target).to_owned());
+    }
+    *step = progress.to_string();
+}
+
+/// How a fix ended, for the popover.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FixDone {
+    key: String,
+    outcome: String,
+    summary: String,
+    pull_request: Option<String>,
+}
+
+/// Runs the confirmed fix of `key` on its own thread, and tells the popover how it ended with
+/// a `fix-done` event.
+///
+/// The fix is planned again and runs only when it comes from the sweep that found the one the
+/// user confirmed (`found`, from the preview), so a sweep that landed since the preview is
+/// refused instead of running commands the user never saw. `run_fix` checks the plan against
+/// the reports once more under the sweeps lock, which catches a sweep that lands after this.
+///
+/// # Errors
+///
+/// Fails when the fix cannot be planned, changed since the preview, or a sweep or another fix
+/// is running.
+pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> Result<(), String> {
+    let plan = plan(app, key)?;
+    if plan.found() != found {
+        return Err("a newer sweep ran; open the finding again to see its fix".to_owned());
+    }
+    let title = plan.fix().summary.clone();
+    app.state::<Runner>().claim(Status::Fixing { title })?;
+    changed(app);
+    let app = app.clone();
+    thread::spawn(move || {
+        let done = panic::catch_unwind(AssertUnwindSafe(|| {
+            let runner = app.state::<Runner>();
+            run_fix(runner.data_dir(), &plan, Confirmed::Asked).map_err(|e| e.to_string())
+        }))
+        .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
+        let event = match done {
+            Ok(record) => FixDone {
+                key: key.to_string(),
+                outcome: record.outcome.to_string(),
+                summary: record.summary,
+                pull_request: record.pull_request,
+            },
+            Err(error) => FixDone {
+                key: key.to_string(),
+                outcome: "failed".to_owned(),
+                summary: error,
+                pull_request: None,
+            },
+        };
+        app.state::<Runner>().set(Status::Idle);
+        drop(app.emit("fix-done", event));
+        changed(&app);
+    });
+    Ok(())
+}
+
+fn plan(app: &AppHandle, key: FindingKey) -> Result<FixPlan, String> {
+    let runner = app.state::<Runner>();
+    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+        .map_err(|e| e.to_string())?;
+    plan_fix(runner.data_dir(), &config, key).map_err(|e| e.to_string())
 }
 
 /// Idle when every target got a verdict, otherwise the first that did not, and why.
@@ -215,7 +333,9 @@ pub(crate) fn schedule(app: AppHandle) {
         loop {
             thread::sleep(SCHEDULE_CHECK);
             let runner = app.state::<Runner>();
-            let Ok(config) = Config::load(&runner.data_dir().config_file(), runner.home()) else {
+            let Ok(config) =
+                Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+            else {
                 continue;
             };
             let on_disk = match last_sweep_started(runner.data_dir()) {
@@ -224,7 +344,10 @@ pub(crate) fn schedule(app: AppHandle) {
                     // Under one lock, so a running sweep's status is never overwritten. The
                     // failure shows until the next sweep sets the status again.
                     let mut shared = runner.lock();
-                    if !matches!(shared.status, Status::Sweeping { .. }) {
+                    if !matches!(
+                        shared.status,
+                        Status::Sweeping { .. } | Status::Fixing { .. }
+                    ) {
                         shared.status = Status::Failed {
                             error: format!("cannot check the schedule: {e}"),
                         };
@@ -236,7 +359,7 @@ pub(crate) fn schedule(app: AppHandle) {
             };
             let last = on_disk.max(runner.lock().started);
             if config.schedule.due(last, Timestamp::now()) {
-                // Refused only when a sweep from a click is already running; this check is
+                // Refused only when a sweep or fix from the popover is running; this check is
                 // then skipped.
                 start(&app).ok();
             }
@@ -247,6 +370,46 @@ pub(crate) fn schedule(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_target_finishes_the_one_before_it() {
+        let mut status = Status::Sweeping {
+            step: "starting".to_owned(),
+            current: None,
+            done: Vec::new(),
+            pending: vec!["mac".to_owned(), "server:web".to_owned()],
+            started: Timestamp::UNIX_EPOCH,
+        };
+        advance(&mut status, &Progress::Target { target: "mac" });
+        advance(&mut status, &Progress::Inventory);
+        advance(
+            &mut status,
+            &Progress::Target {
+                target: "server:web",
+            },
+        );
+        let Status::Sweeping {
+            step,
+            current,
+            done,
+            pending,
+            ..
+        } = status
+        else {
+            panic!("still sweeping");
+        };
+        assert_eq!(step, "sweeping server:web");
+        assert_eq!(current.as_deref(), Some("server:web"));
+        assert_eq!(done, ["mac"]);
+        assert_eq!(pending, Vec::<String>::new());
+
+        let mut idle = Status::Idle;
+        advance(&mut idle, &Progress::Inventory);
+        assert!(
+            matches!(idle, Status::Idle),
+            "only a running sweep advances"
+        );
+    }
 
     #[test]
     fn a_notification_names_up_to_three_alerts() {
