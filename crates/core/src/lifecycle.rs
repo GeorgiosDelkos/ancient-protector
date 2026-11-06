@@ -629,5 +629,13 @@ mod tests {
             Changes::since_last(sweeps, "mac", &BTreeSet::new(), &BTreeSet::new()),
             Err(StateError::Read { path, .. }) if path == broken
         ));
+
+        // A report that exists but cannot be read is an error too, not a missing report.
+        fs::remove_file(&broken).unwrap();
+        fs::create_dir(&broken).unwrap();
+        assert!(matches!(
+            Changes::since_last(sweeps, "mac", &BTreeSet::new(), &BTreeSet::new()),
+            Err(StateError::Read { path, .. }) if path == broken
+        ));
     }
 }
