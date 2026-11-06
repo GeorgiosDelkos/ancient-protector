@@ -376,6 +376,7 @@ mod tests {
             source,
             id: id.to_owned(),
             aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+            modified: None,
             record: RawValue::from_string(record.to_string()).unwrap(),
         }
     }

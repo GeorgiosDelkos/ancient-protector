@@ -167,11 +167,14 @@ pub(crate) struct Verdict {
     pub(crate) issues: Vec<Issue>,
 }
 
-/// A finding that passed validation, with the index of its component.
+/// A finding that passed validation, with the index of its component and the bundle advisory
+/// its first listed id resolved to. That advisory, not the listed id, keys the finding: an
+/// agent may list a GHSA's CVE first in one sweep and the GHSA in the next.
 #[derive(Debug)]
 pub(crate) struct Valid {
     pub(crate) finding: Finding,
     pub(crate) component: usize,
+    pub(crate) advisory: String,
 }
 
 /// Parses and checks `findings.json` against what the bundle offered, and sets
@@ -254,7 +257,15 @@ fn check_findings(findings: Vec<Finding>, known: &Known, problems: &mut Vec<Stri
                 finding.severity = finding.severity.min(Severity::High);
             }
         }
-        valid.push(Valid { finding, component });
+        let advisory = advisories
+            .into_iter()
+            .next()
+            .expect("a finding without problems resolved at least one advisory");
+        valid.push(Valid {
+            finding,
+            component,
+            advisory,
+        });
     }
     valid
 }

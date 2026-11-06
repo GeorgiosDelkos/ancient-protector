@@ -44,7 +44,6 @@ use crate::findings::Finding;
 use crate::findings::Fix;
 use crate::findings::Issue;
 use crate::findings::Known;
-use crate::findings::Valid;
 use crate::findings::Verdict;
 use crate::findings::is_forging;
 use crate::github;
@@ -52,6 +51,10 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::Lookup;
+use crate::lifecycle::Changes;
+use crate::lifecycle::Dismissal;
+use crate::lifecycle::Dismissals;
+use crate::lifecycle::FindingKey;
 use crate::paths::DataDir;
 use crate::server;
 
@@ -139,7 +142,10 @@ pub struct Report {
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
     /// Risky settings and files, most severe first.
-    pub issues: Vec<Issue>,
+    pub issues: Vec<ReportIssue>,
+    /// What changed since this target's last sweep with a verdict; `None` without a verdict
+    /// now or then.
+    pub changes: Option<Changes>,
     /// What could not be checked: failed sources, unknown products, tools not installed.
     pub problems: Vec<String>,
     /// Why the agent's verdict is missing, when it is.
@@ -160,6 +166,7 @@ impl Report {
             advisories: 0,
             findings: Vec::new(),
             issues: Vec::new(),
+            changes: None,
             problems: Vec::new(),
             failure: None,
             dir,
@@ -170,11 +177,29 @@ impl Report {
 /// A finding with the component it names spelled out.
 #[derive(Debug, Serialize)]
 pub struct ReportFinding {
+    /// Its key, the same in every sweep that finds it.
+    pub key: FindingKey,
     /// The agent's finding.
     #[serde(flatten)]
     pub finding: Finding,
     /// The affected component.
     pub installed: Component,
+    /// When the primary advisory was last modified, when its source says.
+    pub modified: Option<Timestamp>,
+    /// The user's dismissal, while it holds.
+    pub dismissed: Option<Dismissal>,
+}
+
+/// An issue with its key.
+#[derive(Debug, Serialize)]
+pub struct ReportIssue {
+    /// Its key, the same in every sweep that finds it.
+    pub key: FindingKey,
+    /// The agent's issue.
+    #[serde(flatten)]
+    pub issue: Issue,
+    /// The user's dismissal.
+    pub dismissed: Option<Dismissal>,
 }
 
 /// Sweeps this Mac and every repository in `config.repos`, one after the other, with the
@@ -213,8 +238,16 @@ pub fn sweep(
             None
         }
     };
+    let dismissals = Dismissals::load(data_dir).unwrap_or_else(|e| {
+        notes.push(format!(
+            "dismissals, so dismissed findings show again: {}",
+            error_chain(&e)
+        ));
+        Dismissals::default()
+    });
     let shared = Shared {
         data_dir,
+        dismissals: &dismissals,
         sources: Sources {
             feeds: &feeds,
             history: config.history,
@@ -244,6 +277,7 @@ pub fn sweep(
 #[derive(Debug)]
 struct Shared<'a> {
     data_dir: &'a DataDir,
+    dismissals: &'a Dismissals,
     sources: Sources<'a>,
     agent: AgentKind,
     located: &'a Located,
@@ -419,23 +453,61 @@ impl Shared<'_> {
             Ok(verdict) => (verdict, None),
             Err(failure) => (Verdict::default(), Some(plain(&failure))),
         };
+        let modified: BTreeMap<&str, Option<Timestamp>> = fetched
+            .iter()
+            .map(|(a, _)| (a.id.as_str(), a.modified))
+            .collect();
+        let target = collected.target.as_str();
         let mut findings: Vec<ReportFinding> = verdict
             .findings
             .into_iter()
-            .map(|Valid { finding, component }| ReportFinding {
-                finding,
-                installed: collected.components[component].clone(),
+            .map(|valid| {
+                let installed = collected.components[valid.component].clone();
+                let found_in = installed.found_in.to_string();
+                let key = FindingKey::new(&[
+                    target,
+                    &valid.advisory,
+                    &component_name(&installed),
+                    &found_in,
+                ]);
+                let modified = modified.get(valid.advisory.as_str()).copied().flatten();
+                ReportFinding {
+                    key,
+                    finding: valid.finding,
+                    installed,
+                    modified,
+                    dismissed: self.dismissals.get(key, modified).cloned(),
+                }
             })
             .collect();
         findings.sort_by_key(|f| f.finding.severity);
-        let mut issues = verdict.issues;
-        issues.sort_by_key(|i| i.severity);
+        let mut issues: Vec<ReportIssue> = verdict
+            .issues
+            .into_iter()
+            .map(|issue| {
+                let key = FindingKey::new(&[target, &issue.subject.to_string()]);
+                ReportIssue {
+                    key,
+                    issue,
+                    dismissed: self.dismissals.get(key, None).cloned(),
+                }
+            })
+            .collect();
+        issues.sort_by_key(|i| i.issue.severity);
+        let changes = failure.is_none().then(|| {
+            let keys = findings
+                .iter()
+                .map(|f| f.key)
+                .chain(issues.iter().map(|i| i.key));
+            Changes::since_last(&self.data_dir.sweeps_dir(), target, &keys.collect())
+        });
 
         let mut report = Report::new(started, collected.target, self.agent, dir.clone());
         report.components = collected.components.len();
         report.advisories = entries.len();
         report.findings = findings;
         report.issues = issues;
+        report.changes = changes.flatten();
         report.problems = problems.iter().map(|p| plain(p)).collect();
         report.failure = failure;
         save_report(&dir, &mut report);
@@ -772,7 +844,19 @@ pub fn report_markdown(report: &Report) -> String {
         report.target, report.started, report.agent, report.components, report.advisories
     );
     out.push_str(&headline(report));
-    for group in by_component(&report.findings) {
+    if let Some(changes) = &report.changes {
+        out.push_str(&format!(
+            "Since the sweep of {}: {} new, {} resolved.\n\n",
+            changes.since,
+            changes.new.len(),
+            changes.resolved.len()
+        ));
+    }
+    let (findings, dismissed_findings): (Vec<&ReportFinding>, Vec<&ReportFinding>) =
+        report.findings.iter().partition(|f| f.dismissed.is_none());
+    let (issues, dismissed_issues): (Vec<&ReportIssue>, Vec<&ReportIssue>) =
+        report.issues.iter().partition(|i| i.dismissed.is_none());
+    for group in by_component(&findings) {
         let first = group[0];
         let advisories = if group.len() == 1 {
             "1 advisory".to_owned()
@@ -787,14 +871,42 @@ pub fn report_markdown(report: &Report) -> String {
             escape(&first.installed.found_in.to_string()),
         ));
         for f in group {
-            out.push_str(&finding_markdown(&f.finding));
+            out.push_str(&finding_markdown(f.key, &f.finding));
         }
     }
-    if !report.issues.is_empty() {
+    if !issues.is_empty() {
         out.push_str("## Settings and files\n\n");
-        for issue in &report.issues {
-            out.push_str(&issue_markdown(issue));
+        for issue in issues {
+            out.push_str(&issue_markdown(issue.key, &issue.issue));
         }
+    }
+    let dismissed = dismissed_findings
+        .iter()
+        .map(|f| {
+            let what = format!(
+                "{} {} in {}",
+                f.finding.advisories.join(", "),
+                component_name(&f.installed),
+                f.installed.found_in
+            );
+            (f.key, f.finding.severity, what, f.dismissed.as_ref())
+        })
+        .chain(dismissed_issues.iter().map(|i| {
+            let what = i.issue.subject.to_string();
+            (i.key, i.issue.severity, what, i.dismissed.as_ref())
+        }));
+    let mut dismissed = dismissed.peekable();
+    if dismissed.peek().is_some() {
+        out.push_str("## Dismissed\n\n");
+        for (key, severity, what, dismissal) in dismissed {
+            let reason = dismissal.map_or("", |d| d.reason.as_str());
+            out.push_str(&format!(
+                "- {severity} {} (key {key}): {}\n",
+                escape(&what),
+                escape(reason)
+            ));
+        }
+        out.push('\n');
     }
     if !report.problems.is_empty() {
         out.push_str("## Not checked\n\n");
@@ -810,7 +922,8 @@ fn headline(report: &Report) -> String {
     if let Some(failure) = &report.failure {
         return format!("**No verdict:** {}\n\n", escape(failure));
     }
-    let nothing_found = report.findings.is_empty() && report.issues.is_empty();
+    let nothing_found = report.findings.iter().all(|f| f.dismissed.is_some())
+        && report.issues.iter().all(|i| i.dismissed.is_some());
     match (nothing_found, report.problems.is_empty()) {
         (true, true) => "Nothing affected or risky was found.\n\n".to_owned(),
         (true, false) => "Nothing affected or risky was found in what was checked; some things \
@@ -823,9 +936,9 @@ fn headline(report: &Report) -> String {
 /// Groups findings by component (same lookup, version and place found), in the order of each
 /// group's first finding. Findings are sorted most severe first, so each group starts with its
 /// worst finding and the groups come worst first.
-fn by_component(findings: &[ReportFinding]) -> Vec<Vec<&ReportFinding>> {
+fn by_component<'a>(findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
     let mut groups: Vec<Vec<&ReportFinding>> = Vec::new();
-    for f in findings {
+    for &f in findings {
         let key = component_key(&f.installed);
         match groups
             .iter_mut()
@@ -847,14 +960,14 @@ fn component_key(component: &Component) -> String {
     )
 }
 
-fn finding_markdown(finding: &Finding) -> String {
+fn finding_markdown(key: FindingKey, finding: &Finding) -> String {
     let exploited = if finding.known_exploited {
         ", known exploited"
     } else {
         ""
     };
     let mut out = format!(
-        "### {} {} ({}{exploited})\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
+        "### {} {} ({}{exploited})\n\nKey: {key}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
         finding.severity,
         escape(&finding.advisories.join(", ")),
         finding.confidence,
@@ -866,9 +979,9 @@ fn finding_markdown(finding: &Finding) -> String {
     out
 }
 
-fn issue_markdown(issue: &Issue) -> String {
+fn issue_markdown(key: FindingKey, issue: &Issue) -> String {
     let mut out = format!(
-        "### {} {}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
+        "### {} {}\n\nKey: {key}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
         issue.severity,
         escape(&issue.subject.to_string()),
         escape(&issue.explanation),
@@ -1170,6 +1283,9 @@ mod tests {
 
     fn report_finding(id: &str, severity: &str, kev: bool, lookup: &str) -> ReportFinding {
         ReportFinding {
+            key: FindingKey::new(&[id, lookup]),
+            modified: None,
+            dismissed: None,
             finding: serde_json::from_value(json!({
                 "advisories": [id],
                 "component": "c1",
@@ -1195,6 +1311,7 @@ mod tests {
             advisories: 1,
             findings,
             issues: Vec::new(),
+            changes: None,
             problems: problems.iter().map(|p| (*p).to_owned()).collect(),
             failure: None,
             dir: PathBuf::from("/tmp/s"),
@@ -1247,13 +1364,20 @@ mod tests {
         }))
         .unwrap();
         let with_issue = Report {
-            issues: vec![issue],
+            issues: vec![ReportIssue {
+                key: FindingKey::new(&["issue"]),
+                issue,
+                dismissed: None,
+            }],
             ..report(vec![], &[])
         };
         let text = report_markdown(&with_issue);
         assert!(text.contains("## Settings and files\n\n"), "{text}");
         assert!(
-            text.contains("### medium setting default\\_branch\\_protection\n\nWhy: Anyone"),
+            text.contains(&format!(
+                "### medium setting default\\_branch\\_protection\n\nKey: {}\n\nWhy: Anyone",
+                FindingKey::new(&["issue"])
+            )),
             "{text}"
         );
         assert!(text.contains("```sh\ngh api -X PUT x\n```"), "{text}");
@@ -1502,10 +1626,10 @@ mod markdown_properties {
                 "fix": {"summary": summary, "steps": [], "commands": commands}
             }))
             .unwrap();
-            let text = finding_markdown(&finding);
+            let text = finding_markdown(FindingKey::new(&[]), &finding);
             let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
             prop_assert!(lines[0].starts_with("### low GHSA-1 (likely)"));
-            for (line, label) in lines[1..4].iter().zip(["Why:", "Evidence:", "Fix:"]) {
+            for (line, label) in lines[1..5].iter().zip(["Key:", "Why:", "Evidence:", "Fix:"]) {
                 prop_assert!(line.starts_with(label), "{:?}", line);
             }
 
@@ -1517,7 +1641,7 @@ mod markdown_properties {
                 .skip(2)
                 .collect();
             if commands.is_empty() {
-                prop_assert_eq!(lines.len(), 4, "{:?}", text);
+                prop_assert_eq!(lines.len(), 5, "{:?}", text);
             } else {
                 let fence = body[0].strip_suffix("sh").unwrap();
                 prop_assert!(fence.len() >= 3 && fence.bytes().all(|b| b == b'`'));

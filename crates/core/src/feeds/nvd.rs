@@ -419,6 +419,7 @@ fn advisories(cves: BTreeMap<String, Box<RawValue>>, history: History) -> Vec<Ad
                 source: Source::Nvd,
                 id,
                 aliases: Vec::new(),
+                modified,
                 record,
             })
         })

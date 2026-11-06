@@ -22,6 +22,14 @@ test -f PROMPT.md || { echo "no PROMPT.md in $(pwd)" >&2; exit 9; }
 echo "args: $*"
 case "$FAKE_AGENT_MODE:$n" in
   ok:*) echo '{"findings": [], "issues": []}' > findings.json ;;
+  issue:*)
+    if [ -f github/workflows/ci.yml ]; then
+      echo '{"findings": [], "issues": [{"subject": {"file": "github/workflows/ci.yml"},
+        "severity": "medium", "evidence": "e", "explanation": "x",
+        "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json
+    else
+      echo '{"findings": [], "issues": []}' > findings.json
+    fi ;;
   retry:1) echo '{"findings": [], "issues": [], "bogus": 1}' > findings.json ;;
   retry:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
@@ -137,6 +145,35 @@ impl Sandbox {
             .env_remove("no_proxy")
             .output()
             .expect("the test binary was built by cargo")
+    }
+
+    /// Runs the CLI with `args` against the sandbox's data directory.
+    fn run(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+            .arg("--data-dir")
+            .arg(self.path().join("data"))
+            .args(args)
+            .output()
+            .expect("the test binary was built by cargo")
+    }
+
+    /// `report.json` of `target` in the newest sweep folder.
+    fn newest_report(&self, target: &str) -> serde_json::Value {
+        let mut dirs: Vec<_> = fs::read_dir(self.path().join("data/sweeps"))
+            .expect("a sweep wrote its folder")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        // Folder names are start times, then `-2` and so on within one second.
+        dirs.sort();
+        let report = dirs
+            .last()
+            .expect("a sweep ran")
+            .join(target)
+            .join("report.json");
+        serde_json::from_str(&fs::read_to_string(report).expect("the report was saved"))
+            .expect("the report is JSON")
     }
 
     fn runs(&self) -> String {
@@ -410,4 +447,51 @@ fn servers_are_swept_after_the_repositories() {
         "{report}"
     );
     assert!(sandbox.path().join("data/prompts/sweep-server.md").exists());
+}
+
+#[test]
+fn dismissals_hold_across_sweeps_and_changes_are_counted() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    assert!(sandbox.sweep("issue").status.success());
+    let first = sandbox.newest_report("github-o--r");
+    assert!(first["changes"].is_null(), "no earlier sweep: {first}");
+    let key = first["issues"][0]["key"].as_str().unwrap().to_owned();
+    assert_eq!(key.len(), 16, "{first}");
+
+    let unknown = sandbox.run(&["dismiss", "0123456789abcdef", "--reason", "x"]);
+    assert!(!unknown.status.success());
+    assert!(text(&unknown.stderr).contains("no report has finding 0123456789abcdef"));
+    let out = sandbox.run(&["dismiss", &key, "--reason", "pinned on purpose"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let out = sandbox.sweep("issue");
+    assert!(out.status.success());
+    let second = sandbox.newest_report("github-o--r");
+    assert_eq!(
+        second["issues"][0]["key"],
+        key.as_str(),
+        "the key is stable"
+    );
+    assert_eq!(
+        second["issues"][0]["dismissed"]["reason"],
+        "pinned on purpose"
+    );
+    assert_eq!(second["changes"]["new"], serde_json::json!([]));
+    assert_eq!(second["changes"]["resolved"], serde_json::json!([]));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("Since the sweep of"), "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "## Dismissed\n\n- medium file github/workflows/ci.yml (key {key}): pinned on purpose"
+        )),
+        "{stdout}"
+    );
+
+    assert!(sandbox.sweep("ok").status.success());
+    let third = sandbox.newest_report("github-o--r");
+    assert_eq!(third["changes"]["resolved"], serde_json::json!([key]));
+
+    assert!(sandbox.run(&["undismiss", &key]).status.success());
+    let again = sandbox.run(&["undismiss", &key]);
+    assert!(text(&again.stderr).contains(&format!("finding {key} is not dismissed")));
 }

@@ -71,6 +71,7 @@ pub(super) fn fetch(
                 source: Source::Osv,
                 id: header.id,
                 aliases,
+                modified: Some(header.modified),
                 record,
             };
             advisories.push(OsvAdvisory {

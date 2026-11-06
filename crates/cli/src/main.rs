@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use ancient_protector_core::Config;
 use ancient_protector_core::DataDir;
 use ancient_protector_core::Feeds;
+use ancient_protector_core::FindingKey;
 use ancient_protector_core::History;
 use ancient_protector_core::Inventory;
 use ancient_protector_core::LoadConfigError;
@@ -16,8 +17,10 @@ use ancient_protector_core::Product;
 use ancient_protector_core::Progress;
 use ancient_protector_core::Schedule;
 use ancient_protector_core::SshConn;
+use ancient_protector_core::dismiss;
 use ancient_protector_core::report_markdown;
 use ancient_protector_core::sweep;
+use ancient_protector_core::undismiss;
 use anyhow::Context as _;
 use clap::ArgGroup;
 use clap::Parser;
@@ -73,6 +76,22 @@ enum Command {
     /// bundles are kept under the data directory's `sweeps` folder. Repositories are read with
     /// `gh api` and your gh login. Exits non-zero when a target got no valid verdict.
     Sweep,
+    /// Hide a finding or issue from reports, for a reason.
+    ///
+    /// The key is shown under each finding in the report. A finding shows again when its
+    /// advisory changes, or after `undismiss`.
+    Dismiss {
+        /// The finding's key.
+        key: FindingKey,
+        /// Why it does not apply or is accepted, one line.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Show a dismissed finding or issue again from the next sweep on.
+    Undismiss {
+        /// The finding's key.
+        key: FindingKey,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -99,6 +118,16 @@ fn main() -> anyhow::Result<()> {
             inventory(&Inventory::collect_mac(&config.project_dirs))?;
         }
         Command::Sweep => run_sweep(&data_dir, &load_config(&data_dir, &home()?)?)?,
+        Command::Dismiss { key, reason } => {
+            dismiss(&data_dir, key, &reason)?;
+            print(&format!(
+                "dismissed {key}; it is left out of reports from the next sweep"
+            ));
+        }
+        Command::Undismiss { key } => {
+            undismiss(&data_dir, key)?;
+            print(&format!("{key} shows again from the next sweep"));
+        }
     }
     Ok(())
 }

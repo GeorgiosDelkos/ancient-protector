@@ -38,6 +38,11 @@ impl DataDir {
         self.root.join("sweeps")
     }
 
+    /// Returns the folder of state that outlives sweeps: dismissals.
+    pub(crate) fn state_dir(&self) -> PathBuf {
+        self.root.join("state")
+    }
+
     /// Returns the folder of user-editable prompt templates.
     pub(crate) fn prompts_dir(&self) -> PathBuf {
         self.root.join("prompts")

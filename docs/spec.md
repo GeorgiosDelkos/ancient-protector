@@ -30,7 +30,7 @@ and the user can approve a fix the agent then performs.
 | Fix | Agent performs it per target; plan shown first, user confirms each fix |
 | Schedule | Manual plus optional interval |
 | Surfacing | Tray icon state, macOS notification on new critical/high, JSON + Markdown report per sweep |
-| Lifecycle | Dismiss with reason, diff vs last sweep, fix history |
+| Lifecycle | Dismiss with reason, diff vs last sweep, fix history (see "Lifecycle") |
 | Concurrency | One agent run per target, sequential |
 | UI | Tauri 2 + SolidJS/TS; popover + details/settings window; follows system light/dark |
 | Storage | Files in `~/Library/Application Support/ancient-protector/` |
@@ -59,7 +59,7 @@ Core modules (one concept each):
   `github` collects a repository (step 5).
 - `agent`: `AgentKind` enum, detection, command construction, run with output capture.
 - `sweep`: orchestrates targets sequentially, emits progress events.
-- `findings`: schema, validation, store, dismissals, diff.
+- `findings`: schema, validation. `lifecycle`: finding keys, dismissals, changes.
 - `fix`: plan, confirm, execute, history.
 - `report`: JSON + Markdown writers.
 
@@ -68,9 +68,9 @@ Core modules (one concept each):
 ```
 ~/Library/Application Support/ancient-protector/
   config.toml
-  prompts/{sweep,sweep-github,sweep-server,fix-plan,fix-exec}.md
+  prompts/{sweep,sweep-github,sweep-server,fix}.md
   feeds/osv/<id>.json, feeds/nvd/<product>.json
-  state/dismissals.json, fixes.jsonl
+  state/.lock, state/dismissals.json, state/fixes.jsonl
   sweeps/.lock
   sweeps/<utc-timestamp>[-n]/<target>/{bundle/, agent-1.log, agent-2.log, report.json, report.md}
     (<target> is `mac`, `github-<owner>--<name>` or `server-<name>`)
@@ -89,8 +89,27 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
                  fix: Option<FixPlan> }
 ```
 
-`FindingKey` = hash of target + primary advisory id + component name, stable across sweeps
-(drives diff and dismissals). A dismissal resurfaces if the advisory's `modified` time changes.
+### Lifecycle (decided 2026-11-06)
+
+- `FindingKey`: 16 hex digits, FNV-1a (64 bit, fixed across builds) of the target, the primary
+  advisory, the component's lookup and where it was found; an issue's of the target and its
+  subject. The version is left out, so a finding keeps its key until it is fixed. The primary
+  advisory is the bundle advisory the agent's first listed id resolves to, not the listed id:
+  an agent may list a GHSA's CVE first in one sweep and the GHSA in the next.
+- Dismissals: `state/dismissals.json`, key -> reason, time, and the advisory's `modified` time
+  as the newest report had it. A dismissed finding shows again when that time changes; an
+  issue stays dismissed until `undismiss`. Writes take `state/.lock` and replace the file
+  whole. Reports keep dismissed entries, marked, and `report.md` lists them under "Dismissed".
+  A dismissals file that cannot be read is a note in every report, and nothing is dismissed.
+- Changes: each target's report has `changes`: the keys new and resolved since that target's
+  newest earlier report with a verdict. A report without a verdict has none. Accepted
+  downside: a source that fails (OSV offline) makes its findings show as resolved; the report
+  lists the failed source under "Not checked".
+- Fixes (PR 9): the fix in the sweep's finding is the plan the user confirms; there is no
+  separate planning run. A confirmed fix is one agent run with full access and the `fix`
+  prompt. A GitHub fix works in a fresh clone, on a new branch, and opens a pull request; a
+  server fix may run ssh to that one server, with the sweep's ssh options. Each fix is appended
+  to `state/fixes.jsonl`.
 
 ### Mac inventory
 
@@ -204,14 +223,16 @@ Issues on a server name a file (`server/listening.txt`); there are no settings.
 4. Agent run: headless CLI in `bundle/` as cwd; agent writes `findings.json`.
 5. Validate with serde (strict). On failure, one retry with the error appended; then mark the
    target failed.
-6. Merge, apply dismissals, diff against previous sweep, write report, update tray, notify on
-   new critical/high.
+6. Key each finding and issue, apply dismissals, compare with the target's last sweep (see
+   "Lifecycle"), write the report; the tray app updates and notifies on new critical/high.
 
 ### Fix flow
 
-Fix click -> agent run with `fix-plan` prompt -> plan (steps + exact commands) shown in the
-details window -> user confirms -> agent run with `fix-exec` prompt and the confirmed plan ->
-result appended to `state/fixes.jsonl` -> targeted re-check of that finding.
+Fix click -> the finding's fix (steps + exact commands) shown in the details window -> user
+confirms -> agent run with the `fix` prompt and the confirmed fix, full access -> result
+appended to `state/fixes.jsonl` -> the next sweep checks the finding again. Decided 2026-11-06
+(see "Lifecycle"): no separate planning run; GitHub fixes open a pull request; server fixes may
+use ssh.
 
 ### Agent adapters
 
@@ -324,7 +345,7 @@ not an OSV ecosystem, so formulae go through NVD.
 ### CLI
 
 `ancient-protector sweep [--target <id>]`, `findings [--json]`, `dismiss <key> --reason <text>`,
-`fix plan <key>`, `fix apply <key>` (needs the confirmed plan id). Same core, same files.
+`undismiss <key>`, `fix <key>` (shows the fix and asks to confirm). Same core, same files.
 
 ## Risks to keep visible
 
@@ -350,7 +371,7 @@ toml, reqwest, clap, zip) before adding them.
    and the `sweep` CLI command.
 5. GitHub target (deps, alerts, workflows, settings via `gh`).
 6. Server target (two-phase agent run).
-7. Lifecycle: dismissals, diff, fix plan/confirm/exec, fix history.
+7. Lifecycle: dismissals and changes (PR 8); fix confirm/exec and fix history (PR 9).
 8. CLI.
 9. Tauri app: tray, popover, window, notifications, autostart, scheduler.
 10. Later: signing + notarization in CI once an Apple Developer account is available.

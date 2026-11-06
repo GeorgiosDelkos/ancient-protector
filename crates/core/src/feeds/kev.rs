@@ -89,6 +89,7 @@ mod tests {
             source: Source::Osv,
             id: id.to_owned(),
             aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+            modified: None,
             record: serde_json::value::RawValue::from_string("{}".to_owned()).unwrap(),
         };
         assert!(advisory("GHSA-x", &["CVE-2024-2"]).is_known_exploited(&kev));
