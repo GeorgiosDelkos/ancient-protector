@@ -94,3 +94,4 @@ pub use crate::sweep::Targets;
 pub use crate::sweep::alerts;
 pub use crate::sweep::report_markdown;
 pub use crate::sweep::sweep;
+pub use crate::sweep::target_names;

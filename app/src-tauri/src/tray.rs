@@ -132,7 +132,7 @@ pub(crate) fn refresh(app: &AppHandle) {
 fn look(app: &AppHandle) -> Look {
     let runner = app.state::<Runner>();
     match runner.status() {
-        Status::Sweeping { .. } => return Look::Sweeping,
+        Status::Sweeping { .. } | Status::Fixing { .. } => return Look::Sweeping,
         Status::Failed { .. } => return Look::Failed,
         Status::Idle => {}
     }

@@ -15,11 +15,16 @@ use std::process::Command;
 
 use ancient_protector_core::Config;
 use ancient_protector_core::DataDir;
+use ancient_protector_core::FindingKey;
 use ancient_protector_core::Latest;
+use ancient_protector_core::ParseFindingKeyError;
 use ancient_protector_core::latest;
+use ancient_protector_core::plan_fix;
+use jiff::Timestamp;
 use serde::Serialize;
 use tauri::ActivationPolicy;
 use tauri::AppHandle;
+use tauri::Manager as _;
 use tauri::State;
 use tauri::WindowEvent;
 use tauri_plugin_autostart::MacosLauncher;
@@ -43,7 +48,10 @@ fn main() {
             overview,
             sweep_now,
             open_config,
-            quit
+            quit,
+            fix_preview,
+            fix,
+            dismiss
         ])
         .setup(|app| {
             // A menu-bar app: no Dock icon and no app menu (LSUIElement).
@@ -155,4 +163,70 @@ fn open_config(runner: State<'_, Runner>) -> Result<(), String> {
 )]
 fn quit(app: AppHandle) {
     app.exit(0);
+}
+
+/// What the detail view shows before the user confirms a fix.
+#[derive(Debug, Serialize)]
+struct FixPreview {
+    /// Where it runs: "this Mac", the repository, or the server and its ssh command.
+    destination: String,
+    /// When the sweep that found it started.
+    found: Timestamp,
+    summary: String,
+    steps: Vec<String>,
+    commands: Vec<String>,
+    agent: String,
+}
+
+/// Checks the fix of `key` as the CLI's `fix` does before it asks: the finding is current and
+/// not dismissed, its fix is well formed, the target is configured and the agent installed.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn fix_preview(runner: State<'_, Runner>, key: String) -> Result<FixPreview, String> {
+    let key: FindingKey = key
+        .parse()
+        .map_err(|e: ParseFindingKeyError| e.to_string())?;
+    let config =
+        Config::load(&runner.data_dir().config_file(), runner.home()).map_err(|e| e.to_string())?;
+    let plan = plan_fix(runner.data_dir(), &config, key).map_err(|e| e.to_string())?;
+    Ok(FixPreview {
+        destination: plan.destination().to_owned(),
+        found: plan.found(),
+        summary: plan.fix().summary.clone(),
+        steps: plan.fix().steps.clone(),
+        commands: plan.fix().commands.clone(),
+        agent: plan.agent().to_string(),
+    })
+}
+
+/// Runs the fix of `key`, which the user just confirmed in the detail view, with full access.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn fix(app: AppHandle, key: String, title: String) -> Result<(), String> {
+    let key: FindingKey = key
+        .parse()
+        .map_err(|e: ParseFindingKeyError| e.to_string())?;
+    runner::start_fix(&app, key, title).map_err(ToString::to_string)
+}
+
+/// Dismisses `key` for `reason`; it shows again when its advisory changes.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn dismiss(app: AppHandle, key: String, reason: String) -> Result<(), String> {
+    let key: FindingKey = key
+        .parse()
+        .map_err(|e: ParseFindingKeyError| e.to_string())?;
+    let runner = app.state::<Runner>();
+    ancient_protector_core::dismiss(runner.data_dir(), key, &reason).map_err(|e| e.to_string())?;
+    runner::changed(&app);
+    Ok(())
 }

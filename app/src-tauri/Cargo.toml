@@ -15,7 +15,8 @@ tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
 ancient-protector-core = { path = "../../crates/core" }
-tauri = { version = "2.12.5", features = ["tray-icon", "image-png"] }
+# macos-private-api: the transparent window the HUD material shows through.
+tauri = { version = "2.12.5", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-notification = "2.7.0"
 tauri-plugin-autostart = "2.7.0"
 tauri-plugin-positioner = { version = "2.4.0", features = ["tray-icon"] }

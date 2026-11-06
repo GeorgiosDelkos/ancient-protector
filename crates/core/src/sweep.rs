@@ -376,6 +376,15 @@ pub enum Targets<'a> {
     Only(&'a str),
 }
 
+/// The report names of every configured target, in the order a sweep takes them: `mac`, then
+/// `github:owner/name` for each repository, then `server:name` for each server.
+pub fn target_names(config: &Config) -> Vec<String> {
+    configured_targets(config)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// Every configured target, in sweep order, by report name and folder name.
 pub(crate) fn configured_targets(config: &Config) -> Vec<(String, String)> {
     let mut targets = vec![("mac".to_owned(), "mac".to_owned())];
