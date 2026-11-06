@@ -562,6 +562,12 @@ mod tests {
             "not-a-sweep/mac",
             &report("2026-11-07T00:00:00Z", None, &[], at),
         );
+        // As long as a start second, but not one.
+        save(
+            sweeps,
+            "notasweepfolder1/mac",
+            &report("2026-11-07T00:00:00Z", None, &[], at),
+        );
 
         // Now: one kept, one gone, one added, one shown again, and one dismissed while new.
         let changes = since(&[kept, added, again], &[kept, added, again, hidden]).unwrap();
