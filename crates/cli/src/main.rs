@@ -10,6 +10,7 @@ use ancient_protector_core::History;
 use ancient_protector_core::Inventory;
 use ancient_protector_core::LoadConfigError;
 use ancient_protector_core::NvdAccess;
+use ancient_protector_core::OsvQuery;
 use ancient_protector_core::Package;
 use ancient_protector_core::Product;
 use ancient_protector_core::Progress;
@@ -147,13 +148,27 @@ fn advisories(
     let kev = kev.as_ref().ok();
 
     if !packages.is_empty() {
-        match feeds.osv(packages, history) {
+        // Packages given here are language packages, which OSV is asked about by name.
+        let queries: Vec<OsvQuery> = packages
+            .iter()
+            .map(|package| OsvQuery {
+                package: package.clone(),
+                version: None,
+            })
+            .collect();
+        match feeds.osv(&queries, history, kev) {
             Ok(osv) => {
                 for found in &osv.advisories {
                     print(&found.advisory.to_json_line(kev));
                 }
                 for e in &osv.failures {
                     fail("OSV record", e);
+                }
+                for crowded in &osv.crowded {
+                    warn(&format!(
+                        "{} matches {} advisories; only the {} in CISA KEV are printed",
+                        crowded.query.package.name, crowded.matched, crowded.kept
+                    ));
                 }
             }
             Err(e) => fail("OSV", &e),
@@ -285,6 +300,9 @@ fn summary(config: &Config) -> String {
             }
         };
         out.push_str(&format!("server: {} ({conn})\n", server.name));
+        for dir in &server.dirs {
+            out.push_str(&format!("server {} dir: {}\n", server.name, dir.as_str()));
+        }
     }
     out
 }

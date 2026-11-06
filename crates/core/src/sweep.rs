@@ -1,5 +1,5 @@
-//! One sweep: this Mac, then each configured GitHub repository, each with its own inventory,
-//! advisories, agent verdict and report.
+//! One sweep: this Mac, then each configured GitHub repository, then each server, each with
+//! its own inventory, advisories, agent verdict and report.
 //!
 //! Flow per target (spec, "Sweep flow"): collect the inventory; fetch OSV advisories for its
 //! packages and NVD CVEs for its products (the KEV catalog once per sweep); link each advisory
@@ -31,11 +31,13 @@ use crate::bundle::BundleError;
 use crate::config::Config;
 use crate::config::History;
 use crate::config::RepoSlug;
+use crate::config::Server;
 use crate::feeds::Advisory;
 use crate::feeds::Feeds;
 use crate::feeds::Kev;
 use crate::feeds::NvdAccess;
 use crate::feeds::OsvAdvisory;
+use crate::feeds::OsvQuery;
 use crate::feeds::Product;
 use crate::findings;
 use crate::findings::Finding;
@@ -50,8 +52,8 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::Lookup;
-use crate::package::Package;
 use crate::paths::DataDir;
+use crate::server;
 
 /// Which built-in prompt a target uses. Each is copied to the data directory's `prompts/`
 /// folder on first use, so the user can edit it.
@@ -59,6 +61,7 @@ use crate::paths::DataDir;
 enum Prompt {
     Mac,
     GitHub,
+    Server,
 }
 
 impl Prompt {
@@ -66,6 +69,7 @@ impl Prompt {
         match self {
             Self::Mac => "sweep.md",
             Self::GitHub => "sweep-github.md",
+            Self::Server => "sweep-server.md",
         }
     }
 
@@ -73,6 +77,7 @@ impl Prompt {
         match self {
             Self::Mac => include_str!("prompts/sweep.md"),
             Self::GitHub => include_str!("prompts/sweep-github.md"),
+            Self::Server => include_str!("prompts/sweep-server.md"),
         }
     }
 }
@@ -84,7 +89,7 @@ const SAME_SECOND_LIMIT: u32 = 100;
 /// What the sweep is doing, for a progress display.
 #[derive(Debug)]
 pub enum Progress<'a> {
-    /// Starting a target: `mac` or `github:owner/name`.
+    /// Starting a target: `mac`, `github:owner/name` or `server:name`.
     Target {
         /// The target.
         target: &'a str,
@@ -123,7 +128,7 @@ pub struct Report {
     pub started: Timestamp,
     /// When it finished.
     pub finished: Timestamp,
-    /// What was swept: `mac` or `github:owner/name`.
+    /// What was swept: `mac`, `github:owner/name` or `server:name`.
     pub target: String,
     /// The agent that judged the advisories.
     pub agent: AgentKind,
@@ -210,11 +215,13 @@ pub fn sweep(
     };
     let shared = Shared {
         data_dir,
-        history: config.history,
+        sources: Sources {
+            feeds: &feeds,
+            history: config.history,
+            kev: kev.as_ref(),
+        },
         agent,
         located: &located,
-        feeds: &feeds,
-        kev: kev.as_ref(),
         notes: &notes,
     };
 
@@ -227,6 +234,9 @@ pub fn sweep(
     for repo in &config.repos {
         reports.push(shared.sweep_repo(&dir, repo, progress)?);
     }
+    for server in &config.servers {
+        reports.push(shared.sweep_server(&dir, server, progress)?);
+    }
     Ok(reports)
 }
 
@@ -234,19 +244,26 @@ pub fn sweep(
 #[derive(Debug)]
 struct Shared<'a> {
     data_dir: &'a DataDir,
-    history: History,
+    sources: Sources<'a>,
     agent: AgentKind,
     located: &'a Located,
-    feeds: &'a Feeds,
-    kev: Option<&'a Kev>,
     /// Problems that hold for every target (no NVD key, no KEV catalog).
     notes: &'a [String],
+}
+
+/// Where advisories come from, and which of them count.
+#[derive(Debug, Clone, Copy)]
+struct Sources<'a> {
+    feeds: &'a Feeds,
+    history: History,
+    /// The KEV catalog, or `None` when it could not be read.
+    kev: Option<&'a Kev>,
 }
 
 /// One target, collected and ready for its bundle.
 #[derive(Debug)]
 struct Collected {
-    /// The report's `target`: `mac` or `github:owner/name`.
+    /// The report's `target`: `mac`, `github:owner/name` or `server:name`.
     target: String,
     /// Its folder in the sweep folder.
     dir_name: String,
@@ -304,17 +321,7 @@ impl Shared<'_> {
         let started = Timestamp::now();
         let collected = match github::collect("gh", repo) {
             Ok(collected) => collected,
-            Err(e) => {
-                let dir = sweep_dir.join(dir_name);
-                fs::create_dir_all(&dir).map_err(|source| SweepError::Write {
-                    path: dir.clone(),
-                    source,
-                })?;
-                let mut report = Report::new(started, target, self.agent, dir.clone());
-                report.failure = Some(plain(&error_chain(&e)));
-                save_report(&dir, &mut report);
-                return Ok(report);
-            }
+            Err(e) => return self.uncollected(&sweep_dir.join(dir_name), started, target, &e),
         };
         let collected = Collected {
             target,
@@ -329,6 +336,55 @@ impl Shared<'_> {
         self.sweep_target(sweep_dir, collected, progress)
     }
 
+    /// Collects `server` over ssh and sweeps it. A server that cannot be read gets a report
+    /// with the reason and no agent run.
+    fn sweep_server(
+        &self,
+        sweep_dir: &Path,
+        server: &Server,
+        progress: &mut dyn FnMut(Progress<'_>),
+    ) -> Result<Report, SweepError> {
+        let target = format!("server:{}", server.name);
+        // `server-` keeps a server named `mac` from sharing the Mac's folder.
+        let dir_name = format!("server-{}", server.name);
+        progress(Progress::Target { target: &target });
+        progress(Progress::Inventory);
+        let started = Timestamp::now();
+        let collected = match server::collect("ssh", server) {
+            Ok(collected) => collected,
+            Err(e) => return self.uncollected(&sweep_dir.join(dir_name), started, target, &e),
+        };
+        let collected = Collected {
+            target,
+            dir_name,
+            title: format!("the server {}", server.name),
+            prompt: Prompt::Server,
+            components: collected.components,
+            files: collected.files,
+            settings: Vec::new(),
+            problems: collected.problems,
+        };
+        self.sweep_target(sweep_dir, collected, progress)
+    }
+
+    /// Saves the report of a target that could not be collected: the reason, and no agent run.
+    fn uncollected(
+        &self,
+        dir: &Path,
+        started: Timestamp,
+        target: String,
+        error: &impl std::error::Error,
+    ) -> Result<Report, SweepError> {
+        fs::create_dir_all(dir).map_err(|source| SweepError::Write {
+            path: dir.to_owned(),
+            source,
+        })?;
+        let mut report = Report::new(started, target, self.agent, dir.to_owned());
+        report.failure = Some(plain(&error_chain(error)));
+        save_report(dir, &mut report);
+        Ok(report)
+    }
+
     /// Fetches the target's advisories, writes its bundle, runs the agent and saves the
     /// report in `<sweep>/<target folder>`.
     fn sweep_target(
@@ -341,13 +397,7 @@ impl Shared<'_> {
         let dir = sweep_dir.join(&collected.dir_name);
         let mut problems = self.notes.to_vec();
         problems.extend(collected.problems);
-        let fetched = fetch(
-            self.feeds,
-            &collected.components,
-            self.history,
-            &mut problems,
-            progress,
-        );
+        let fetched = fetch(self.sources, &collected.components, &mut problems, progress);
         let entries: Vec<_> = fetched
             .iter()
             .map(|(advisory, components)| bundle::Entry {
@@ -363,7 +413,7 @@ impl Shared<'_> {
             files: &collected.files,
             settings: &collected.settings,
         };
-        let known = bundle::write(&dir.join("bundle"), &contents, self.kev)?;
+        let known = bundle::write(&dir.join("bundle"), &contents, self.sources.kev)?;
 
         let (verdict, failure) = match judge(self.agent, self.located, &dir, &known, progress) {
             Ok(verdict) => (verdict, None),
@@ -430,17 +480,19 @@ fn nvd_access(problems: &mut Vec<String>) -> NvdAccess {
 /// Fetches every advisory for the inventory, each with the indexes of the components whose
 /// lookup returned it.
 fn fetch(
-    feeds: &Feeds,
+    sources: Sources<'_>,
     components: &[Component],
-    history: History,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
 ) -> Vec<(Advisory, BTreeSet<usize>)> {
-    let mut packages: BTreeMap<Package, Vec<usize>> = BTreeMap::new();
+    let mut packages: BTreeMap<OsvQuery, Vec<usize>> = BTreeMap::new();
     let mut products: BTreeMap<String, (Product, Vec<usize>)> = BTreeMap::new();
     for (i, component) in components.iter().enumerate() {
         match &component.lookup {
-            Lookup::Package(p) => packages.entry(p.clone()).or_default().push(i),
+            Lookup::Package(p) => packages
+                .entry(OsvQuery::new(p.clone(), &component.version))
+                .or_default()
+                .push(i),
             Lookup::Product(p) => {
                 let entry = products
                     .entry(p.to_string())
@@ -454,8 +506,8 @@ fn fetch(
         products: products.len(),
     });
 
-    let mut fetched = fetch_osv(feeds, &packages, history, problems);
-    fetched.extend(fetch_nvd(feeds, &products, history, problems, progress));
+    let mut fetched = fetch_osv(sources, &packages, problems);
+    fetched.extend(fetch_nvd(sources, &products, problems, progress));
     fetched
 }
 
@@ -463,16 +515,15 @@ fn fetch(
 /// names are not used: OSV matches names the way each ecosystem compares them (PyPI's
 /// `Django` is `django`), and the query result already carries that match.
 fn fetch_osv(
-    feeds: &Feeds,
-    packages: &BTreeMap<Package, Vec<usize>>,
-    history: History,
+    sources: Sources<'_>,
+    packages: &BTreeMap<OsvQuery, Vec<usize>>,
     problems: &mut Vec<String>,
 ) -> Vec<(Advisory, BTreeSet<usize>)> {
     if packages.is_empty() {
         return Vec::new();
     }
-    let list: Vec<Package> = packages.keys().cloned().collect();
-    let osv = match feeds.osv(&list, history) {
+    let list: Vec<OsvQuery> = packages.keys().cloned().collect();
+    let osv = match sources.feeds.osv(&list, sources.history, sources.kev) {
         Ok(osv) => osv,
         Err(e) => {
             problems.push(format!("OSV: {}", error_chain(&e)));
@@ -482,12 +533,24 @@ fn fetch_osv(
     for e in &osv.failures {
         problems.push(format!("OSV record: {}", error_chain(e)));
     }
+    for crowded in &osv.crowded {
+        let package = &crowded.query.package;
+        let version = crowded.query.version.as_deref().unwrap_or("any version");
+        problems.push(format!(
+            "{} ({}) {version} matches {} OSV advisories; only the {} for a CVE in CISA KEV \
+             are in the bundle",
+            package.name,
+            package.ecosystem.osv_name(),
+            crowded.matched,
+            crowded.kept,
+        ));
+    }
     osv.advisories
         .into_iter()
         .map(
             |OsvAdvisory {
                  advisory,
-                 packages: matched,
+                 queries: matched,
              }| {
                 let components = matched
                     .iter()
@@ -503,9 +566,8 @@ fn fetch_osv(
 
 /// NVD CVEs per product, merged by CVE id, and one note for every product NVD does not know.
 fn fetch_nvd(
-    feeds: &Feeds,
+    sources: Sources<'_>,
     products: &BTreeMap<String, (Product, Vec<usize>)>,
-    history: History,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
 ) -> Vec<(Advisory, BTreeSet<usize>)> {
@@ -517,9 +579,12 @@ fn fetch_nvd(
             total: products.len(),
             product: name,
         });
-        match feeds.nvd(product, history) {
+        match sources.feeds.nvd(product, sources.history) {
             // No CVEs can mean a clean product or a name NVD does not know; tell them apart.
-            Ok(advisories) if advisories.is_empty() => match feeds.nvd_product_known(product) {
+            Ok(advisories) if advisories.is_empty() => match sources
+                .feeds
+                .nvd_product_known(product)
+            {
                 Ok(true) => {}
                 Ok(false) => unknown.push(name.as_str()),
                 Err(e) => problems.push(format!("NVD product check {name}: {}", error_chain(&e))),
@@ -875,7 +940,7 @@ fn component_name(component: &Component) -> String {
 }
 
 /// Renders an error and its sources as `outer: inner`.
-fn error_chain(error: &impl std::error::Error) -> String {
+pub(crate) fn error_chain(error: &impl std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(e) = source {
@@ -1073,15 +1138,14 @@ mod tests {
         let history = Config::default_for_tests().history;
         let mut problems = Vec::new();
         let mut seen = Vec::new();
-        let fetched = fetch(
-            &feeds,
-            &inventory.components,
+        let sources = Sources {
+            feeds: &feeds,
             history,
-            &mut problems,
-            &mut |p| {
-                seen.push(format!("{p:?}"));
-            },
-        );
+            kev: None,
+        };
+        let fetched = fetch(sources, &inventory.components, &mut problems, &mut |p| {
+            seen.push(format!("{p:?}"));
+        });
 
         let linked: Vec<(&str, Vec<usize>)> = fetched
             .iter()

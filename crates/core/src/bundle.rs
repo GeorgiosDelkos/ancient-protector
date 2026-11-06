@@ -55,7 +55,7 @@ pub(crate) struct Contents<'a> {
 
 /// The folder of a bundle that holds a target's own files, so they cannot replace the
 /// bundle's fixed files (`PROMPT.md`, `inventory.jsonl`, ...).
-const TARGET_FILES: &str = "github";
+const TARGET_FILES: [&str; 2] = ["github", "server"];
 
 /// Writes the bundle into `dir` (created if needed) and returns what findings may refer to.
 ///
@@ -158,7 +158,7 @@ fn write_target_files(dir: &Path, files: &[(String, String)]) -> Result<(), Bund
     for (name, text) in files {
         let parts: Vec<&str> = name.split('/').collect();
         let safe = parts.len() >= 2
-            && parts[0] == TARGET_FILES
+            && TARGET_FILES.contains(&parts[0])
             && parts.iter().all(|p| cache_key(p).is_ok());
         if !safe {
             return Err(BundleError::BadPath { path: name.clone() });

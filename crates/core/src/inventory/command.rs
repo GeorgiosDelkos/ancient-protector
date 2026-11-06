@@ -7,6 +7,7 @@
 
 use std::env;
 use std::io;
+use std::io::Write as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -66,12 +67,16 @@ pub(crate) fn run_any_status(
     program: &str,
     args: &[&str],
 ) -> Result<Option<Output>, InventoryError> {
-    run_within(program, args, TIMEOUT)
+    run_with_input(program, args, b"", TIMEOUT)
 }
 
-fn run_within(
+/// Runs `program` with `input` on stdin, which is closed once it is written (at once when
+/// `input` is empty), and returns its output whatever the exit status, or `None` when it is
+/// not installed. Waits up to `timeout`.
+pub(crate) fn run_with_input(
     program: &str,
     args: &[&str],
+    input: &[u8],
     timeout: Duration,
 ) -> Result<Option<Output>, InventoryError> {
     let command = command_line(program, args);
@@ -80,11 +85,11 @@ fn run_within(
         .current_dir("/")
         // Its own process group, so a timeout can stop the helpers it starts as well.
         .process_group(0)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
-    let child = match child {
+    let mut child = match child {
         Ok(child) => child,
         // A script whose interpreter is gone also fails with NotFound; only a program that is
         // nowhere on PATH is "not installed".
@@ -93,6 +98,16 @@ fn run_within(
         }
         Err(source) => return Err(InventoryError::Spawn { command, source }),
     };
+    // Written on its own thread, so a program that answers before reading all of its input
+    // cannot stall on a full stdout pipe while this side blocks on a full stdin pipe. A write
+    // error means the program exited or closed stdin early, which its exit status reports.
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    if input.is_empty() {
+        drop(stdin);
+    } else {
+        let input = input.to_vec();
+        thread::spawn(move || drop(stdin.write_all(&input)));
+    }
     let (status, stdout, stderr) = wait(child, &command, timeout)?;
 
     let stdout = String::from_utf8(stdout).map_err(|e| InventoryError::parse(&command, &e))?;
@@ -269,7 +284,7 @@ mod tests {
 
     #[test]
     fn hung_command_is_stopped() {
-        let err = run_within("sleep", &["30"], Duration::from_millis(200)).unwrap_err();
+        let err = run_with_input("sleep", &["30"], b"", Duration::from_millis(200)).unwrap_err();
         assert!(err.to_string().contains("still running"), "{err}");
     }
 
@@ -279,7 +294,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pidfile = tmp.path().join("pid");
         let script = format!("sleep 30 & echo $! > '{}'; echo done", pidfile.display());
-        let err = run_within("sh", &["-c", &script], Duration::from_secs(5)).unwrap_err();
+        let err = run_with_input("sh", &["-c", &script], b"", Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("kept its output open"), "{err}");
 
         // The helper was in the tool's process group, so the group kill reached it.

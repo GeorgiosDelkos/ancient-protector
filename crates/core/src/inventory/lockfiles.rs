@@ -30,7 +30,7 @@ use crate::package::Ecosystem;
 use crate::package::Package;
 
 /// Folders never entered, besides every hidden one.
-const SKIPPED_DIRS: &[&str] = &["node_modules", "target", "vendor", "dist", "build"];
+pub(crate) const SKIPPED_DIRS: &[&str] = &["node_modules", "target", "vendor", "dist", "build"];
 
 /// Walks `root` and adds every package in every lockfile found.
 pub(super) fn collect(root: &Path, inventory: &mut Inventory) {
@@ -99,26 +99,52 @@ fn entered(name: &OsStr) -> bool {
 
 /// Adds the packages of `path` if it is a lockfile this module reads.
 fn read(path: &Path, inventory: &mut Inventory) {
-    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+    if !is_lockfile(path) {
         return;
-    };
-    let found = match name {
-        "Cargo.lock" => read_lockfile(path)
-            .and_then(|text| parse_cargo_lock(path, &text, &mut inventory.problems)),
-        // npm-shrinkwrap.json is a package-lock.json that a package publishes with itself.
-        "package-lock.json" | "npm-shrinkwrap.json" => {
-            read_lockfile(path).and_then(|text| parse_package_lock(path, &text))
-        }
-        "uv.lock" => read_lockfile(path).and_then(|text| parse_uv_lock(path, &text)),
-        "poetry.lock" => read_lockfile(path).and_then(|text| parse_poetry_lock(path, &text)),
-        _ => return,
-    };
+    }
+    let found = read_lockfile(path).and_then(|text| {
+        parse(path, &text, &mut inventory.problems).expect("checked to be a lockfile name")
+    });
     inventory.absorb(found);
+}
+
+/// The lockfile names this module reads.
+pub(crate) const NAMES: [&str; 5] = [
+    "Cargo.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "uv.lock",
+    "poetry.lock",
+];
+
+fn is_lockfile(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| NAMES.contains(&name))
+}
+
+/// Parses `text`, the lockfile at `path` (which may be on another machine), by its file name.
+/// Returns `None` when the name is not one of [`NAMES`].
+pub(crate) fn parse(
+    path: &Path,
+    text: &str,
+    problems: &mut Vec<InventoryError>,
+) -> Option<Result<Vec<Component>, InventoryError>> {
+    let name = path.file_name().and_then(OsStr::to_str)?;
+    let found = match name {
+        "Cargo.lock" => parse_cargo_lock(path, text, problems),
+        // npm-shrinkwrap.json is a package-lock.json that a package publishes with itself.
+        "package-lock.json" | "npm-shrinkwrap.json" => parse_package_lock(path, text),
+        "uv.lock" => parse_uv_lock(path, text),
+        "poetry.lock" => parse_poetry_lock(path, text),
+        _ => return None,
+    };
+    Some(found)
 }
 
 /// The largest lockfile read, in bytes. Arbitrary: the biggest real lockfiles are a few MB, and
 /// a file far past that is not one, so it is reported instead of read into memory.
-const LOCKFILE_LIMIT: u64 = 64 * 1024 * 1024;
+pub(crate) const LOCKFILE_LIMIT: u64 = 64 * 1024 * 1024;
 
 fn read_lockfile(path: &Path) -> Result<String, InventoryError> {
     let len = fs::metadata(path)

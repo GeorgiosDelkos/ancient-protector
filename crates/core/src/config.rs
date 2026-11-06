@@ -199,13 +199,58 @@ pub enum ParseRepoSlugError {
     Name,
 }
 
-/// A server the agent inspects over SSH.
+/// A server the app inspects over SSH.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Server {
     /// Unique name, used to identify the target in reports.
-    pub name: String,
+    pub name: ServerName,
     /// How to reach it.
     pub conn: SshConn,
+    /// Folders on the server whose lockfiles are read, like the Mac's project folders.
+    pub dirs: Vec<RemoteDir>,
+}
+
+/// A server's name: 1 to 64 ASCII letters, digits, `.`, `-` and `_`, not `.` or `..`, so it is
+/// safe as a folder name. Unique ignoring case, since the default macOS file system ignores
+/// case. Only [`Config::load`] constructs one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ServerName(String);
+
+impl ServerName {
+    /// The name as written in the config.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ServerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An absolute folder on a server: 1 to 1024 bytes of ASCII letters, digits, `/`, `.`, `-` and
+/// `_`, starting with `/`, with no `..` part. The server script quotes it in single quotes,
+/// which this character set cannot end, and it cannot climb out of what the user named. Only
+/// [`Config::load`] constructs one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RemoteDir(String);
+
+impl RemoteDir {
+    fn parse(value: &str) -> Option<Self> {
+        let ok = (1..=1024).contains(&value.len())
+            && value.starts_with('/')
+            && value.split('/').all(|part| part != "..")
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_'));
+        ok.then(|| Self(value.to_owned()))
+    }
+
+    /// The folder as written in the config.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// How to reach a server over SSH. Authentication always comes from the user's ssh-agent
@@ -388,6 +433,17 @@ pub enum ConfigProblem {
         /// The value found.
         value: String,
     },
+    /// A folder in `dirs` is not a [`RemoteDir`].
+    #[error(
+        "servers[{index}].dirs = {value:?}: use an absolute path of letters, digits, '/', '.', \
+         '-' or '_', without '..'"
+    )]
+    RemoteDir {
+        /// Position of the server in the list.
+        index: usize,
+        /// The value found.
+        value: String,
+    },
 }
 
 /// `config.toml` as written. Every table is optional so a fresh file can be short.
@@ -442,6 +498,8 @@ struct RawServer {
     user: Option<String>,
     port: Option<NonZeroU16>,
     identity_file: Option<String>,
+    #[serde(default)]
+    dirs: Vec<String>,
 }
 
 impl RawConfig {
@@ -534,9 +592,6 @@ fn resolve_repos(raw: Vec<String>, problems: &mut Vec<ConfigProblem>) -> Vec<Rep
 
 /// Server names become folder names under each sweep, and the default macOS file system
 /// ignores case, so names are unique ignoring case and may not be `.` or `..`.
-///
-/// The name stays a plain `String` for now: nothing joins it into a path yet. When the sweep code
-/// does, make it a newtype only this function constructs, as `SshWord` is.
 fn resolve_servers(
     raw: Vec<RawServer>,
     home: &Path,
@@ -565,10 +620,24 @@ fn resolve_servers(
             });
         }
 
-        if let Some(conn) = resolve_conn(index, &server, home, problems) {
+        let mut dirs = Vec::with_capacity(server.dirs.len());
+        for value in &server.dirs {
+            match RemoteDir::parse(value) {
+                Some(dir) => dirs.push(dir),
+                None => problems.push(ConfigProblem::RemoteDir {
+                    index,
+                    value: value.clone(),
+                }),
+            }
+        }
+
+        if let Some(conn) = resolve_conn(index, &server, home, problems)
+            && name_ok
+        {
             servers.push(Server {
-                name: server.name,
+                name: ServerName(server.name),
                 conn,
+                dirs,
             });
         }
     }
@@ -703,6 +772,7 @@ mod tests {
             [[servers]]
             name = "prod"
             ssh = "prod-alias"
+            dirs = ["/srv/app", "/opt/my_app-2.0"]
 
             [[servers]]
             name = "db-1"
@@ -737,17 +807,22 @@ mod tests {
             config.servers,
             [
                 Server {
-                    name: "prod".into(),
+                    name: ServerName("prod".into()),
                     conn: SshConn::Alias(word("prod-alias")),
+                    dirs: vec![
+                        RemoteDir("/srv/app".into()),
+                        RemoteDir("/opt/my_app-2.0".into())
+                    ],
                 },
                 Server {
-                    name: "db-1".into(),
+                    name: ServerName("db-1".into()),
                     conn: SshConn::Direct {
                         host: word("10.0.0.5"),
                         user: Some(word("admin")),
                         port: NonZeroU16::new(2222),
                         identity_file: Some("/Users/me/.ssh/id_ed25519".into()),
                     },
+                    dirs: vec![],
                 },
             ]
         );
@@ -956,6 +1031,45 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn remote_dirs_are_absolute_safe_and_stay_inside() {
+        for bad in [
+            "srv/app",
+            "",
+            "/srv/../etc",
+            "/srv/..",
+            "/srv/it's",
+            "/srv/a b",
+            "/srv/$(id)",
+            "/srv/a\nb",
+        ] {
+            let text = format!("[[servers]]\nname = \"s\"\nssh = \"a\"\ndirs = [{bad:?}]");
+            assert_eq!(
+                resolve(&text).unwrap_err(),
+                [ConfigProblem::RemoteDir {
+                    index: 0,
+                    value: bad.into()
+                }],
+                "{bad:?}"
+            );
+        }
+        let long = format!("/{}", "a".repeat(1023));
+        let text = format!("[[servers]]\nname = \"s\"\nssh = \"a\"\ndirs = [\"{long}\", \"/\"]");
+        let config = resolve(&text).unwrap();
+        assert_eq!(config.servers[0].dirs[0].as_str(), long);
+        assert_eq!(config.servers[0].dirs[1].as_str(), "/");
+        let longer = format!("[[servers]]\nname = \"s\"\nssh = \"a\"\ndirs = [\"{long}a\"]");
+        assert!(resolve(&longer).is_err());
+        assert!(
+            ConfigProblem::RemoteDir {
+                index: 0,
+                value: "x".into()
+            }
+            .to_string()
+            .contains("without '..'")
+        );
     }
 
     #[test]

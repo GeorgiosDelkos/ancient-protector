@@ -20,11 +20,15 @@ project_dirs = []
 # Repositories to sweep, as "owner/name". Uses your `gh` login.
 repos = []
 
-# Servers the agent inspects over SSH. Use an alias from ~/.ssh/config:
+# Servers to sweep over SSH. The app runs a fixed, read-only script on each (OS release and
+# packages, kernel, listening sockets, docker containers and images, lockfiles under `dirs`),
+# never with sudo. The host key must already be in ~/.ssh/known_hosts and login must not
+# prompt. Use an alias from ~/.ssh/config:
 #
 # [[servers]]
 # name = "prod"
 # ssh = "prod"
+# dirs = ["/srv/app"]
 #
 # or connection fields (authentication comes from your ssh-agent or key file):
 #

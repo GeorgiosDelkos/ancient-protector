@@ -3,6 +3,7 @@
 //! API: <https://google.github.io/osv.dev/api/>. A batch holds at most 1000 queries, and a
 //! query whose result set is large comes back with a `next_page_token` to send again.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -13,25 +14,34 @@ use serde_json::value::RawValue;
 
 use crate::config::History;
 use crate::feeds::Advisory;
+use crate::feeds::Crowded;
 use crate::feeds::FeedError;
 use crate::feeds::Feeds;
+use crate::feeds::Kev;
 use crate::feeds::OsvAdvisories;
 use crate::feeds::OsvAdvisory;
+use crate::feeds::OsvQuery;
 use crate::feeds::Source;
 use crate::feeds::cache_key;
 use crate::feeds::http::decode;
 use crate::feeds::in_window;
-use crate::package::Package;
 
 /// OSV's documented maximum number of queries in one `querybatch` request.
 const BATCH: usize = 1000;
 
+/// The most advisories one query may bring before only the known-exploited ones are kept
+/// ([`thin_crowded`]). Arbitrary: well above any language package seen (a few dozen), and
+/// small enough that an agent can read every index line of the rest.
+const CROWDED: usize = 200;
+
 pub(super) fn fetch(
     feeds: &Feeds,
-    packages: &[Package],
+    queries: &[OsvQuery],
     history: History,
+    kev: Option<&Kev>,
 ) -> Result<OsvAdvisories, FeedError> {
-    let ids = query_ids(feeds, packages)?;
+    let mut ids = query_ids(feeds, queries)?;
+    let crowded = thin_crowded(&mut ids, kev);
     let mut advisories = Vec::with_capacity(ids.len());
     let mut failures = Vec::new();
     for (id, queried) in ids {
@@ -44,40 +54,93 @@ pub(super) fn fetch(
             }
         };
         if in_window(header.published, Some(header.modified), history) {
+            let mut aliases = header.aliases;
+            aliases.extend(header.upstream);
             let advisory = Advisory {
                 source: Source::Osv,
                 id: header.id,
-                aliases: header.aliases,
+                aliases,
                 record,
             };
             advisories.push(OsvAdvisory {
                 advisory,
-                packages: queried.packages.into_iter().collect(),
+                queries: queried.queries.into_iter().collect(),
             });
         }
     }
     Ok(OsvAdvisories {
         advisories,
         failures,
+        crowded,
     })
 }
 
-/// What querybatch said about one advisory: its latest `modified` time and the packages whose
-/// query returned it.
+/// Keeps, for a query that matched more than [`CROWDED`] advisories, only those for a CVE in
+/// the KEV catalog (none without the catalog), and returns those queries. Only the kernel does
+/// this in practice: Debian 12's `linux` at one version matched over 1000 advisories
+/// (2026-11-06), far more than an agent can weigh, and the known-exploited ones are those that
+/// matter first.
+///
+/// A record is not fetched to learn its CVE. The CVE is read from the id: OS advisories are
+/// named after it (`DEBIAN-CVE-2024-1086`, `UBUNTU-CVE-...`, `ALPINE-CVE-...`). Advisories that
+/// group several CVEs under their own id (`DSA-...`, `USN-...`) are dropped for such a query.
+fn thin_crowded(ids: &mut BTreeMap<String, Queried>, kev: Option<&Kev>) -> Vec<Crowded> {
+    let mut counts: BTreeMap<&OsvQuery, usize> = BTreeMap::new();
+    for queried in ids.values() {
+        for query in &queried.queries {
+            *counts.entry(query).or_default() += 1;
+        }
+    }
+    let crowded: BTreeSet<OsvQuery> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > CROWDED)
+        .map(|(q, _)| q.clone())
+        .collect();
+    if crowded.is_empty() {
+        return Vec::new();
+    }
+
+    let exploited = |id: &str| {
+        let cve = id.find("CVE-").map(|at| &id[at..]);
+        cve.zip(kev).is_some_and(|(cve, kev)| kev.contains(cve))
+    };
+    let mut report: BTreeMap<OsvQuery, Crowded> = BTreeMap::new();
+    ids.retain(|id, queried| {
+        let keep = exploited(id);
+        queried.queries.retain(|query| {
+            if !crowded.contains(query) {
+                return true;
+            }
+            let entry = report.entry(query.clone()).or_insert_with(|| Crowded {
+                query: query.clone(),
+                matched: 0,
+                kept: 0,
+            });
+            entry.matched += 1;
+            entry.kept += usize::from(keep);
+            keep
+        });
+        !queried.queries.is_empty()
+    });
+    report.into_values().collect()
+}
+
+/// What querybatch said about one advisory: its latest `modified` time and the queries that
+/// returned it.
 #[derive(Debug, Default)]
 struct Queried {
     modified: Option<Timestamp>,
-    packages: BTreeSet<Package>,
+    queries: BTreeSet<OsvQuery>,
 }
 
-/// Returns every advisory id for `packages`, with the packages each was returned for. That
+/// Returns every advisory id for `queries`, with the queries each was returned for. That
 /// link is what OSV matched, so it holds even when a record spells a name differently from
 /// the lockfile (`Django` and `django`).
-fn query_ids(feeds: &Feeds, packages: &[Package]) -> Result<BTreeMap<String, Queried>, FeedError> {
+fn query_ids(feeds: &Feeds, queries: &[OsvQuery]) -> Result<BTreeMap<String, Queried>, FeedError> {
     let url = format!("{}/v1/querybatch", feeds.endpoints.osv);
-    let unique: BTreeSet<&Package> = packages.iter().collect();
-    let mut pending: Vec<(&Package, Option<String>)> =
-        unique.into_iter().map(|p| (p, None)).collect();
+    let unique: BTreeSet<&OsvQuery> = queries.iter().collect();
+    let mut pending: Vec<(&OsvQuery, Option<String>)> =
+        unique.into_iter().map(|q| (q, None)).collect();
     let mut ids = BTreeMap::new();
     let mut seen_tokens = BTreeSet::new();
 
@@ -86,11 +149,12 @@ fn query_ids(feeds: &Feeds, packages: &[Package]) -> Result<BTreeMap<String, Que
         let request = BatchRequest {
             queries: batch
                 .iter()
-                .map(|(package, page_token)| Query {
+                .map(|(query, page_token)| Query {
                     package: QueryPackage {
-                        name: &package.name,
-                        ecosystem: package.ecosystem.osv_name(),
+                        name: &query.package.name,
+                        ecosystem: query.package.ecosystem.osv_name(),
                     },
+                    version: query.version.as_deref(),
                     page_token: page_token.as_deref(),
                 })
                 .collect(),
@@ -103,22 +167,22 @@ fn query_ids(feeds: &Feeds, packages: &[Package]) -> Result<BTreeMap<String, Que
             });
         }
 
-        for ((package, _), result) in batch.into_iter().zip(response.results) {
+        for ((query, _), result) in batch.into_iter().zip(response.results) {
             for vuln in result.vulns {
                 let queried: &mut Queried = ids.entry(vuln.id).or_default();
                 queried.modified = queried.modified.max(vuln.modified);
-                queried.packages.insert(package.clone());
+                queried.queries.insert(query.clone());
             }
             // A repeated token would loop forever.
             match result.next_page_token {
                 Some(token) if token.is_empty() => {}
-                Some(token) if !seen_tokens.insert((package, token.clone())) => {
+                Some(token) if !seen_tokens.insert((query, token.clone())) => {
                     return Err(FeedError::Unexpected {
                         url,
                         what: "querybatch repeated a page token",
                     });
                 }
-                Some(token) => pending.push((package, Some(token))),
+                Some(token) => pending.push((query, Some(token))),
                 None => {}
             }
         }
@@ -165,13 +229,15 @@ struct BatchRequest<'a> {
 struct Query<'a> {
     package: QueryPackage<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     page_token: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
 struct QueryPackage<'a> {
     name: &'a str,
-    ecosystem: &'static str,
+    ecosystem: Cow<'static, str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,6 +268,11 @@ struct Header {
     published: Option<Timestamp>,
     #[serde(default)]
     aliases: Vec<String>,
+    /// The upstream ids an OS advisory tracks (`DEBIAN-CVE-2024-1086` has `CVE-2024-1086`
+    /// here, and no aliases). They are kept as aliases, so the KEV flag and a finding's CVE
+    /// resolve to the OS record.
+    #[serde(default)]
+    upstream: Vec<String>,
 }
 
 #[cfg(test)]
@@ -215,6 +286,7 @@ mod tests {
     use crate::feeds::NvdAccess;
     use crate::feeds::test_server::Request;
     use crate::feeds::test_server::TestServer;
+    use crate::package::Package;
 
     fn feeds(server: &TestServer, dir: &std::path::Path) -> Feeds {
         Feeds::with_endpoints(
@@ -239,8 +311,11 @@ mod tests {
         .to_string()
     }
 
-    fn pkg(text: &str) -> Package {
-        text.parse().unwrap()
+    fn pkg(text: &str) -> OsvQuery {
+        OsvQuery {
+            package: text.parse().unwrap(),
+            version: None,
+        }
     }
 
     /// Answers querybatch with `ids` for every query, and each record with `modified`.
@@ -279,7 +354,7 @@ mod tests {
         let feeds = feeds(&server, tmp.path());
         let packages = [pkg("npm:lodash"), pkg("crates.io:serde"), pkg("npm:lodash")];
 
-        let advisories = feeds.osv(&packages, History::All).unwrap().advisories;
+        let advisories = feeds.osv(&packages, History::All, None).unwrap().advisories;
         let ids: Vec<_> = advisories.iter().map(|a| a.advisory.id.as_str()).collect();
         assert_eq!(ids, ["A-1", "B-2"]);
         assert_eq!(advisories[0].advisory.aliases, ["CVE-A-1"]);
@@ -291,7 +366,7 @@ mod tests {
                 .get()
                 .contains(r#""summary":"s""#)
         );
-        let matched = &advisories[0].packages;
+        let matched = &advisories[0].queries;
         assert_eq!(matched.len(), 2, "each queried package once: {matched:?}");
         assert!(matched.contains(&pkg("npm:lodash")) && matched.contains(&pkg("crates.io:serde")));
 
@@ -306,11 +381,11 @@ mod tests {
         );
         assert_eq!(requests.len(), 3, "one batch and two records");
 
-        feeds.osv(&packages, History::All).unwrap();
+        feeds.osv(&packages, History::All, None).unwrap();
         assert_eq!(server.requests().len(), 4, "records came from the cache");
 
         *modified.lock().unwrap() = "2026-02-01T00:00:00Z".to_owned();
-        feeds.osv(&packages, History::All).unwrap();
+        feeds.osv(&packages, History::All, None).unwrap();
         assert_eq!(server.requests().len(), 7, "both records changed upstream");
     }
 
@@ -322,7 +397,10 @@ mod tests {
         let feeds = feeds(&server, tmp.path());
         let ids = |year, month| -> Vec<String> {
             let since = History::Since(Since::new(jiff::civil::date(year, month, 1)).unwrap());
-            let advisories = feeds.osv(&[pkg("npm:lodash")], since).unwrap().advisories;
+            let advisories = feeds
+                .osv(&[pkg("npm:lodash")], since, None)
+                .unwrap()
+                .advisories;
             advisories.into_iter().map(|a| a.advisory.id).collect()
         };
 
@@ -342,7 +420,7 @@ mod tests {
         });
         let tmp = tempfile::tempdir().unwrap();
         let err = feeds(&server, tmp.path())
-            .osv(&[pkg("npm:a")], History::All)
+            .osv(&[pkg("npm:a")], History::All, None)
             .unwrap_err();
         assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
         assert_eq!(server.requests().len(), 2);
@@ -356,7 +434,7 @@ mod tests {
         });
         let tmp = tempfile::tempdir().unwrap();
         let advisories = feeds(&server, tmp.path())
-            .osv(&[pkg("npm:a")], History::All)
+            .osv(&[pkg("npm:a")], History::All, None)
             .unwrap()
             .advisories;
         assert!(advisories.is_empty());
@@ -400,7 +478,7 @@ mod tests {
         let packages: Vec<_> = (0..=BATCH).map(|i| pkg(&format!("npm:p{i}"))).collect();
 
         let advisories = feeds(&server, tmp.path())
-            .osv(&packages, History::All)
+            .osv(&packages, History::All, None)
             .unwrap()
             .advisories;
         let ids: Vec<_> = advisories.iter().map(|a| a.advisory.id.as_str()).collect();
@@ -417,6 +495,124 @@ mod tests {
             .collect();
         // The leftover query and the page-token retry share the second batch.
         assert_eq!(batch_sizes, [BATCH, 2]);
+    }
+
+    /// `linux` at 6.1 matches one more than [`CROWDED`] advisories, two of them for CVEs in
+    /// KEV; `openssl` matches one advisory also matched by `linux`, and one of its own.
+    fn crowded_server() -> TestServer {
+        TestServer::start(|request: &Request| {
+            if request.path() != "/v1/querybatch" {
+                let id = request.path().trim_start_matches("/v1/vulns/");
+                let record = serde_json::json!({
+                    "id": id,
+                    "modified": "2026-01-01T00:00:00Z",
+                    "upstream": [id.trim_start_matches("DEBIAN-")],
+                });
+                return (200, record.to_string());
+            }
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            let vuln =
+                |id: String| serde_json::json!({"id": id, "modified": "2026-01-01T00:00:00Z"});
+            let results: Vec<_> = body["queries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|q| {
+                    assert_eq!(q["package"]["ecosystem"], "Debian:12");
+                    match (q["package"]["name"].as_str(), q["version"].as_str()) {
+                        (Some("linux"), Some("6.1")) => {
+                            let ids = (0..=CROWDED).map(|n| format!("DEBIAN-CVE-2024-{n}"));
+                            let mut vulns: Vec<_> = ids.map(vuln).collect();
+                            vulns.push(vuln("DSA-1".into()));
+                            serde_json::json!({ "vulns": vulns })
+                        }
+                        (Some("openssl"), Some("3.0")) => serde_json::json!({"vulns": [
+                            vuln("DEBIAN-CVE-2024-5".into()),
+                            vuln("DEBIAN-CVE-2025-1".into()),
+                        ]}),
+                        other => panic!("unexpected query {other:?}"),
+                    }
+                })
+                .collect();
+            (200, serde_json::json!({ "results": results }).to_string())
+        })
+    }
+
+    #[test]
+    fn os_packages_are_queried_by_version_and_crowded_ones_keep_kev_only() {
+        let server = crowded_server();
+        let tmp = tempfile::tempdir().unwrap();
+        let debian = |name: &str, version: &str| {
+            let package = Package {
+                ecosystem: crate::package::Ecosystem::Debian { release: 12 },
+                name: name.to_owned(),
+            };
+            OsvQuery::new(package, version)
+        };
+        let queries = [debian("linux", "6.1"), debian("openssl", "3.0")];
+        assert_eq!(queries[0].version.as_deref(), Some("6.1"));
+        let kev = Kev::from_ids(&["CVE-2024-7", "CVE-2024-200", "CVE-2025-1"]);
+
+        let osv = feeds(&server, tmp.path())
+            .osv(&queries, History::All, Some(&kev))
+            .unwrap();
+
+        let found: Vec<(&str, usize)> = osv
+            .advisories
+            .iter()
+            .map(|a| (a.advisory.id.as_str(), a.queries.len()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("DEBIAN-CVE-2024-200", 1),
+                ("DEBIAN-CVE-2024-5", 1),
+                ("DEBIAN-CVE-2024-7", 1),
+                ("DEBIAN-CVE-2025-1", 1),
+            ],
+            "linux keeps its KEV CVEs; openssl keeps both of its own, and the one it shares \
+             with linux is linked to openssl only"
+        );
+        let shared = &osv.advisories[1];
+        assert_eq!(shared.queries, [queries[1].clone()]);
+        assert_eq!(
+            shared.advisory.aliases,
+            ["CVE-2024-5"],
+            "upstream ids become aliases"
+        );
+        assert!(!shared.advisory.is_known_exploited(&kev));
+        assert!(osv.advisories[0].advisory.is_known_exploited(&kev));
+
+        let [crowded] = &osv.crowded[..] else {
+            panic!("{:?}", osv.crowded)
+        };
+        assert_eq!(crowded.query, queries[0]);
+        assert_eq!(crowded.matched, CROWDED + 2);
+        assert_eq!(crowded.kept, 2);
+        let records = server
+            .requests()
+            .iter()
+            .filter(|r| r.path() != "/v1/querybatch")
+            .count();
+        assert_eq!(records, 4, "dropped advisories are never fetched");
+
+        let without_kev = feeds(&server, tmp.path())
+            .osv(&queries[..1], History::All, None)
+            .unwrap();
+        assert!(without_kev.advisories.is_empty());
+        assert_eq!(without_kev.crowded[0].kept, 0);
+    }
+
+    #[test]
+    fn a_query_at_the_crowded_limit_keeps_everything() {
+        let mut ids: BTreeMap<String, Queried> = BTreeMap::new();
+        let query = pkg("npm:a");
+        for n in 0..CROWDED {
+            let queried = ids.entry(format!("GHSA-{n}")).or_default();
+            queried.queries.insert(query.clone());
+        }
+        assert!(thin_crowded(&mut ids, None).is_empty());
+        assert_eq!(ids.len(), CROWDED);
     }
 
     #[test]
@@ -437,11 +633,11 @@ mod tests {
         let feeds = feeds(&server, tmp.path());
 
         let err = feeds
-            .osv(&[pkg("npm:a"), pkg("npm:b")], History::All)
+            .osv(&[pkg("npm:a"), pkg("npm:b")], History::All, None)
             .unwrap_err();
         assert!(matches!(err, FeedError::Unexpected { .. }), "{err:?}");
 
-        let osv = feeds.osv(&[pkg("npm:a")], History::All).unwrap();
+        let osv = feeds.osv(&[pkg("npm:a")], History::All, None).unwrap();
         assert!(osv.advisories.is_empty());
         assert!(
             matches!(osv.failures[..], [FeedError::BadId { .. }]),
@@ -476,7 +672,7 @@ mod tests {
         std::fs::write(tmp.path().join("osv/A-1.json"), wrong).unwrap();
 
         let advisories = feeds(&server, tmp.path())
-            .osv(&[pkg("npm:a")], History::All)
+            .osv(&[pkg("npm:a")], History::All, None)
             .unwrap()
             .advisories;
         assert_eq!(advisories[0].advisory.id, "A-1");
@@ -488,8 +684,8 @@ mod tests {
         let server = single_ref_server(None);
         let tmp = tempfile::tempdir().unwrap();
         let feeds = feeds(&server, tmp.path());
-        feeds.osv(&[pkg("npm:a")], History::All).unwrap();
-        feeds.osv(&[pkg("npm:a")], History::All).unwrap();
+        feeds.osv(&[pkg("npm:a")], History::All, None).unwrap();
+        feeds.osv(&[pkg("npm:a")], History::All, None).unwrap();
         assert_eq!(
             server.requests().len(),
             4,
@@ -512,7 +708,7 @@ mod tests {
         });
         let tmp = tempfile::tempdir().unwrap();
         let osv = feeds(&server, tmp.path())
-            .osv(&[pkg("npm:a")], History::All)
+            .osv(&[pkg("npm:a")], History::All, None)
             .unwrap();
         assert!(osv.advisories.is_empty());
         assert!(
@@ -542,7 +738,7 @@ mod tests {
         });
         let tmp = tempfile::tempdir().unwrap();
         let osv = feeds(&server, tmp.path())
-            .osv(&[pkg("npm:a")], History::All)
+            .osv(&[pkg("npm:a")], History::All, None)
             .unwrap();
         let ids: Vec<_> = osv
             .advisories
@@ -563,7 +759,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         assert!(
             feeds(&server, tmp.path())
-                .osv(&[], History::All)
+                .osv(&[], History::All, None)
                 .unwrap()
                 .advisories
                 .is_empty()

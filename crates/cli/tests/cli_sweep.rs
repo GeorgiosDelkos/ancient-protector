@@ -49,6 +49,27 @@ case "$last" in
 esac
 "#;
 
+/// A fake `ssh`: `web` answers as a Debian 12 server with one OS package and one listening
+/// socket; `down` cannot be reached. The marker is the argument after `sh -s --`.
+const FAKE_SSH: &str = r#"#!/bin/sh
+while [ "$1" != "--" ]; do shift; done
+dest=$2
+m=$6
+case "$dest" in
+  web)
+    printf '%s begin os-release\nID=debian\nVERSION_ID=12\n\n%s end 0\n' "$m" "$m"
+    printf '%s begin kernel\nLinux 6.1.0-28-amd64 x86_64\n%s end 0\n' "$m" "$m"
+    printf '%s begin dpkg\nPackage: openssl\nStatus: install ok installed\n' "$m"
+    printf 'Version: 3.0.15-1\n\n%s end 0\n' "$m"
+    for part in apk rpm docker-containers docker-images; do
+      printf '%s begin %s\n\n%s end 127\n' "$m" "$part" "$m"
+    done
+    printf '%s begin listening\ntcp LISTEN 0.0.0.0:6379\n%s end 0\n' "$m" "$m"
+    ;;
+  *) echo "ssh: Could not resolve hostname $dest" >&2; exit 255 ;;
+esac
+"#;
+
 struct Sandbox {
     root: tempfile::TempDir,
 }
@@ -61,6 +82,7 @@ impl Sandbox {
         fs::create_dir_all(sandbox.bin()).expect("the temp dir is writable");
         sandbox.script("bin/sw_vers", "#!/bin/sh\necho 27.2\n");
         sandbox.script("bin/gh", FAKE_GH);
+        sandbox.script("bin/ssh", FAKE_SSH);
         sandbox.script("agents/claude", FAKE_AGENT);
         let claude = sandbox.path().join("agents/claude");
         sandbox.script(
@@ -335,4 +357,56 @@ fn github_repositories_are_swept_after_the_mac() {
         "{report}"
     );
     assert!(sandbox.path().join("data/prompts/sweep-github.md").exists());
+}
+
+#[test]
+fn servers_are_swept_after_the_repositories() {
+    let sandbox = Sandbox::new(
+        "agent = \"claude\"\n\n[[servers]]\nname = \"web\"\nssh = \"web\"\n\n\
+         [[servers]]\nname = \"down\"\nssh = \"down\"\n",
+    );
+    let out = sandbox.sweep("ok");
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(!out.status.success(), "down has no verdict: {stderr}");
+    assert!(stderr.contains("sweeping server:web"), "{stderr}");
+    assert!(
+        stderr.contains("server:down: cannot read the server over ssh"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Could not resolve hostname down"),
+        "{stderr}"
+    );
+    assert!(stdout.contains("# Sweep of server:web"), "{stdout}");
+    assert_eq!(
+        sandbox.runs().trim(),
+        "2",
+        "the agent ran for the Mac and web only"
+    );
+
+    let dir = sandbox.target_dir("server-web");
+    let listening = fs::read_to_string(dir.join("bundle/server/listening.txt")).unwrap();
+    assert_eq!(listening, "tcp LISTEN 0.0.0.0:6379");
+    let system = fs::read_to_string(dir.join("bundle/server/system.json")).unwrap();
+    assert!(system.contains("\"Debian:12\""), "{system}");
+    let inventory = fs::read_to_string(dir.join("bundle/inventory.jsonl")).unwrap();
+    assert!(inventory.contains("\"Debian:12\""), "{inventory}");
+    assert!(inventory.contains("\"os_package\""), "{inventory}");
+    let prompt = fs::read_to_string(dir.join("bundle/PROMPT.md")).unwrap();
+    assert!(
+        prompt.starts_with("# Security sweep: the server web"),
+        "{prompt}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["target"], "server:web");
+    assert_eq!(report["components"], 1);
+
+    let down = sandbox.target_dir("server-down");
+    let report = fs::read_to_string(down.join("report.md")).unwrap();
+    assert!(
+        report.contains("**No verdict:** cannot read the server"),
+        "{report}"
+    );
+    assert!(sandbox.path().join("data/prompts/sweep-server.md").exists());
 }
