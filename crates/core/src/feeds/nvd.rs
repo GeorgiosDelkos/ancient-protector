@@ -74,6 +74,39 @@ impl NvdAccess {
             .map_err(KeychainError::Run)?;
         from_security_output(output.status.code(), &output.stdout)
     }
+
+    /// Whether an API key is stored in the Keychain. Asks without `-w`, so the key itself is
+    /// never read; any failure counts as no key.
+    pub(crate) fn has_keychain_key() -> bool {
+        Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
+            .args(["-a", KEYCHAIN_ACCOUNT])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Stores `key` as the NVD API key in the login Keychain, replacing any earlier one.
+    /// Through the Security framework, not `security add-generic-password -w`, which would put
+    /// the key on a command line other processes can read.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the key is not one line of printable ASCII (NVD's keys are UUIDs), or the
+    /// Keychain refuses it.
+    pub fn save_to_keychain(key: &str) -> Result<(), KeychainError> {
+        let key = key.trim();
+        // NVD keys are 36 characters; the bound only keeps out what is plainly not a key.
+        let plain = (1..=128).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_graphic());
+        if !plain {
+            return Err(KeychainError::NotAKey);
+        }
+        security_framework::passwords::set_generic_password(
+            KEYCHAIN_SERVICE,
+            KEYCHAIN_ACCOUNT,
+            key.as_bytes(),
+        )
+        .map_err(|e| KeychainError::Save(e.to_string()))
+    }
 }
 
 /// The key is a secret: it never appears in `Debug` output or logs.
@@ -117,6 +150,12 @@ pub enum KeychainError {
     /// `security` was killed by a signal.
     #[error("security find-generic-password was killed by a signal")]
     Signal,
+    /// The text given is not an API key.
+    #[error("an NVD API key is one line of letters, digits and dashes; paste it again")]
+    NotAKey,
+    /// The Keychain refused to store the key.
+    #[error("the Keychain refused the key: {0}")]
+    Save(String),
 }
 
 /// A CPE product, such as `openssl`, matched under any vendor, or `vendor:product`, such as

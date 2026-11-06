@@ -19,6 +19,8 @@ use std::io;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 use jiff::Timestamp;
 use serde::Serialize;
@@ -91,6 +93,11 @@ impl Prompt {
         }
     }
 }
+
+/// How often [`Lock::acquire`] tries, and how long it waits between tries. Arbitrary: 100 ms in
+/// all is far longer than starting a process takes, and nothing a user would notice.
+const LOCK_TRIES: u32 = 5;
+const LOCK_RETRY: Duration = Duration::from_millis(20);
 
 /// How many sweep or fix folders may share one start second before the run gives up. Arbitrary:
 /// sweeps run one at a time and each takes seconds at least, so two is already rare.
@@ -1373,11 +1380,17 @@ impl Lock {
             .write(true)
             .open(&path)
             .map_err(write_err)?;
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(fs::TryLockError::WouldBlock) => Err(SweepError::Busy { lock: path }),
-            Err(fs::TryLockError::Error(e)) => Err(write_err(e)),
+        // A few tries, briefly apart: a process another thread is starting holds a copy of
+        // every open file until it runs its program, so a lock released a moment ago can still
+        // look held. A sweep that really holds it holds it for minutes.
+        for _ in 0..LOCK_TRIES {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(fs::TryLockError::WouldBlock) => thread::sleep(LOCK_RETRY),
+                Err(fs::TryLockError::Error(e)) => return Err(write_err(e)),
+            }
         }
+        Err(SweepError::Busy { lock: path })
     }
 }
 

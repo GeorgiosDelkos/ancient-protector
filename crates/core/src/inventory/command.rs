@@ -4,8 +4,16 @@
 //! the caller's folder (`rust-toolchain.toml`, `.nvmrc`, `.python-version`) changes which tool
 //! version answers, and rustup cannot decide to install a toolchain a project pins. Closed
 //! stdin and the time limit keep a tool that prompts or hangs from stopping the sweep.
+//!
+//! Tools are found on [`search_path`]: the process's `PATH`, unless the menu-bar app set the
+//! login shell's with [`use_search_path`]. An app started at login or from Finder gets only
+//! `/usr/bin:/bin:/usr/sbin:/sbin`, without Homebrew, nvm or `~/.local/bin`, so without this
+//! a sweep from the app would find no `brew`, `npm` or `gh`. It is process-wide, set once at
+//! startup, because every collector runs tools and threading it through each would change
+//! every signature for one caller; the CLI, started from a terminal, never sets it.
 
 use std::env;
+use std::ffi::OsString;
 use std::io;
 use std::io::Read as _;
 use std::io::Write as _;
@@ -16,6 +24,7 @@ use std::process::Child;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -118,6 +127,22 @@ struct RawOutput {
 
 /// Runs `program` with `input` on stdin, which is closed once it is written (at once when
 /// `input` is empty).
+/// The login shell's `PATH`, when the app set it.
+static SEARCH_PATH: OnceLock<OsString> = OnceLock::new();
+
+/// Makes every tool the core runs from now on be found on `path` instead of the process's
+/// `PATH`. Only the first call counts.
+pub(crate) fn use_search_path(path: OsString) {
+    // A second call would come from a second app instance in one process, which cannot
+    // happen; ignoring it keeps the first, which tools may already have been found on.
+    drop(SEARCH_PATH.set(path));
+}
+
+/// Where tools are looked up: the login shell's `PATH` when set, otherwise the process's.
+fn search_path() -> Option<OsString> {
+    SEARCH_PATH.get().cloned().or_else(|| env::var_os("PATH"))
+}
+
 fn run_raw(
     program: &str,
     args: &[&str],
@@ -125,7 +150,12 @@ fn run_raw(
     timeout: Duration,
 ) -> Result<Option<RawOutput>, InventoryError> {
     let command = command_line(program, args);
-    let child = Command::new(program)
+    let mut command_builder = Command::new(program);
+    // On Unix the child's `PATH` is also where `program` is searched, so this finds it too.
+    if let Some(path) = SEARCH_PATH.get() {
+        command_builder.env("PATH", path);
+    }
+    let child = command_builder
         .args(args)
         .current_dir("/")
         // Its own process group, so a timeout can stop the helpers it starts as well.
@@ -267,7 +297,7 @@ pub(crate) fn which(program: &str) -> Option<PathBuf> {
     if program.contains('/') {
         return Path::new(program).exists().then(|| PathBuf::from(program));
     }
-    let path = env::var_os("PATH")?;
+    let path = search_path()?;
     env::split_paths(&path)
         .map(|dir| dir.join(program))
         .find(|candidate| candidate.exists())

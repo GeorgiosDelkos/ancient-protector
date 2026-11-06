@@ -1,23 +1,23 @@
 # Ancient Protector configuration. Edit here or in the app's settings window.
-
+#
 # The coding agent that runs sweeps and fixes: claude, grok, codex, gemini or opencode.
 # agent = "claude"
 
+# Sweep automatically every N hours (every_hours = 24). Leave it unset to sweep only on
+# demand.
 [schedule]
-# Sweep automatically every N hours. Leave unset to sweep only on demand.
-# every_hours = 24
 
-[history]
 # How far back the first advisory download goes: "all", or a date like "2025-01-31".
 # Later sweeps fetch only what changed since the previous one.
+[history]
 since = "all"
 
-[mac]
 # Folders searched for lockfiles (Cargo.lock, package-lock.json, uv.lock, go.sum, ...).
+[mac]
 project_dirs = []
 
-[github]
 # Repositories to sweep, as "owner/name". Uses your `gh` login.
+[github]
 repos = []
 
 # Servers to sweep over SSH. The app runs a fixed, read-only script on each (OS release and

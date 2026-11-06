@@ -81,7 +81,13 @@ impl Config {
                 });
             }
         };
-        let raw: RawConfig = toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
+        Self::from_text(path, &text, home)
+    }
+
+    /// Parses and validates `text` as the config at `path`, as [`Config::load`] does after
+    /// reading it; for a change checked before it is written.
+    pub(crate) fn from_text(path: &Path, text: &str, home: &Path) -> Result<Self, LoadConfigError> {
+        let raw: RawConfig = toml::from_str(text).map_err(|source| LoadConfigError::Parse {
             path: path.to_owned(),
             source,
         })?;
