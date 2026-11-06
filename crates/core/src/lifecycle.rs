@@ -540,6 +540,22 @@ mod tests {
             Changes::since_last(sweeps, "mac", &set(active), &set(all)).unwrap()
         };
         assert!(since(&[kept], &[kept]).is_none(), "no sweeps yet");
+        let none = BTreeSet::new();
+        let missing = tmp.path().join("no-sweeps-folder");
+        assert!(
+            Changes::since_last(&missing, "mac", &none, &none)
+                .unwrap()
+                .is_none()
+        );
+        let file = tmp.path().join("a-file");
+        fs::write(&file, "").unwrap();
+        assert!(
+            matches!(
+                Changes::since_last(&file, "mac", &none, &none),
+                Err(StateError::Read { .. })
+            ),
+            "a sweeps path that is not a folder is an error, not an empty list"
+        );
 
         // By name `-10` sorts before `-2`; it is the newer sweep.
         let mut last = report("2026-11-04T00:00:00Z", None, &[kept, gone, again], at);
