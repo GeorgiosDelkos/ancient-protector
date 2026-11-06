@@ -506,6 +506,7 @@ fn dismissals_hold_across_sweeps_and_changes_are_counted() {
     assert!(sandbox.sweep("issue").status.success());
     let first = sandbox.newest_report("github-o--r");
     assert!(first["changes"].is_null(), "no earlier sweep: {first}");
+    assert_eq!(first["first_verdict"], true, "{first}");
     let key = first["issues"][0]["key"].as_str().unwrap().to_owned();
     assert_eq!(key.len(), 16, "{first}");
 
@@ -518,6 +519,7 @@ fn dismissals_hold_across_sweeps_and_changes_are_counted() {
     let out = sandbox.sweep("issue");
     assert!(out.status.success());
     let second = sandbox.newest_report("github-o--r");
+    assert_eq!(second["first_verdict"], false, "{second}");
     assert_eq!(
         second["issues"][0]["key"],
         key.as_str(),

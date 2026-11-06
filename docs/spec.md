@@ -408,7 +408,12 @@ Built in step 9a (2026-11-06):
   start, failed ones included, so a failing sweep is not retried at once); a Mac that wakes
   after a missed sweep runs it within a minute.
 - A sweep that finds new, open, critical or high findings or issues raises one notification
-  listing up to three of them (`alerts`; on a target's first sweep every such one is new).
+  listing up to three of them (`alerts`; on a target's first sweep with a verdict every such
+  one is new, and when its last report cannot be read none is, so nothing is notified twice).
+- A tray click within 300 ms of the popover hiding on blur leaves it hidden: clicking the icon
+  first takes focus from the open popover, then delivers the click.
+- Accepted: the grey "last sweep failed" dot is kept in memory, so after the app restarts the
+  dot shows the open findings until the next sweep.
 - Licenses: Tauri brings in MPL-2.0 crates (cssparser, selectors and others); MPL-2.0 was
   allowed for all crates by the owner on 2026-11-06. `cargo deny` checks only the macOS
   targets, so GTK and D-Bus crates (Linux only, with open advisories) are left out.

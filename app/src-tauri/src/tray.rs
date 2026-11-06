@@ -1,11 +1,18 @@
 //! The menu-bar icon: its colour shows the worst open finding, a running sweep, or a failure,
 //! and a left click shows or hides the popover under it.
 
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
+use std::time::Duration;
+use std::time::Instant;
+
 use ancient_protector_core::Config;
 use ancient_protector_core::Severity;
 use ancient_protector_core::latest;
 use tauri::AppHandle;
 use tauri::Manager as _;
+use tauri::Window;
 use tauri::image::Image;
 use tauri::tray::MouseButton;
 use tauri::tray::MouseButtonState;
@@ -20,6 +27,34 @@ use crate::runner::Status;
 
 const TRAY_ID: &str = "main";
 const POPOVER: &str = "popover";
+
+/// How soon after the popover hid on losing focus a tray click counts as the same gesture.
+/// Clicking the icon while the popover is open first takes focus from it, which hides it,
+/// and then delivers the click, which would show it again. Arbitrary: longer than the gap
+/// between the two events, shorter than a deliberate second click.
+const CLICK_AFTER_BLUR: Duration = Duration::from_millis(300);
+
+/// When the popover last hid because it lost focus.
+#[derive(Debug, Default)]
+pub(crate) struct Popover {
+    hidden_on_blur: Mutex<Option<Instant>>,
+}
+
+impl Popover {
+    /// The time is a plain value; a poisoned lock still holds a valid one.
+    fn last_blur(&self) -> MutexGuard<'_, Option<Instant>> {
+        self.hidden_on_blur
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Hides the popover because it lost focus, as a menu closes.
+pub(crate) fn hide_on_blur(window: &Window) {
+    *window.state::<Popover>().last_blur() = Some(Instant::now());
+    // Best effort: a window that will not hide stays until the next click.
+    drop(window.hide());
+}
 
 /// The icon for each state, 44 by 44 pixels: the menu bar's 22 points at 2x.
 #[derive(Debug, Clone, Copy)]
@@ -126,6 +161,13 @@ fn toggle(app: &AppHandle) {
     };
     if window.is_visible().unwrap_or(false) {
         drop(window.hide());
+        return;
+    }
+    let just_hidden = app
+        .state::<Popover>()
+        .last_blur()
+        .is_some_and(|at| at.elapsed() < CLICK_AFTER_BLUR);
+    if just_hidden {
         return;
     }
     // Best effort: a popover that fails to move still shows.
