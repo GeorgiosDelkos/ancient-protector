@@ -190,10 +190,10 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Verdict, Vec<String>
     for (i, issue) in findings.issues.iter().enumerate() {
         let at = format!("issues[{i}]");
         // The subject keys the issue across sweeps (see `lifecycle`), so it names one issue.
-        if !subjects.insert(plain_subject(&issue.subject)) {
+        let subject = plain_subject(&issue.subject);
+        if !subjects.insert(subject.clone()) {
             problems.push(format!(
-                "{at}.subject: {} is already an issue; merge them",
-                plain_subject(&issue.subject)
+                "{at}.subject: {subject} is already an issue; merge them"
             ));
         }
         let known_subject = match &issue.subject {

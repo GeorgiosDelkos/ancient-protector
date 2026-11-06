@@ -287,20 +287,10 @@ impl Saved {
 /// `20261106T101500Z`, with `-2`, `-3` and so on for later sweeps that started in the same
 /// second; other names are not sweeps. Sorting by name alone would put `-10` before `-2`.
 fn newest_first(sweeps: &Path) -> Result<Vec<PathBuf>, StateError> {
-    let entries = match fs::read_dir(sweeps) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(StateError::Read {
-                path: sweeps.to_owned(),
-                source,
-            });
-        }
-    };
-    let mut found: Vec<((String, u32), PathBuf)> = entries
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
+    let mut found: Vec<((String, u32), PathBuf)> = folders(sweeps)?
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_owned();
             let (stamp, n) = match name.split_once('-') {
                 Some((stamp, n)) => (stamp, n.parse().ok()?),
                 None => (name.as_str(), 1),
@@ -311,7 +301,7 @@ fn newest_first(sweeps: &Path) -> Result<Vec<PathBuf>, StateError> {
                     15 => b == b'Z',
                     _ => b.is_ascii_digit(),
                 });
-            is_stamp.then(|| ((stamp.to_owned(), n), e.path()))
+            is_stamp.then(|| ((stamp.to_owned(), n), path.clone()))
         })
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0));
@@ -335,14 +325,32 @@ fn read_saved(target_dir: &Path) -> Result<Option<Saved>, StateError> {
         .map_err(|e| read_err(io::Error::new(io::ErrorKind::InvalidData, e)))
 }
 
-/// `key` as the newest report that has it has it, when one does.
+/// The folders in `dir`; none when `dir` does not exist. Files are skipped: a sweep folder
+/// holds target folders, and the sweeps folder holds `.lock` beside the sweeps.
+fn folders(dir: &Path) -> Result<Vec<PathBuf>, StateError> {
+    let read_err = |source| StateError::Read {
+        path: dir.to_owned(),
+        source,
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(read_err(e)),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(read_err)?;
+        if entry.file_type().map_err(read_err)?.is_dir() {
+            found.push(entry.path());
+        }
+    }
+    Ok(found)
+}
+
+/// The entry for `key` in the newest report that has it.
 fn newest(sweeps: &Path, key: FindingKey) -> Result<Option<SavedEntry>, StateError> {
     for sweep in newest_first(sweeps)? {
-        let targets = fs::read_dir(&sweep).map_err(|source| StateError::Read {
-            path: sweep.clone(),
-            source,
-        })?;
-        for target in targets.filter_map(Result::ok).map(|e| e.path()) {
+        for target in folders(&sweep)? {
             let Some(saved) = read_saved(&target)? else {
                 continue;
             };

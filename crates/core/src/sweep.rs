@@ -459,12 +459,12 @@ impl Shared<'_> {
         let changes = if failure.is_some() {
             None
         } else {
-            let entries = || {
+            let keys = || {
                 let findings = findings.iter().map(|f| (f.key, f.dismissed.is_some()));
                 findings.chain(issues.iter().map(|i| (i.key, i.dismissed.is_some())))
             };
-            let all = entries().map(|(key, _)| key).collect();
-            let active = entries().filter(|(_, d)| !d).map(|(key, _)| key).collect();
+            let all = keys().map(|(key, _)| key).collect();
+            let active = keys().filter(|(_, d)| !d).map(|(key, _)| key).collect();
             let sweeps = self.data_dir.sweeps_dir();
             Changes::since_last(&sweeps, &collected.dir_name, &active, &all).unwrap_or_else(|e| {
                 problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
@@ -483,9 +483,7 @@ impl Shared<'_> {
         save_report(&dir, &mut report);
         Ok(report)
     }
-}
 
-impl Shared<'_> {
     /// Keys the verdict's findings and issues, marks the dismissed ones, and sorts each list
     /// most severe first.
     fn keyed(
@@ -559,8 +557,19 @@ fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey
                 Lookup::Product(p) => format!("product:{p}"),
             };
             let found_in = match &c.found_in {
+                FoundIn::MacOs => "macos".to_owned(),
+                FoundIn::HomebrewFormula { name } => format!("homebrew_formula:{name}"),
+                FoundIn::HomebrewCask { token } => format!("homebrew_cask:{token}"),
+                FoundIn::Rustup { toolchain } => format!("rustup:{toolchain}"),
+                FoundIn::CargoInstall => "cargo_install".to_owned(),
+                FoundIn::Node => "node".to_owned(),
+                FoundIn::NpmGlobal => "npm_global".to_owned(),
+                FoundIn::Python => "python".to_owned(),
+                FoundIn::UvTool => "uv_tool".to_owned(),
+                FoundIn::Pipx => "pipx".to_owned(),
+                FoundIn::Lockfile { path } => format!("lockfile:{}", path.to_string_lossy()),
                 FoundIn::OsPackage { .. } => "os_package".to_owned(),
-                other => serde_json::to_string(other).expect("FoundIn serializes"),
+                FoundIn::DependencyGraph { repo } => format!("dependency_graph:{repo}"),
             };
             [(*advisory).to_owned(), lookup, found_in]
         })

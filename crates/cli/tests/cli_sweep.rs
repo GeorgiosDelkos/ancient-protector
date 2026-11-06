@@ -173,7 +173,11 @@ impl Sandbox {
                 .expect("sweep folders have UTF-8 names")
                 .to_owned();
             match name.split_once('-') {
-                Some((stamp, n)) => (stamp.to_owned(), n.parse::<u32>().expect("a number")),
+                Some((stamp, n)) => (
+                    stamp.to_owned(),
+                    n.parse::<u32>()
+                        .expect("a sweep folder suffix is the same-second count"),
+                ),
                 None => (name, 1),
             }
         });
