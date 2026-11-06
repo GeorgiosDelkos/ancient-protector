@@ -11,6 +11,7 @@ use ancient_protector_core::Config;
 use ancient_protector_core::Severity;
 use ancient_protector_core::latest;
 use tauri::AppHandle;
+use tauri::Emitter as _;
 use tauri::Manager as _;
 use tauri::Window;
 use tauri::image::Image;
@@ -21,7 +22,6 @@ use tauri::tray::TrayIconEvent;
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt as _;
 
-use crate::runner;
 use crate::runner::Runner;
 use crate::runner::Status;
 
@@ -174,6 +174,7 @@ fn toggle(app: &AppHandle) {
     drop(window.move_window(Position::TrayBottomCenter));
     drop(window.show());
     drop(window.set_focus());
-    // The popover asks for fresh data whenever it is shown.
-    runner::changed(app);
+    // The popover asks for fresh data whenever it is shown. Only the event: refreshing the icon
+    // here would read every report on the main thread, where tray clicks arrive.
+    drop(app.emit("changed", ()));
 }
