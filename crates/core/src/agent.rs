@@ -279,6 +279,17 @@ pub(crate) struct Located {
     path: OsString,
 }
 
+#[cfg(test)]
+impl Located {
+    /// An agent at `binary`, for tests of code that only passes it on.
+    pub(crate) fn at(binary: &Path) -> Self {
+        Self {
+            binary: binary.to_owned(),
+            path: OsString::from("/usr/bin:/bin"),
+        }
+    }
+}
+
 /// Reads the marked lines of the login shell's answer: the `PATH`, then exactly one absolute
 /// path to an executable regular file.
 fn parse_located(stdout: &str) -> Option<Located> {

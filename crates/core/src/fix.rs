@@ -275,8 +275,10 @@ pub enum Confirmed {
 ///
 /// # Errors
 ///
-/// Fails before the agent runs when a sweep or fix is running or the fix folder cannot be
-/// written, and after it when the record cannot be appended.
+/// Fails before the agent runs when a sweep or fix is running, when a sweep or dismissal
+/// landed after `plan` was made ([`FixError::Stale`], [`FixError::Dismissed`],
+/// [`FixError::Changed`]), or when the fix folder cannot be written; and after it when the
+/// record cannot be appended.
 pub fn run_fix(
     data_dir: &DataDir,
     plan: &FixPlan,
@@ -656,6 +658,59 @@ mod tests {
                 .unwrap_err()
                 .starts_with("no result.json")
         );
+    }
+
+    /// A Mac report of `key` started at `started`, in the sweep folder `stamp`.
+    fn save_report(data_dir: &DataDir, stamp: &str, started: &str, key: FindingKey) -> PathBuf {
+        let dir = data_dir.sweeps_dir().join(stamp).join("mac");
+        fs::create_dir_all(&dir).unwrap();
+        let report = json!({
+            "started": started, "target": "mac", "failure": null, "issues": [],
+            "findings": [{"key": key, "severity": "high", "modified": null,
+                "fix": {"summary": "s", "steps": [], "commands": ["true"]}}],
+        });
+        fs::write(dir.join("report.json"), report.to_string()).unwrap();
+        dir.join("report.json")
+    }
+
+    #[test]
+    fn a_sweep_or_dismissal_during_the_question_stops_the_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let key = FindingKey::new(&["k"]);
+        let report = save_report(&data_dir, "20261105T000000Z", "2026-11-05T00:00:00Z", key);
+        let plan = FixPlan {
+            key,
+            report,
+            target: "mac".to_owned(),
+            destination: "this Mac".to_owned(),
+            found: "2026-11-05T00:00:00Z".parse().unwrap(),
+            fix: Fix::deserialize(&json!({"summary": "s", "steps": [], "commands": []})).unwrap(),
+            brief: json!({}),
+            access: String::new(),
+            agent: AgentKind::Claude,
+            located: Located::at(Path::new("/no/such/agent")),
+        };
+        let unrun = || !data_dir.state_dir().join("fixes.jsonl").exists();
+
+        lifecycle::dismiss(&data_dir, key, "accepted").unwrap();
+        let err = run_fix(&data_dir, &plan, Confirmed::Asked).unwrap_err();
+        assert!(matches!(err, FixError::Dismissed { .. }), "{err:?}");
+        lifecycle::undismiss(&data_dir, key).unwrap();
+
+        save_report(&data_dir, "20261106T000000Z", "2026-11-06T00:00:00Z", key);
+        let err = run_fix(&data_dir, &plan, Confirmed::Asked).unwrap_err();
+        assert!(matches!(err, FixError::Changed { .. }), "{err:?}");
+        assert!(unrun(), "nothing ran and nothing was recorded");
+
+        let gone = data_dir.sweeps_dir().join("20261107T000000Z/mac");
+        fs::create_dir_all(&gone).unwrap();
+        let empty = json!({"started": "2026-11-07T00:00:00Z", "target": "mac",
+            "failure": null, "findings": [], "issues": []});
+        fs::write(gone.join("report.json"), empty.to_string()).unwrap();
+        let err = run_fix(&data_dir, &plan, Confirmed::Asked).unwrap_err();
+        assert!(matches!(err, FixError::Stale { .. }), "{err:?}");
+        assert!(unrun());
     }
 
     fn record(n: u8) -> FixRecord {
