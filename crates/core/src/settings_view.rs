@@ -2,6 +2,10 @@
 //! app's UI only lays it out: the headline, the sections in their groups with each one's
 //! one-line summary, the choices in them, and which are chosen.
 //!
+//! Models are offered for the chosen agent, grouped by who serves them: one provider per
+//! agent, except opencode, whose `provider/model` names say. A chosen model the agent does
+//! not list (typed, or listed no more) is still offered, so the choice always shows.
+//!
 //! Folders are shown as people write them (`~/code`) and compared after `~/` expansion;
 //! repositories are compared ignoring case, as GitHub does. Folders and repositories in the
 //! config are listed once each: chosen folders first, then suggested ones; repositories the
@@ -40,6 +44,8 @@ pub struct SettingsView {
     pub groups: Vec<SectionGroup>,
     /// The agents, chosen or not, found or not.
     pub agents: Vec<AgentChoice>,
+    /// The chosen agent's models, or `None` while no agent is chosen.
+    pub model: Option<ModelView>,
     /// The schedule and history.
     pub schedule: ScheduleChoice,
     /// The folders searched for lockfiles, then suggested ones.
@@ -112,6 +118,46 @@ pub struct AgentChoice {
     /// Whether it is the chosen one.
     pub chosen: bool,
 }
+
+/// The models the chosen agent can run with.
+#[derive(Debug, Serialize)]
+pub struct ModelView {
+    /// The agent, as [`crate::Setting::Model`] takes it.
+    pub agent: AgentKind,
+    /// The model in the config, or `None` for the agent's own default.
+    pub chosen: Option<String>,
+    /// Who serves the models, each with its models; one provider unless the agent is
+    /// opencode. Empty when the agent lists no models and none is chosen.
+    pub providers: Vec<ProviderChoice>,
+    /// Whether the agent's CLI lists its models; when it does not, the user types one.
+    pub listed: bool,
+}
+
+/// A provider and its models.
+#[derive(Debug, Serialize)]
+pub struct ProviderChoice {
+    /// Its name: "Anthropic", "ollama".
+    pub name: String,
+    /// Whether the chosen model is one of its models; the first provider when no model is.
+    pub chosen: bool,
+    /// Its models.
+    pub models: Vec<ModelOption>,
+}
+
+/// A model to choose.
+#[derive(Debug, Serialize)]
+pub struct ModelOption {
+    /// The model as [`crate::Setting::Model`] takes it: `opus`, `ollama/gemma4:e4b`.
+    pub value: String,
+    /// Its name without the provider: `gemma4:e4b`.
+    pub label: String,
+    /// Whether it is the chosen model.
+    pub chosen: bool,
+}
+
+/// Claude Code's aliases for the newest model of each family, which its `--model` takes
+/// (`claude --help`, checked 2026-11-07); its CLI lists no models.
+const CLAUDE_MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
 
 /// The schedule and history, with the values their fields show.
 #[derive(Debug, Serialize)]
@@ -229,6 +275,9 @@ pub fn settings_view(config: &Config, detected: &Detected, home: &Path) -> Setti
                 chosen: config.agent == Some(*agent),
             })
             .collect(),
+        model: config
+            .agent
+            .map(|agent| model_view(config, detected, agent)),
         schedule: schedule_choice(config),
         folders: folders(config, detected, home),
         tools: detected
@@ -254,7 +303,14 @@ fn groups(config: &Config, detected: &Detected) -> Vec<SectionGroup> {
         summary,
         attention,
     };
-    let agent = config.agent.map_or("Choose one", AgentKind::name);
+    let agent = match (
+        config.agent,
+        config.agent.and_then(|a| config.models.get(&a)),
+    ) {
+        (None, _) => "Choose one".to_owned(),
+        (Some(agent), None) => agent.name().to_owned(),
+        (Some(agent), Some(model)) => format!("{} · {model}", agent.name()),
+    };
     let schedule = match config.schedule {
         Schedule::Manual => "Manual".to_owned(),
         Schedule::EveryHours(hours) => format!("Every {hours} h"),
@@ -269,12 +325,7 @@ fn groups(config: &Config, detected: &Detected) -> Vec<SectionGroup> {
         group(
             "Sweeps",
             vec![
-                line(
-                    Section::Agent,
-                    "Agent",
-                    agent.to_owned(),
-                    config.agent.is_none(),
-                ),
+                line(Section::Agent, "Agent", agent, config.agent.is_none()),
                 line(Section::Schedule, "Schedule", schedule, false),
             ],
         ),
@@ -319,6 +370,60 @@ fn headline(attention: usize) -> String {
         0 => "Ready to sweep".to_owned(),
         1 => "1 setting needs you".to_owned(),
         n => format!("{n} settings need you"),
+    }
+}
+
+fn model_view(config: &Config, detected: &Detected, agent: AgentKind) -> ModelView {
+    let chosen = config.models.get(&agent).map(|m| m.as_str().to_owned());
+    let listed: Option<Vec<String>> = match agent {
+        AgentKind::Claude => Some(CLAUDE_MODELS.map(str::to_owned).to_vec()),
+        AgentKind::Grok | AgentKind::Opencode => detected
+            .models
+            .iter()
+            .find(|(a, _)| *a == agent)
+            .map(|(_, models)| models.clone()),
+        AgentKind::Codex | AgentKind::Gemini => None,
+    };
+    let mut values = listed.clone().unwrap_or_default();
+    if let Some(chosen) = &chosen
+        && !values.contains(chosen)
+    {
+        values.insert(0, chosen.clone());
+    }
+
+    let mut providers: Vec<ProviderChoice> = Vec::new();
+    for value in values {
+        let (provider, label) = match (agent.provider(), value.split_once('/')) {
+            (Some(provider), _) => (provider.to_owned(), value.clone()),
+            (None, Some((provider, label))) => (provider.to_owned(), label.to_owned()),
+            (None, None) => (String::new(), value.clone()),
+        };
+        let option = ModelOption {
+            chosen: chosen.as_ref() == Some(&value),
+            value,
+            label,
+        };
+        match providers.iter_mut().find(|p| p.name == provider) {
+            Some(group) => group.models.push(option),
+            None => providers.push(ProviderChoice {
+                name: provider,
+                chosen: false,
+                models: vec![option],
+            }),
+        }
+    }
+    let on = providers
+        .iter()
+        .position(|p| p.models.iter().any(|m| m.chosen))
+        .unwrap_or(0);
+    if let Some(provider) = providers.get_mut(on) {
+        provider.chosen = true;
+    }
+    ModelView {
+        agent,
+        chosen,
+        providers,
+        listed: listed.is_some_and(|l| !l.is_empty()),
     }
 }
 
@@ -437,6 +542,14 @@ mod tests {
                 (AgentKind::Claude, Some(PathBuf::from("/bin/claude"))),
                 (AgentKind::Codex, None),
             ],
+            models: vec![(
+                AgentKind::Opencode,
+                vec![
+                    "opencode/big-pickle".to_owned(),
+                    "ollama/gemma4:e4b".to_owned(),
+                    "ollama/qwen3".to_owned(),
+                ],
+            )],
             tools: vec![Tool {
                 program: "brew",
                 name: "Homebrew",
@@ -482,6 +595,122 @@ mod tests {
         let view = settings_view(&config(""), &found, Path::new(HOME));
         assert_eq!(view.headline, "1 setting needs you");
         assert!(!view.ready);
+    }
+
+    /// A provider as the tests compare it: its name, whether it is chosen, and each model's
+    /// value, label and whether it is chosen.
+    type Offered = (String, bool, Vec<(String, String, bool)>);
+
+    fn models(view: &SettingsView) -> Vec<Offered> {
+        let model = view.model.as_ref().unwrap();
+        model
+            .providers
+            .iter()
+            .map(|p| {
+                let options = p
+                    .models
+                    .iter()
+                    .map(|m| (m.value.clone(), m.label.clone(), m.chosen))
+                    .collect();
+                (p.name.clone(), p.chosen, options)
+            })
+            .collect()
+    }
+
+    fn owned(name: &str, chosen: bool, options: &[(&str, &str, bool)]) -> Offered {
+        let options = options
+            .iter()
+            .map(|(v, l, c)| ((*v).to_owned(), (*l).to_owned(), *c))
+            .collect();
+        (name.to_owned(), chosen, options)
+    }
+
+    #[test]
+    fn models_are_offered_for_the_chosen_agent_by_provider() {
+        let view = settings_view(&config(""), &detected(), Path::new(HOME));
+        assert!(view.model.is_none(), "no agent, so no models");
+
+        let view = settings_view(&config("agent = \"claude\""), &detected(), Path::new(HOME));
+        let model = view.model.as_ref().unwrap();
+        assert_eq!(
+            (model.agent, model.chosen.as_deref(), model.listed),
+            (AgentKind::Claude, None, true)
+        );
+        assert_eq!(
+            models(&view),
+            [owned(
+                "Anthropic",
+                true,
+                &[
+                    ("opus", "opus", false),
+                    ("sonnet", "sonnet", false),
+                    ("haiku", "haiku", false)
+                ]
+            )]
+        );
+
+        let text = "agent = \"opencode\"\nmodels.opencode = \"ollama/gemma4:e4b\"";
+        let view = settings_view(&config(text), &detected(), Path::new(HOME));
+        assert_eq!(
+            models(&view),
+            [
+                owned(
+                    "opencode",
+                    false,
+                    &[("opencode/big-pickle", "big-pickle", false)]
+                ),
+                owned(
+                    "ollama",
+                    true,
+                    &[
+                        ("ollama/gemma4:e4b", "gemma4:e4b", true),
+                        ("ollama/qwen3", "qwen3", false)
+                    ]
+                ),
+            ]
+        );
+        assert_eq!(
+            summaries(&view)[0],
+            ("Agent", "opencode · ollama/gemma4:e4b", false)
+        );
+    }
+
+    #[test]
+    fn a_typed_model_shows_even_when_the_agent_lists_none() {
+        let view = settings_view(&config("agent = \"gemini\""), &detected(), Path::new(HOME));
+        let model = view.model.as_ref().unwrap();
+        assert!(!model.listed);
+        assert!(model.providers.is_empty());
+
+        let text = "agent = \"gemini\"\nmodels.gemini = \"gemini-3.1-pro\"";
+        let view = settings_view(&config(text), &detected(), Path::new(HOME));
+        assert!(!view.model.as_ref().unwrap().listed);
+        assert_eq!(
+            models(&view),
+            [owned(
+                "Google",
+                true,
+                &[("gemini-3.1-pro", "gemini-3.1-pro", true)]
+            )]
+        );
+
+        let text = "agent = \"claude\"\nmodels.claude = \"claude-opus-4-1\"";
+        let view = settings_view(&config(text), &detected(), Path::new(HOME));
+        let options = &models(&view)[0].2;
+        assert_eq!(
+            options[0],
+            (
+                "claude-opus-4-1".to_owned(),
+                "claude-opus-4-1".to_owned(),
+                true
+            )
+        );
+        assert_eq!(options.len(), 4);
+
+        let text = "agent = \"opencode\"\nmodels.opencode = \"local\"";
+        let view = settings_view(&config(text), &detected(), Path::new(HOME));
+        assert_eq!(models(&view)[0].0, "", "a name without a provider has none");
+        assert!(models(&view)[0].1);
     }
 
     fn summaries(view: &SettingsView) -> Vec<(&str, &str, bool)> {

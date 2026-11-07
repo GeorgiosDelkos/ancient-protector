@@ -27,6 +27,7 @@ use std::process::Stdio;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::config::ModelName;
 use crate::inventory::InventoryError;
 use crate::inventory::command;
 
@@ -69,7 +70,7 @@ const BINARY_MARK: &str = "__ancient_protector_binary__";
 const END_MARK: &str = "__ancient_protector_end__";
 
 /// A coding-agent CLI that Ancient Protector can drive headless.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     /// Claude Code (`claude`).
@@ -104,6 +105,18 @@ impl AgentKind {
             Self::Codex => "Codex",
             Self::Gemini => "Gemini CLI",
             Self::Opencode => "opencode",
+        }
+    }
+
+    /// Who serves the agent's models, or `None` for opencode, whose model names start with
+    /// their provider.
+    pub(crate) fn provider(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("Anthropic"),
+            Self::Grok => Some("xAI"),
+            Self::Codex => Some("OpenAI"),
+            Self::Gemini => Some("Google"),
+            Self::Opencode => None,
         }
     }
 
@@ -142,6 +155,7 @@ impl AgentKind {
         // `brew info *` cannot load a formula from a cloned repository; developer mode is
         // believed to lift that refusal, so it is never passed on.
         command.env_remove("HOMEBREW_DEVELOPER");
+        self.start_args(&mut command, located);
         let bundle = bundle.as_os_str();
         match self {
             Self::Claude => {
@@ -163,12 +177,7 @@ impl AgentKind {
                 command.args(["--deny", "Bash", "--cwd"]).arg(bundle);
             }
             Self::Codex => {
-                command.args([
-                    "exec",
-                    "--sandbox",
-                    "workspace-write",
-                    "--skip-git-repo-check",
-                ]);
+                command.args(["--sandbox", "workspace-write", "--skip-git-repo-check"]);
                 command.arg("-C").arg(bundle).arg(prompt);
             }
             Self::Gemini => {
@@ -176,7 +185,7 @@ impl AgentKind {
             }
             Self::Opencode => {
                 command.env("OPENCODE_CONFIG_CONTENT", opencode_sweep_config());
-                command.args(["run", "--dir"]).arg(bundle).arg(prompt);
+                command.arg("--dir").arg(bundle).arg(prompt);
             }
         }
         command
@@ -188,6 +197,7 @@ impl AgentKind {
     fn fix_command(self, located: &Located, dir: &Path, prompt: &str) -> Command {
         let mut command = Command::new(&located.binary);
         command.current_dir(dir).env("PATH", &located.path);
+        self.start_args(&mut command, located);
         match self {
             Self::Claude => {
                 command.args(["-p", prompt, "--permission-mode", "bypassPermissions"]);
@@ -204,7 +214,6 @@ impl AgentKind {
             }
             Self::Codex => {
                 command.args([
-                    "exec",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "--skip-git-repo-check",
                 ]);
@@ -214,11 +223,26 @@ impl AgentKind {
                 command.args(["-p", prompt, "--approval-mode", "yolo", "--skip-trust"]);
             }
             Self::Opencode => {
-                command.args(["run", "--dangerously-skip-permissions", "--dir"]);
+                command.args(["--dangerously-skip-permissions", "--dir"]);
                 command.arg(dir).arg(prompt);
             }
         }
         command
+    }
+
+    /// Starts the arguments of a headless run: the subcommand codex and opencode need, then
+    /// the chosen model. Every CLI takes `--model` (checked on 2026-11-07 in each `--help`, and
+    /// for codex in its CLI reference); it comes before the prompt, which codex and opencode
+    /// take as their last argument.
+    fn start_args(self, command: &mut Command, located: &Located) {
+        match self {
+            Self::Codex => drop(command.arg("exec")),
+            Self::Opencode => drop(command.arg("run")),
+            Self::Claude | Self::Grok | Self::Gemini => {}
+        }
+        if let Some(model) = &located.model {
+            command.arg("--model").arg(model.as_str());
+        }
     }
 
     /// Runs a restricted sweep in `bundle` with `prompt`, writing the agent's stdout and stderr
@@ -288,6 +312,18 @@ pub(crate) struct Located {
     /// The login shell's `PATH`, so the agent (an npm script, say) and the tools it calls
     /// start as they do in the user's terminal.
     path: OsString,
+    /// The model it runs with, or `None` for its own default.
+    model: Option<ModelName>,
+}
+
+impl Located {
+    /// The agent, run with `model` when there is one.
+    pub(crate) fn with_model(self, model: Option<&ModelName>) -> Self {
+        Self {
+            model: model.cloned(),
+            ..self
+        }
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +333,7 @@ impl Located {
         Self {
             binary: binary.to_owned(),
             path: OsString::from("/usr/bin:/bin"),
+            model: None,
         }
     }
 }
@@ -316,6 +353,7 @@ fn parse_located(stdout: &str) -> Option<Located> {
     (binary.is_absolute() && executable).then(|| Located {
         binary,
         path: OsString::from(lines[path_at + 1]),
+        model: None,
     })
 }
 
@@ -380,7 +418,42 @@ mod tests {
         Located {
             binary: binary.to_owned(),
             path: OsString::from("/usr/bin:/bin"),
+            model: None,
         }
+    }
+
+    #[test]
+    fn a_chosen_model_comes_before_the_prompt_in_sweeps_and_fixes() {
+        let model: ModelName = "ollama/gemma4:e4b".parse().unwrap();
+        let at = located(Path::new("/bin/x")).with_model(Some(&model));
+        let words = |command: Command| -> Vec<String> {
+            command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        for kind in ALL {
+            let sweep = words(kind.sweep_command(&at, Path::new("/b"), "P"));
+            let fix = words(kind.fix_command(&at, Path::new("/f"), "P"));
+            let start: &[&str] = match kind {
+                AgentKind::Codex => &["exec", "--model", "ollama/gemma4:e4b"],
+                AgentKind::Opencode => &["run", "--model", "ollama/gemma4:e4b"],
+                AgentKind::Claude | AgentKind::Grok | AgentKind::Gemini => {
+                    &["--model", "ollama/gemma4:e4b"]
+                }
+            };
+            assert!(
+                sweep.iter().take(start.len()).eq(start.iter()),
+                "{kind}: {sweep:?}"
+            );
+            assert!(
+                fix.iter().take(start.len()).eq(start.iter()),
+                "{kind}: {fix:?}"
+            );
+        }
+        let default = located(Path::new("/bin/x")).with_model(None);
+        let args = words(AgentKind::Claude.sweep_command(&default, Path::new("/b"), "P"));
+        assert!(!args.iter().any(|a| a == "--model"), "{args:?}");
     }
 
     /// The config name, the binary and the display name are the same word, so a user who

@@ -32,6 +32,7 @@ export function settingsView(changes: Partial<SettingsView> = {}): SettingsView 
       { agent: "claude", name: "Claude Code", path: "/bin/claude", available: true, chosen: false },
       { agent: "codex", name: "Codex", path: null, available: false, chosen: false },
     ],
+    model: null,
     schedule: { automatic: false, hours: 6, all_history: true, since: "2025-01-01" },
     folders: [
       { value: "~/code", chosen: true },

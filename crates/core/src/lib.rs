@@ -33,6 +33,8 @@ pub use crate::config::Config;
 pub use crate::config::ConfigProblem;
 pub use crate::config::History;
 pub use crate::config::LoadConfigError;
+pub use crate::config::ModelName;
+pub use crate::config::ParseModelNameError;
 pub use crate::config::ParseRepoSlugError;
 pub use crate::config::RemoteDir;
 pub use crate::config::RepoSlug;

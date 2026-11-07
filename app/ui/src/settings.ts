@@ -25,6 +25,20 @@ export type SettingsView = {
     readonly available: boolean;
     readonly chosen: boolean;
   }[];
+  readonly model: {
+    readonly agent: string;
+    readonly chosen: string | null;
+    readonly providers: readonly {
+      readonly name: string;
+      readonly chosen: boolean;
+      readonly models: readonly {
+        readonly value: string;
+        readonly label: string;
+        readonly chosen: boolean;
+      }[];
+    }[];
+    readonly listed: boolean;
+  } | null;
   readonly schedule: {
     readonly automatic: boolean;
     readonly hours: number;
@@ -61,4 +75,5 @@ export type Setting =
   | { readonly kind: "add_repo"; readonly repo: string }
   | { readonly kind: "remove_repo"; readonly repo: string }
   | { readonly kind: "add_server"; readonly ssh: string }
-  | { readonly kind: "remove_server"; readonly name: string };
+  | { readonly kind: "remove_server"; readonly name: string }
+  | { readonly kind: "model"; readonly agent: string; readonly model: string | null };

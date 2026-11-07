@@ -1,6 +1,7 @@
 //! What this Mac already has, for the settings to start from: the agents and tools on
-//! the login shell's `PATH`, the `gh` login and its repositories, the hosts in
-//! `~/.ssh/config`, the usual project folders, and whether an NVD key is in the Keychain.
+//! the login shell's `PATH`, the models the agents list, the `gh` login and its repositories,
+//! the hosts in `~/.ssh/config`, the usual project folders, and whether an NVD key is in the
+//! Keychain.
 //!
 //! Nothing here changes anything; every part that cannot be read comes back empty, since a
 //! settings view that fails to open over one missing tool helps no one.
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::agent::AgentKind;
+use crate::config::ModelName;
 use crate::inventory::command;
 
 /// The agents a sweep can run, in the order the settings list them.
@@ -66,6 +68,9 @@ const END_MARK: &str = "__ancient_protector_end__";
 pub struct Detected {
     /// Each agent, and where the login shell finds it.
     pub agents: Vec<(AgentKind, Option<PathBuf>)>,
+    /// The models each found agent lists, for the agents whose CLI lists them (Grok and
+    /// opencode); opencode's are `provider/model`.
+    pub models: Vec<(AgentKind, Vec<String>)>,
     /// Each tool, and where the login shell finds it.
     pub tools: Vec<Tool>,
     /// The `gh` login, or `None` when gh is missing or not logged in.
@@ -128,7 +133,12 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
         command::use_search_path(answer.path.clone());
     }
     let found = |program: &str| answer.as_ref().and_then(|a| a.binary(program));
-    let agents = AGENTS.iter().map(|&a| (a, found(a.binary()))).collect();
+    let agents: Vec<(AgentKind, Option<PathBuf>)> =
+        AGENTS.iter().map(|&a| (a, found(a.binary()))).collect();
+    let models = agents
+        .iter()
+        .filter_map(|(agent, path)| Some((*agent, listed_models(*agent, path.as_deref()?)?)))
+        .collect();
     let tools: Vec<Tool> = TOOLS
         .iter()
         .map(|&(program, name)| Tool {
@@ -151,6 +161,7 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
     let folders = project_folders(home);
     Detected {
         agents,
+        models,
         tools,
         gh_login,
         repos,
@@ -158,6 +169,43 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
         folders,
         nvd_key: nvd_key(),
     }
+}
+
+/// The models `agent` at `binary` lists, or `None` when its CLI has no list (Claude Code takes
+/// aliases, Gemini CLI none, and codex's `debug models` is experimental) or the list fails.
+fn listed_models(agent: AgentKind, binary: &Path) -> Option<Vec<String>> {
+    let binary = binary.to_str()?;
+    match agent {
+        AgentKind::Grok => command::run(binary, &["models"])
+            .ok()?
+            .map(|out| grok_models(&out)),
+        AgentKind::Opencode => command::run(binary, &["models"])
+            .ok()?
+            .map(|out| opencode_models(&out)),
+        AgentKind::Claude | AgentKind::Codex | AgentKind::Gemini => None,
+    }
+}
+
+/// Reads `grok models`, which lists one model per line after "Available models:", marked `*`
+/// for the default and `-` for the rest (checked with grok on 2026-11-07).
+fn grok_models(out: &str) -> Vec<String> {
+    out.lines()
+        .skip_while(|l| !l.trim_start().starts_with("Available models"))
+        .filter_map(|l| {
+            let rest = l.trim().strip_prefix(['*', '-'])?;
+            let name = rest.split_whitespace().next()?;
+            name.parse::<ModelName>().is_ok().then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Reads `opencode models`, which prints one `provider/model` per line.
+fn opencode_models(out: &str) -> Vec<String> {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| l.contains('/') && l.parse::<ModelName>().is_ok())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The usual project folders that exist, each once. The default macOS file system ignores
@@ -318,6 +366,19 @@ fn without_comment(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_and_opencode_model_lists_are_read_line_by_line() {
+        let grok = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\n\
+                    Available models:\n  * grok-4.7 (default)\n  - grok-4.6\n  - $(id)\n";
+        assert_eq!(grok_models(grok), ["grok-4.7", "grok-4.6"]);
+        assert_eq!(grok_models("- before the list\n"), Vec::<String>::new());
+        let opencode = "opencode/big-pickle\nollama/gemma4:e4b\n\nWarning: x\n-a/b\n";
+        assert_eq!(
+            opencode_models(opencode),
+            ["opencode/big-pickle", "ollama/gemma4:e4b"]
+        );
+    }
 
     #[test]
     fn the_login_shell_answer_is_read_between_its_marks() {

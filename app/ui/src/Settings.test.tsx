@@ -423,6 +423,83 @@ describe("the schedule", () => {
   });
 });
 
+describe("the model", () => {
+  const opencode = settingsView({
+    model: {
+      agent: "opencode",
+      chosen: "ollama/gemma4:e4b",
+      listed: true,
+      providers: [
+        {
+          name: "opencode",
+          chosen: false,
+          models: [{ value: "opencode/big-pickle", label: "big-pickle", chosen: false }],
+        },
+        {
+          name: "ollama",
+          chosen: true,
+          models: [{ value: "ollama/gemma4:e4b", label: "gemma4:e4b", chosen: true }],
+        },
+      ],
+    },
+  });
+
+  it("is offered only once an agent is chosen", async () => {
+    answer({ settings_data: () => settingsView() });
+    open("agent");
+    await screen.findByText("Claude Code");
+    expect(screen.queryByText("Model")).toBeNull();
+  });
+
+  it("shows the chosen provider's models, and another provider's on a tap", async () => {
+    answer({ settings_data: () => opencode, save: () => opencode });
+    open("agent");
+    expect((await row("gemma4:e4b")).ariaPressed).toBe("true");
+    expect(within(await row("gemma4:e4b")).getByText("ollama/gemma4:e4b")).toBeTruthy();
+    expect((await row("Default")).ariaPressed).toBe("false");
+    expect(screen.queryByText("big-pickle")).toBeNull();
+    expect(screen.getByRole("tab", { name: "ollama" }).ariaSelected).toBe("true");
+    fireEvent.click(screen.getByRole("tab", { name: "opencode" }));
+    expect(screen.getByRole("tab", { name: "opencode" }).className).toBe("chip on");
+    fireEvent.click(await screen.findByText("big-pickle"));
+    await screen.findByText("Saved");
+    expect(invoke).toHaveBeenCalledWith("save", {
+      setting: { kind: "model", agent: "opencode", model: "opencode/big-pickle" },
+    });
+    fireEvent.click(screen.getByText("Default"));
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("save", {
+        setting: { kind: "model", agent: "opencode", model: null },
+      }),
+    );
+  });
+
+  it("takes a typed model, and asks for one when the agent lists none", async () => {
+    const gemini = settingsView({
+      model: { agent: "gemini", chosen: null, listed: false, providers: [] },
+    });
+    answer({ settings_data: () => gemini, save: () => gemini });
+    open("agent");
+    const input = (await screen.findByPlaceholderText(
+      "Model name, as --model takes it",
+    )) as HTMLInputElement;
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect((await row("Default")).ariaPressed).toBe("true");
+    expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.input(input, { target: { value: "gemini-3.1-pro" } });
+    fireEvent.submit(input.form as HTMLFormElement);
+    await screen.findByText("Saved");
+    expect(invoke).toHaveBeenCalledWith("save", {
+      setting: { kind: "model", agent: "gemini", model: "gemini-3.1-pro" },
+    });
+    expect(input.value).toBe("");
+    cleanup();
+    answer({ settings_data: () => opencode });
+    open("agent");
+    expect(await screen.findByPlaceholderText("Another model")).toBeTruthy();
+  });
+});
+
 describe("errors", () => {
   it("clear on the next change, and Saved shows only after one succeeds", async () => {
     answer({ settings_data: () => settingsView() });

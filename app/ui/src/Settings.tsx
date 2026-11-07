@@ -307,7 +307,97 @@ function Agent(props: Props) {
         </For>
       </div>
       <p class="note">Found through your login shell, the same way a sweep starts the agent.</p>
+      <Show when={props.view.model}>{(model) => <Model model={model()} save={props.save} />}</Show>
     </div>
+  );
+}
+
+type ModelView = NonNullable<SettingsView["model"]>;
+
+/** The chosen agent's model: its default, one it lists under a provider, or a typed name. */
+function Model(props: { model: ModelView; save: (setting: Setting) => void }) {
+  // Which provider's models are shown; until the user picks one, the provider Rust marked.
+  const [picked, setPicked] = createSignal<string | null>(null);
+  const [typed, setTyped] = createSignal("");
+  const shown = () =>
+    props.model.providers.find((p) => p.name === picked()) ??
+    props.model.providers.find((p) => p.chosen);
+  const choose = (model: string | null) =>
+    props.save({ kind: "model", agent: props.model.agent, model });
+  return (
+    <div class="block model">
+      <h2 class="label">Model</h2>
+      <Show when={props.model.providers.length > 1}>
+        <div class="chips" role="tablist" aria-label="Provider">
+          <For each={props.model.providers}>
+            {(p) => (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={p === shown()}
+                class={`chip ${p === shown() ? "on" : ""}`}
+                onClick={() => setPicked(p.name)}
+              >
+                {p.name === "" ? "Other" : p.name}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+      <div class="group list scroll">
+        <ModelRow
+          label="Default"
+          sub="the agent's own choice"
+          on={props.model.chosen === null}
+          pick={() => choose(null)}
+        />
+        <For each={shown()?.models ?? []}>
+          {(m) => (
+            <ModelRow
+              label={m.label}
+              {...(m.label === m.value ? {} : { sub: m.value })}
+              on={m.chosen}
+              pick={() => choose(m.value)}
+            />
+          )}
+        </For>
+      </div>
+      <form
+        class="inline-add"
+        onSubmit={(e) => {
+          e.preventDefault();
+          choose(typed());
+          setTyped("");
+        }}
+      >
+        <input
+          id="model"
+          class="field grow mono"
+          placeholder={props.model.listed ? "Another model" : "Model name, as --model takes it"}
+          aria-label="Model name"
+          autocomplete="off"
+          value={typed()}
+          onInput={(e) => setTyped(e.currentTarget.value)}
+        />
+        <button type="submit" class="btn" disabled={typed().trim() === ""}>
+          Use
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function ModelRow(props: { label: string; sub?: string; on: boolean; pick: () => void }) {
+  return (
+    <button type="button" class="srow choice" aria-pressed={props.on} onClick={() => props.pick()}>
+      <span class={`radio ${props.on ? "on" : ""}`} />
+      <span class="what">
+        <span class="t">{props.label}</span>
+        <Show when={props.sub}>
+          <span class="s">{props.sub}</span>
+        </Show>
+      </span>
+    </button>
   );
 }
 

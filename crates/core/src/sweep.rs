@@ -296,7 +296,10 @@ pub fn sweep(
         Targets::Only(only) => only == target,
     };
     let agent = config.agent.ok_or(SweepError::NoAgent)?;
-    let located = agent.locate()?.ok_or(SweepError::AgentNotFound { agent })?;
+    let located = agent
+        .locate()?
+        .ok_or(SweepError::AgentNotFound { agent })?
+        .with_model(config.models.get(&agent));
     let sweeps = data_dir.sweeps_dir();
     let _lock = Lock::acquire(&sweeps)?;
     let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
