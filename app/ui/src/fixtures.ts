@@ -106,7 +106,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     dismissed: 0,
     agent: "Claude Code",
     schedule: "manual",
-    config: "/Users/me/Library/Application Support/ancient-protector/config.toml",
+    config: "/Users/me/Library/Application Support/io.github.georgiosdelkos.vigil/config.toml",
     problem: null,
     ...changes,
   };

@@ -34,6 +34,7 @@ use crate::feeds::Source;
 use crate::feeds::cache_key;
 use crate::feeds::http::decode;
 use crate::feeds::in_window;
+use crate::paths::BUNDLE_ID;
 
 /// NVD's maximum `lastModStartDate`..`lastModEndDate` range, in days.
 const WINDOW_DAYS: i64 = 120;
@@ -45,8 +46,8 @@ const MAX_DELTA: SignedDuration = SignedDuration::from_hours(24 * WINDOW_DAYS);
 const PAGE: usize = 500;
 
 /// The Keychain item holding an NVD API key, set with
-/// `security add-generic-password -s ancient-protector -a nvd-api-key -w <key>`.
-const KEYCHAIN_SERVICE: &str = "ancient-protector";
+/// `security add-generic-password -s io.github.georgiosdelkos.vigil -a nvd-api-key -w <key>`.
+const KEYCHAIN_SERVICE: &str = BUNDLE_ID;
 const KEYCHAIN_ACCOUNT: &str = "nvd-api-key";
 
 /// `security` exits with 44 (`errSecItemNotFound`) when the item does not exist.

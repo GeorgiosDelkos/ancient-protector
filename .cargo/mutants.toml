@@ -2,7 +2,7 @@
 # CLI's end-to-end tests are what exercise the core's command-running collectors. Not the
 # whole workspace: the menu-bar app's release build needs its web UI built first (app.yml
 # checks it), and it holds only glue, with its decisions in the core.
-test_package = ["ancient-protector-core", "ancient-protector"]
+test_package = ["vigil-core", "vigil"]
 exclude_globs = ["app/**"]
 # These two run /usr/bin/security against the user's login Keychain, which no test may touch,
 # so a mutant there cannot be caught. Their decisions are in `saved` and `keychain_script`,

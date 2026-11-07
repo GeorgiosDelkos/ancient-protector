@@ -10,7 +10,7 @@ fn reports_every_failed_source() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("config.toml"), "").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+    let out = Command::new(env!("CARGO_BIN_EXE_vigil"))
         .arg("--data-dir")
         .arg(tmp.path())
         .args(["advisories", "--package", "npm:lodash", "--product", "zlib"])

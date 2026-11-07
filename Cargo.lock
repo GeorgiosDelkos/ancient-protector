@@ -33,48 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ancient-protector"
-version = "0.1.0"
-dependencies = [
- "ancient-protector-core",
- "anyhow",
- "clap",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "ancient-protector-app"
-version = "0.1.0"
-dependencies = [
- "ancient-protector-core",
- "jiff",
- "serde",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-positioner",
-]
-
-[[package]]
-name = "ancient-protector-core"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "jiff",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "toml 1.2.0+spec-1.1.0",
- "toml_edit 0.25.18+spec-1.1.0",
- "ureq",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4740,6 +4698,48 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vigil"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tempfile",
+ "vigil-core",
+]
+
+[[package]]
+name = "vigil-app"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-positioner",
+ "vigil-core",
+]
+
+[[package]]
+name = "vigil-core"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "jiff",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.2.0+spec-1.1.0",
+ "toml_edit 0.25.18+spec-1.1.0",
+ "ureq",
+]
 
 [[package]]
 name = "vswhom"

@@ -518,7 +518,7 @@ describe("the footer", () => {
     fireEvent.click(gear);
     expect(screen.queryByRole("menu")).toBeNull();
     fireEvent.click(gear);
-    fireEvent.click(screen.getByText("Quit Ancient Protector"));
+    fireEvent.click(screen.getByText("Quit Vigil"));
     expect(invoke).toHaveBeenCalledWith("quit");
     fireEvent.click(screen.getByText("Settings…"));
     expect(await screen.findByText("Done")).toBeTruthy();

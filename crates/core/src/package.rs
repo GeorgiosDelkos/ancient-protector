@@ -148,7 +148,7 @@ pub enum ParsePackageError {
     /// There is no `:` between ecosystem and name.
     #[error("expected ecosystem:name, such as npm:lodash")]
     NoColon,
-    /// The ecosystem is not one Ancient Protector knows.
+    /// The ecosystem is not one Vigil knows.
     #[error("unknown ecosystem; use crates.io, npm, PyPI, Go, RubyGems or GitHub Actions")]
     Ecosystem,
     /// The name is empty or has control characters.

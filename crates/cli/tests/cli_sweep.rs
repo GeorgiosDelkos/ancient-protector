@@ -104,10 +104,10 @@ impl Sandbox {
             "login-shell",
             &format!(
                 "#!/bin/sh\n# Called as: login-shell -lc '<script that runs command -v <agent>>'\n\
-                 printf '%s\\n' __ancient_protector_path__ /login/bin:/usr/bin \
-                 __ancient_protector_binary__\n\
+                 printf '%s\\n' __vigil_path__ /login/bin:/usr/bin \
+                 __vigil_binary__\n\
                  case \"$2\" in *'command -v claude;'*) echo {} ;; esac\n\
-                 echo __ancient_protector_end__\n",
+                 echo __vigil_end__\n",
                 claude.display()
             ),
         );
@@ -162,7 +162,7 @@ impl Sandbox {
 
     /// The CLI with the sandbox's home, tools and data directory, the fake agent in `mode`.
     fn command(&self, mode: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ancient-protector"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vigil"));
         command
             .arg("--data-dir")
             .arg(self.path().join("data"))
@@ -182,7 +182,7 @@ impl Sandbox {
 
     /// Runs the CLI with `args` against the sandbox's data directory.
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+        Command::new(env!("CARGO_BIN_EXE_vigil"))
             .arg("--data-dir")
             .arg(self.path().join("data"))
             .args(args)
@@ -618,10 +618,7 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
     let log = fs::read_to_string(dir.join("agent.log")).unwrap();
     assert!(log.contains("--permission-mode bypassPermissions"), "{log}");
     let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap();
-    assert!(
-        prompt.contains(&format!("ancient-protector/fix-{key}")),
-        "{prompt}"
-    );
+    assert!(prompt.contains(&format!("vigil/fix-{key}")), "{prompt}");
     assert!(
         !prompt.contains("{{"),
         "every placeholder is filled: {prompt}"
@@ -699,14 +696,13 @@ fn only_a_current_undismissed_finding_is_fixed_and_a_silent_agent_fails() {
 
     // A report edited to carry the heredoc's end word is refused before anything runs.
     let report = sandbox.newest_report_path("github-o--r");
-    let edited = fs::read_to_string(&report).unwrap().replace(
-        r#""commands": []"#,
-        r#""commands": ["ANCIENT_PROTECTOR_END"]"#,
-    );
+    let edited = fs::read_to_string(&report)
+        .unwrap()
+        .replace(r#""commands": []"#, r#""commands": ["VIGIL_END"]"#);
     fs::write(&report, &edited).unwrap();
     let malformed = sandbox.fix(&[&key, "--yes"], "");
     assert!(
-        text(&malformed.stderr).contains("ANCIENT_PROTECTOR_END is reserved"),
+        text(&malformed.stderr).contains("VIGIL_END is reserved"),
         "{}",
         text(&malformed.stderr)
     );

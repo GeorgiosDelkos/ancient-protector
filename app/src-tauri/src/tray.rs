@@ -1,5 +1,6 @@
-//! The menu-bar icon: its colour shows the worst open finding, a running sweep, or a failure,
-//! and a left click shows or hides the popover under it.
+//! The menu-bar icon, Vigil's mark: a spiral arm of dots. Its colour shows the worst open
+//! finding or a running sweep, an unfinished spiral shows a failure, and a left click shows or
+//! hides the popover under it.
 
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -9,9 +10,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
-use ancient_protector_core::Config;
-use ancient_protector_core::Severity;
-use ancient_protector_core::latest;
 use tauri::AppHandle;
 use tauri::Emitter as _;
 use tauri::Manager as _;
@@ -23,6 +21,9 @@ use tauri::tray::TrayIconBuilder;
 use tauri::tray::TrayIconEvent;
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt as _;
+use vigil_core::Config;
+use vigil_core::Severity;
+use vigil_core::latest;
 
 use crate::runner::Runner;
 use crate::runner::Status;
@@ -133,12 +134,23 @@ impl Look {
 
     fn tooltip(self) -> &'static str {
         match self {
-            Self::Clean => "Ancient Protector: nothing open",
-            Self::Low => "Ancient Protector: low findings open",
-            Self::Medium => "Ancient Protector: medium findings open",
-            Self::High => "Ancient Protector: critical or high findings open",
-            Self::Sweeping => "Ancient Protector: sweeping",
-            Self::Failed => "Ancient Protector: the last sweep failed",
+            Self::Clean => "Vigil: nothing open",
+            Self::Low => "Vigil: low findings open",
+            Self::Medium => "Vigil: medium findings open",
+            Self::High => "Vigil: critical or high findings open",
+            Self::Sweeping => "Vigil: sweeping",
+            Self::Failed => "Vigil: the last sweep failed",
+        }
+    }
+
+    /// Whether macOS draws the icon in the menu bar's own colour, as it does the system's.
+    /// Only the looks without a colour are: nothing open, and a failure, which its unfinished
+    /// spiral tells apart. The others keep their colour, which reads on a light and a dark bar
+    /// alike.
+    fn template(self) -> bool {
+        match self {
+            Self::Clean | Self::Failed => true,
+            Self::Low | Self::Medium | Self::High | Self::Sweeping => false,
         }
     }
 
@@ -151,6 +163,7 @@ pub(crate) fn create(app: &AppHandle) -> tauri::Result<()> {
     let look = look(app);
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(look.image())
+        .icon_as_template(look.template())
         .tooltip(look.tooltip())
         .on_tray_icon_event(|tray, event| {
             let app = tray.app_handle();
@@ -175,7 +188,9 @@ pub(crate) fn refresh(app: &AppHandle) {
     };
     let look = look(app);
     // Best effort: a stale icon is corrected by the next change.
-    drop(tray.set_icon(Some(look.image())));
+    // One call for both, as tauri's `TrayIcon::set_icon_with_as_template` docs advise:
+    // `set_icon` then `set_icon_as_template` redraws twice, flashing the untinted pixels.
+    drop(tray.set_icon_with_as_template(Some(look.image()), look.template()));
     drop(tray.set_tooltip(Some(look.tooltip())));
 }
 

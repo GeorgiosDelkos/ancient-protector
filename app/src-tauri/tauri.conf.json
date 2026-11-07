@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Ancient Protector",
+  "productName": "Vigil",
   "version": "0.1.0",
-  "identifier": "io.github.georgiosdelkos.ancient-protector",
+  "identifier": "io.github.georgiosdelkos.vigil",
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
@@ -20,7 +20,7 @@
     "windows": [
       {
         "label": "popover",
-        "title": "Ancient Protector",
+        "title": "Vigil",
         "url": "index.html",
         "width": 360,
         "height": 620,

@@ -38,7 +38,7 @@ impl Http {
         // endpoint redirects today; a 3xx becomes a `Status` error naming the URL to update.
         // Statuses are checked in `read`, so the error can carry the body's explanation.
         let config = ureq::Agent::config_builder()
-            .user_agent(concat!("ancient-protector/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("vigil/", env!("CARGO_PKG_VERSION")))
             .timeout_global(Some(TIMEOUT))
             .tls_config(tls)
             .max_redirects(0)
@@ -165,12 +165,7 @@ mod tests {
         assert_eq!(request.method, "GET");
         assert_eq!(request.target, "/x?a=1&b=c%3Ad");
         assert_eq!(request.header("apikey"), Some("secret"));
-        assert!(
-            request
-                .header("user-agent")
-                .unwrap()
-                .starts_with("ancient-protector/")
-        );
+        assert!(request.header("user-agent").unwrap().starts_with("vigil/"));
     }
 
     #[test]

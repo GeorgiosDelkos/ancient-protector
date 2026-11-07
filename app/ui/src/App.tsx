@@ -119,7 +119,7 @@ export function App() {
             <Match when={o().agent === null}>
               <Problem
                 title="Choose an agent to start"
-                text="Ancient Protector has a coding agent judge which advisories affect you. Pick one of those installed on this Mac."
+                text="Vigil has a coding agent judge which advisories affect you. Pick one of those installed on this Mac."
                 action="Choose an agent"
                 onAction={() => setSettings("agent")}
               />
@@ -656,7 +656,7 @@ function Footer(props: {
             </label>
             <hr />
             <button type="button" role="menuitem" onClick={() => void invoke("quit")}>
-              Quit Ancient Protector
+              Quit Vigil
             </button>
           </div>
         </Show>

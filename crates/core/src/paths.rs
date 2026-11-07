@@ -1,4 +1,4 @@
-//! Where Ancient Protector keeps its files.
+//! Where Vigil keeps its files.
 
 use std::fs;
 use std::io;
@@ -7,6 +7,10 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::config::DEFAULT_CONFIG;
+
+/// The app's bundle id, as `identifier` in `app/src-tauri/tauri.conf.json`. It names the data
+/// folder and the Keychain service, as `vigil` alone is generic enough for another app to use.
+pub(crate) const BUNDLE_ID: &str = "io.github.georgiosdelkos.vigil";
 
 /// The data directory: config, feed cache, state and sweep reports.
 ///
@@ -23,9 +27,9 @@ impl DataDir {
     }
 
     /// Returns the standard macOS location for the user whose home is `home`:
-    /// `~/Library/Application Support/ancient-protector`.
+    /// `~/Library/Application Support/io.github.georgiosdelkos.vigil`.
     pub fn for_home(home: &Path) -> Self {
-        Self::new(home.join("Library/Application Support/ancient-protector"))
+        Self::new(home.join("Library/Application Support").join(BUNDLE_ID))
     }
 
     /// Returns the path of `config.toml`.
@@ -173,11 +177,13 @@ mod tests {
         let dir = DataDir::for_home(Path::new("/Users/me"));
         assert_eq!(
             dir.config_file(),
-            Path::new("/Users/me/Library/Application Support/ancient-protector/config.toml")
+            Path::new(
+                "/Users/me/Library/Application Support/io.github.georgiosdelkos.vigil/config.toml"
+            )
         );
         assert_eq!(
             dir.feeds_dir(),
-            Path::new("/Users/me/Library/Application Support/ancient-protector/feeds")
+            Path::new("/Users/me/Library/Application Support/io.github.georgiosdelkos.vigil/feeds")
         );
     }
 }

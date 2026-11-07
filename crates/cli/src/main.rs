@@ -1,42 +1,42 @@
-//! Command-line interface to Ancient Protector.
+//! Command-line interface to Vigil.
 
 use std::path::Path;
 use std::path::PathBuf;
 
-use ancient_protector_core::Config;
-use ancient_protector_core::Confirmed;
-use ancient_protector_core::DataDir;
-use ancient_protector_core::Feeds;
-use ancient_protector_core::FindingKey;
-use ancient_protector_core::History;
-use ancient_protector_core::Inventory;
-use ancient_protector_core::Latest;
-use ancient_protector_core::LoadConfigError;
-use ancient_protector_core::NvdAccess;
-use ancient_protector_core::OsvQuery;
-use ancient_protector_core::Outcome;
-use ancient_protector_core::Package;
-use ancient_protector_core::Product;
-use ancient_protector_core::Progress;
-use ancient_protector_core::SshConn;
-use ancient_protector_core::Targets;
-use ancient_protector_core::dismiss;
-use ancient_protector_core::latest;
-use ancient_protector_core::plan_fix;
-use ancient_protector_core::report_markdown;
-use ancient_protector_core::run_fix;
-use ancient_protector_core::sweep;
-use ancient_protector_core::undismiss;
 use anyhow::Context as _;
 use clap::ArgGroup;
 use clap::Parser;
 use clap::Subcommand;
+use vigil_core::Config;
+use vigil_core::Confirmed;
+use vigil_core::DataDir;
+use vigil_core::Feeds;
+use vigil_core::FindingKey;
+use vigil_core::History;
+use vigil_core::Inventory;
+use vigil_core::Latest;
+use vigil_core::LoadConfigError;
+use vigil_core::NvdAccess;
+use vigil_core::OsvQuery;
+use vigil_core::Outcome;
+use vigil_core::Package;
+use vigil_core::Product;
+use vigil_core::Progress;
+use vigil_core::SshConn;
+use vigil_core::Targets;
+use vigil_core::dismiss;
+use vigil_core::latest;
+use vigil_core::plan_fix;
+use vigil_core::report_markdown;
+use vigil_core::run_fix;
+use vigil_core::sweep;
+use vigil_core::undismiss;
 
 /// Sweep this Mac, GitHub repos and servers for known vulnerabilities.
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Cli {
-    /// Data directory [default: ~/Library/Application Support/ancient-protector].
+    /// Data directory [default: ~/Library/Application Support/io.github.georgiosdelkos.vigil].
     #[arg(long, global = true, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 
@@ -53,8 +53,8 @@ enum Command {
     /// Fetch advisories for packages and NVD products, one JSON object per line.
     ///
     /// Uses `history.since` from config.toml. An NVD API key stored in the Keychain with
-    /// `security add-generic-password -s ancient-protector -a nvd-api-key -w <key>` raises
-    /// NVD's rate limit from 5 to 50 requests per 30 seconds.
+    /// `security add-generic-password -s io.github.georgiosdelkos.vigil -a nvd-api-key -w <key>`
+    /// raises NVD's rate limit from 5 to 50 requests per 30 seconds.
     #[command(group(
         ArgGroup::new("what")
             .required(true)
@@ -412,9 +412,7 @@ fn error_chain(error: &dyn std::error::Error) -> String {
 
 fn load_config(data_dir: &DataDir, home: &Path) -> anyhow::Result<Config> {
     Config::load(&data_dir.config_file(), home).map_err(|e| match e {
-        LoadConfigError::Missing { .. } => {
-            anyhow::Error::new(e).context("run `ancient-protector init` first")
-        }
+        LoadConfigError::Missing { .. } => anyhow::Error::new(e).context("run `vigil init` first"),
         e => e.into(),
     })
 }
@@ -526,10 +524,10 @@ mod tests {
 
         let path = PathBuf::from(std::ffi::OsString::from_vec(b"/p/\xff/Cargo.lock".to_vec()));
         let inventory = Inventory {
-            components: vec![ancient_protector_core::Component {
-                lookup: ancient_protector_core::Lookup::Package("npm:a".parse().unwrap()),
+            components: vec![vigil_core::Component {
+                lookup: vigil_core::Lookup::Package("npm:a".parse().unwrap()),
                 version: "1".into(),
-                found_in: ancient_protector_core::FoundIn::Lockfile { path },
+                found_in: vigil_core::FoundIn::Lockfile { path },
             }],
             ..Inventory::default()
         };
@@ -543,9 +541,9 @@ mod tests {
 
     #[test]
     fn advisories_needs_a_package_or_product() {
-        let err = Cli::try_parse_from(["ancient-protector", "advisories"]).unwrap_err();
+        let err = Cli::try_parse_from(["vigil", "advisories"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-        let cli = Cli::try_parse_from(["ancient-protector", "advisories", "--product", "zlib"]);
+        let cli = Cli::try_parse_from(["vigil", "advisories", "--product", "zlib"]);
         assert!(cli.is_ok());
     }
 }

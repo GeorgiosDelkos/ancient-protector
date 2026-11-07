@@ -48,8 +48,8 @@ jobs:
       - name: cargo clippy
         working-directory: .
         run: >-
-          cargo clippy --locked -p ancient-protector-app --features custom-protocol
+          cargo clippy --locked -p vigil-app --features custom-protocol
           --all-targets -- -D warnings
       - name: cargo test
         working-directory: .
-        run: cargo test --locked -p ancient-protector-app --features custom-protocol
+        run: cargo test --locked -p vigil-app --features custom-protocol

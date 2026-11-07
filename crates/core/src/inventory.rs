@@ -286,12 +286,9 @@ mod tests {
     #[test]
     fn missing_tools_are_listed_once() {
         let mut inventory = Inventory::default();
-        assert_eq!(inventory.run("ancient-protector-no-such-tool", &[]), None);
-        assert_eq!(
-            inventory.run("ancient-protector-no-such-tool", &["x"]),
-            None
-        );
-        assert_eq!(inventory.not_installed, ["ancient-protector-no-such-tool"]);
+        assert_eq!(inventory.run("vigil-no-such-tool", &[]), None);
+        assert_eq!(inventory.run("vigil-no-such-tool", &["x"]), None);
+        assert_eq!(inventory.not_installed, ["vigil-no-such-tool"]);
         assert_eq!(inventory.run("echo", &["hi"]).as_deref(), Some("hi\n"));
         assert_eq!(inventory.run("false", &[]), None);
         assert!(matches!(

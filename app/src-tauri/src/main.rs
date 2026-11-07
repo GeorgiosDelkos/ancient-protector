@@ -1,8 +1,8 @@
-//! Ancient Protector's menu-bar app: a tray icon that shows the worst open finding, a popover
+//! Vigil's menu-bar app: a tray icon that shows the worst open finding, a popover
 //! with each target's findings and a Sweep now button, sweeps on the configured schedule, and
 //! a notification for each sweep that finds something new and critical or high.
 //!
-//! All the work is in `ancient-protector-core`; this crate wires it to Tauri. The popover is
+//! All the work is in `vigil-core`; this crate wires it to Tauri. The popover is
 //! the one window: it shows what [`overview`] returns and asks again on every `changed` event.
 //! What it shows is worked out in Rust (the core's `PopoverView` and `SettingsView`); the UI
 //! only lays it out. Settings are saved into `config.toml`, keeping its comments, so the file
@@ -15,16 +15,6 @@ mod tray;
 use std::path::PathBuf;
 use std::process::Command;
 
-use ancient_protector_core::AgentKind;
-use ancient_protector_core::Config;
-use ancient_protector_core::DataDir;
-use ancient_protector_core::FindingKey;
-use ancient_protector_core::ParseFindingKeyError;
-use ancient_protector_core::PopoverView;
-use ancient_protector_core::latest;
-use ancient_protector_core::plan_fix;
-use ancient_protector_core::popover_view;
-use ancient_protector_core::target_label;
 use jiff::Timestamp;
 use serde::Serialize;
 use tauri::ActivationPolicy;
@@ -33,6 +23,16 @@ use tauri::Manager as _;
 use tauri::State;
 use tauri::WindowEvent;
 use tauri_plugin_autostart::MacosLauncher;
+use vigil_core::AgentKind;
+use vigil_core::Config;
+use vigil_core::DataDir;
+use vigil_core::FindingKey;
+use vigil_core::ParseFindingKeyError;
+use vigil_core::PopoverView;
+use vigil_core::latest;
+use vigil_core::plan_fix;
+use vigil_core::popover_view;
+use vigil_core::target_label;
 
 use crate::runner::Runner;
 use crate::runner::Status;
@@ -295,7 +295,7 @@ fn dismiss(app: AppHandle, key: String, reason: String) -> Result<(), String> {
         .parse()
         .map_err(|e: ParseFindingKeyError| e.to_string())?;
     let runner = app.state::<Runner>();
-    ancient_protector_core::dismiss(runner.data_dir(), key, &reason).map_err(|e| e.to_string())?;
+    vigil_core::dismiss(runner.data_dir(), key, &reason).map_err(|e| e.to_string())?;
     runner::changed(&app);
     Ok(())
 }

@@ -295,7 +295,7 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
                 .push((format!("server/{manager}-packages.txt"), text));
             collected.problems.push(format!(
                 "OS packages ({manager}) are listed for the agent but not looked up: \
-                 Ancient Protector looks up packages of Debian, Ubuntu and Alpine releases only"
+                 Vigil looks up packages of Debian, Ubuntu and Alpine releases only"
             ));
         }
         OsPackages::Unknown => collected.problems.push(

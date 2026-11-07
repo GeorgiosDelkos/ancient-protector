@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Ancient Protector findings",
+  "title": "Vigil findings",
   "description": "Advisories that affect an installed version (findings), and risky settings and files (issues). Ids must come from advisories.jsonl and inventory.jsonl; issue subjects from github/settings.json and the bundle's github/ files.",
   "type": "object",
   "additionalProperties": false,
