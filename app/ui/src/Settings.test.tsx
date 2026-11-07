@@ -513,6 +513,49 @@ describe("the model", () => {
     expect((await menu("agent")).value).toBe("codex");
   });
 
+  it("closes Custom on another pick, and shows Rust's model if that pick is refused", async () => {
+    answer({ settings_data: () => opencode, save: () => Promise.reject("refused") });
+    open("agent");
+    await pick("model", "-custom");
+    fireEvent.input(await screen.findByPlaceholderText("Another model"), {
+      target: { value: "draft" },
+    });
+    await pick("model", "-default");
+    await screen.findByText(/refused/);
+    expect(screen.queryByPlaceholderText("Another model")).toBeNull();
+    expect((await menu("model")).value).toBe("ollama/gemma4:e4b");
+    expect(invoke).not.toHaveBeenCalledWith("save", {
+      setting: { kind: "model", agent: "opencode", model: "draft" },
+    });
+  });
+
+  it("follows the model Rust's reply marks chosen", async () => {
+    const one = opencode.model as NonNullable<SettingsView["model"]>;
+    const picked = settingsView({
+      model: {
+        ...one,
+        providers: one.providers.map((p) => ({
+          ...p,
+          chosen: p.name === "opencode",
+          models: p.models.map((m) => ({ ...m, chosen: m.value === "opencode/big-pickle" })),
+        })),
+      },
+    });
+    answer({ settings_data: () => opencode, save: () => picked });
+    open("agent");
+    await pick("provider", "opencode");
+    await pick("model", "-default");
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("save", {
+        setting: { kind: "model", agent: "opencode", model: null },
+      }),
+    );
+    await pick("model", "opencode/big-pickle");
+    await screen.findByText("Saved");
+    expect((await menu("provider")).value).toBe("opencode");
+    expect((await menu("model")).value).toBe("opencode/big-pickle");
+  });
+
   it("is offered only once an agent is chosen", async () => {
     answer({ settings_data: () => settingsView() });
     open("agent");

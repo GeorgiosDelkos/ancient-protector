@@ -590,9 +590,16 @@ button.srow:active:not(:disabled) {
   justify-content: flex-end;
   min-width: 0;
 }
+.menu-pick {
+  flex: 1;
+}
 .menu-pick select {
   appearance: none;
-  max-width: 100%;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-align-last: right;
   border: 0;
   background: transparent;
   color: var(--l2);
@@ -617,6 +624,9 @@ button.srow:active:not(:disabled) {
   transform: translateY(-50%) rotate(-90deg);
   color: var(--l3);
   pointer-events: none;
+}
+.srow.found .s {
+  min-width: 0;
 }
 .srow.found {
   display: flex;

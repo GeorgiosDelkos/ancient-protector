@@ -1,6 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { JSX } from "solid-js";
-import { For, Match, Show, Switch, createResource, createSignal } from "solid-js";
+import {
+  For,
+  Match,
+  Show,
+  Switch,
+  children,
+  createEffect,
+  createResource,
+  createSignal,
+} from "solid-js";
 
 import { Icon } from "./icons.tsx";
 import type { IconName } from "./icons.tsx";
@@ -357,11 +366,22 @@ function Menu(props: {
   onPick: (value: string) => void;
   children: JSX.Element;
 }) {
+  let select: HTMLSelectElement | undefined;
+  const options = children(() => props.children);
+  // The value is set once the options are in place: set together with options that change in
+  // the same update (another provider's models), a select finds no option for it and WebKit
+  // falls back to the first one. An effect runs after the options are inserted.
+  createEffect(() => {
+    options();
+    if (select !== undefined) {
+      select.value = props.value;
+    }
+  });
   return (
     <span class="menu-pick">
       <select
+        ref={(el) => (select = el)}
         id={props.id}
-        value={props.value}
         onChange={(e) => {
           props.onPick(e.currentTarget.value);
           // The menu shows what Rust has, not what was clicked: a pick that is saved moves it
@@ -369,7 +389,7 @@ function Menu(props: {
           e.currentTarget.value = props.value;
         }}
       >
-        {props.children}
+        {options()}
       </select>
       <Icon name="chev" />
     </span>
@@ -411,6 +431,8 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
       setTyped("");
       setCustom(props.model);
     } else {
+      // Another pick closes the field, so the menu shows Rust's model, not Custom.
+      setCustom(null);
       void choose(option === DEFAULT ? null : option);
     }
   };
