@@ -1,4 +1,4 @@
-# Ancient Protector: spec and implementation plan
+# Vigil: spec and implementation plan
 
 ## Context
 
@@ -16,6 +16,7 @@ and the user can approve a fix the agent then performs.
 
 | Area | Decision |
 |---|---|
+| Name | Vigil (2026-11-07; was Ancient Protector, which the owner found not technical enough). Mark: a ring around a vertical slit, an eye that stays open; sources in `app/src-tauri/icons/src/` |
 | Outcome | Report, and fix on per-finding approval |
 | Who decides "affected" | The agent. The app only narrows input |
 | Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
@@ -33,7 +34,7 @@ and the user can approve a fix the agent then performs.
 | Lifecycle | Dismiss with reason, diff vs last sweep, fix history (see "Lifecycle") |
 | Concurrency | One agent run per target, sequential |
 | UI | Tauri 2 + SolidJS/TS; one popover holding findings, details and settings; every value it shows is worked out in Rust, the UI only lays it out |
-| Storage | Files in `~/Library/Application Support/ancient-protector/` |
+| Storage | Files in `~/Library/Application Support/vigil/` |
 | CLI | Yes, thin CLI over the same core |
 | Distribution | Personal build first; signed + notarized DMG later; launch at login |
 | v1 | All three targets |
@@ -43,8 +44,8 @@ and the user can approve a fix the agent then performs.
 Cargo workspace (root `Cargo.toml` becomes the workspace manifest; `src/main.rs` is deleted):
 
 ```
-crates/core/        ancient-protector-core   all logic, no UI
-crates/cli/         ancient-protector        bin: sweep, findings, dismiss, fix
+crates/core/        vigil-core   all logic, no UI
+crates/cli/         vigil        bin: sweep, findings, dismiss, fix
 app/src-tauri/      tray app (Tauri 2), calls core
 app/ui/             SolidJS + TS frontend (ts-style)
 prompts/            default prompt templates, copied to the data dir on first run
@@ -66,7 +67,7 @@ Core modules (one concept each):
 ### Data layout
 
 ```
-~/Library/Application Support/ancient-protector/
+~/Library/Application Support/vigil/
   config.toml
   prompts/{sweep,sweep-github,sweep-server,fix}.md
   feeds/osv/<id>.json, feeds/nvd/<product>.json
@@ -237,7 +238,7 @@ Issues on a server name a file (`server/listening.txt`); there are no settings.
 
 ### Fix flow
 
-Fix click (or `ancient-protector fix <key>`) -> the finding's fix (steps + exact commands)
+Fix click (or `vigil fix <key>`) -> the finding's fix (steps + exact commands)
 from the newest report that has the key, shown in the details window -> user confirms (`--yes`
 for scripts that already showed it) -> agent run with the `fix` prompt, full access -> result
 appended to `state/fixes.jsonl` -> the next sweep checks the finding again. Decided 2026-11-06
@@ -263,7 +264,7 @@ use ssh.
   `pull_request` URL (`https://github.com/<owner>/<name>/pull/<number>` of that repository
   only).
 - Where to work: this Mac; for a repository, a clone in the fix folder, a branch
-  `ancient-protector/fix-<key>`, and a pull request (never a push to the default branch); for a
+  `vigil/fix-<key>`, and a pull request (never a push to the default branch); for a
   server, every command through `ssh` with the sweep's options to that one host, carried to the
   server's `sh -s` in a quoted heredoc, so a quote in a command cannot end the ssh line and run
   the rest on the Mac. Accepted risk: a repository fix lets the full-access agent read the
@@ -383,7 +384,7 @@ not an OSV ecosystem, so formulae go through NVD.
   history on the first fetch, then `lastModStartDate`/`lastModEndDate` windows (120-day
   maximum; an older cache is fetched in full again). Requests are paced to the published
   limit: 5 per 30 s without a key, 50 per 30 s with an API key read from the macOS Keychain
-  (service `ancient-protector`, account `nvd-api-key`).
+  (service `vigil`, account `nvd-api-key`).
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
 - `history.since` drops advisories both published and last modified before that date (NVD keeps
@@ -436,7 +437,7 @@ Built in step 9a (2026-11-06):
   writes its folder (no agent chosen, a CLI sweep running) is not retried every minute; a
   sweep that panics leaves a failed status, not a stuck "sweeping".
 - Run it: `cargo tauri dev` from `app/src-tauri` (starts the UI dev server), or `cargo tauri
-  build` for `Ancient Protector.app`.
+  build` for `Vigil.app`.
 
 Built in step 9b (2026-11-06):
 
@@ -476,7 +477,7 @@ Built in step 9b (2026-11-06):
 
 ### CLI
 
-`ancient-protector sweep [--target <id>]`, `findings [--json]`, `dismiss <key> --reason <text>`,
+`vigil sweep [--target <id>]`, `findings [--json]`, `dismiss <key> --reason <text>`,
 `undismiss <key>`, `fix <key> [--yes]` (shows the fix and asks to confirm). Same core, same
 files.
 
@@ -532,7 +533,7 @@ toml, reqwest, clap, zip) before adding them.
 - Fake agent: a test script on `PATH` that writes canned `findings.json` (valid, invalid,
   missing) to exercise the sweep, retry, and failure paths without a real agent.
 - `cargo-mutants` over core logic; kill or explain survivors.
-- End to end: `ancient-protector sweep` against this Mac with a real agent and a test repo;
+- End to end: `vigil sweep` against this Mac with a real agent and a test repo;
   then `cargo tauri dev`, run a sweep from the tray, confirm icon state, notification,
   report files, and a fix plan + apply on a deliberately outdated Homebrew formula.
 - Zero warnings: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, oxlint/tsc.

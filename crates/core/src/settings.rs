@@ -474,10 +474,7 @@ mod tests {
         assert_eq!(config.servers.len(), 1);
 
         let text = fs::read_to_string(data_dir.config_file()).unwrap();
-        assert!(
-            text.starts_with("# Ancient Protector configuration."),
-            "{text}"
-        );
+        assert!(text.starts_with("# Vigil configuration."), "{text}");
         let agent = text.find("agent = \"claude\"").unwrap();
         assert!(
             agent > text.find("# The coding agent").unwrap(),
@@ -612,17 +609,11 @@ mod tests {
         save(&data_dir, Setting::Agent { agent }).unwrap();
         save(&data_dir, Setting::Agent { agent: None }).unwrap();
         let text = fs::read_to_string(data_dir.config_file()).unwrap();
-        assert!(
-            text.starts_with("# Ancient Protector configuration."),
-            "{text}"
-        );
+        assert!(text.starts_with("# Vigil configuration."), "{text}");
         assert!(text.contains("# The coding agent"), "{text}");
         save(&data_dir, Setting::Agent { agent }).unwrap();
         let again = fs::read_to_string(data_dir.config_file()).unwrap();
-        assert!(
-            again.starts_with("# Ancient Protector configuration."),
-            "{again}"
-        );
+        assert!(again.starts_with("# Vigil configuration."), "{again}");
     }
 
     #[test]

@@ -15,17 +15,17 @@ use std::sync::MutexGuard;
 use std::sync::PoisonError;
 use std::thread;
 
-use ancient_protector_core::Config;
-use ancient_protector_core::Detected;
-use ancient_protector_core::NvdAccess;
-use ancient_protector_core::Setting;
-use ancient_protector_core::SettingsView;
-use ancient_protector_core::detect;
-use ancient_protector_core::save_setting;
-use ancient_protector_core::settings_view;
 use tauri::AppHandle;
 use tauri::Manager as _;
 use tauri_plugin_dialog::DialogExt as _;
+use vigil_core::Config;
+use vigil_core::Detected;
+use vigil_core::NvdAccess;
+use vigil_core::Setting;
+use vigil_core::SettingsView;
+use vigil_core::detect;
+use vigil_core::save_setting;
+use vigil_core::settings_view;
 
 use crate::runner;
 use crate::runner::Runner;

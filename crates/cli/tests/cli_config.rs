@@ -6,7 +6,7 @@ use std::process::Command;
 use std::process::Output;
 
 fn run(data_dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+    Command::new(env!("CARGO_BIN_EXE_vigil"))
         .arg("--data-dir")
         .arg(data_dir)
         .args(args)
@@ -24,7 +24,7 @@ fn config_before_init_says_to_run_init() {
     let tmp = tempfile::tempdir().unwrap();
     let out = run(tmp.path(), &["config"]);
     assert!(!out.status.success());
-    assert!(text(&out.stderr).contains("run `ancient-protector init` first"));
+    assert!(text(&out.stderr).contains("run `vigil init` first"));
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn invalid_config_lists_every_problem() {
 #[test]
 fn init_with_data_dir_does_not_need_home() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+    let out = Command::new(env!("CARGO_BIN_EXE_vigil"))
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("init")

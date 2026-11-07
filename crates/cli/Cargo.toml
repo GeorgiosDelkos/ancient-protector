@@ -1,12 +1,12 @@
 [package]
-name = "ancient-protector"
-description = "Command-line interface to Ancient Protector."
+name = "vigil"
+description = "Command-line interface to Vigil."
 version = "0.1.0"
 edition.workspace = true
 publish = false
 
 [dependencies]
-ancient-protector-core = { path = "../core" }
+vigil-core = { path = "../core" }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }

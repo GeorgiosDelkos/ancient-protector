@@ -804,7 +804,7 @@ function Nvd(props: { view: SettingsView; onSave: (key: string) => Promise<boole
         </button>
       </form>
       <p class="note">
-        Stored in your Keychain (service ancient-protector), never in config.toml or a report.
+        Stored in your Keychain (service vigil), never in config.toml or a report.
       </p>
     </>
   );

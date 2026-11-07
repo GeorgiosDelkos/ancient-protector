@@ -1,5 +1,5 @@
 #!/bin/sh
-# Ancient Protector's server inventory, sent on ssh's stdin and run by `sh -s`. The app puts two
+# Vigil's server inventory, sent on ssh's stdin and run by `sh -s`. The app puts two
 # lines before it: `marker=<random hex>` and `set -- '<folder>' ...` with the folders whose
 # lockfiles are read. Neither is on the remote command line, so other users of the server cannot
 # see the marker in `ps`.

@@ -67,9 +67,9 @@ const REPO_LIMIT: &str = "100";
 /// the settings.
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
-const PATH_MARK: &str = "__ancient_protector_path__";
-const BIN_MARK: &str = "__ancient_protector_bin__";
-const END_MARK: &str = "__ancient_protector_end__";
+const PATH_MARK: &str = "__vigil_path__";
+const BIN_MARK: &str = "__vigil_bin__";
+const END_MARK: &str = "__vigil_end__";
 
 /// What the settings start from.
 #[derive(Debug)]

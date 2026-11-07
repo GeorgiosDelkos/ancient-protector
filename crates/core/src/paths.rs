@@ -1,4 +1,4 @@
-//! Where Ancient Protector keeps its files.
+//! Where Vigil keeps its files.
 
 use std::fs;
 use std::io;
@@ -23,9 +23,9 @@ impl DataDir {
     }
 
     /// Returns the standard macOS location for the user whose home is `home`:
-    /// `~/Library/Application Support/ancient-protector`.
+    /// `~/Library/Application Support/vigil`.
     pub fn for_home(home: &Path) -> Self {
-        Self::new(home.join("Library/Application Support/ancient-protector"))
+        Self::new(home.join("Library/Application Support/vigil"))
     }
 
     /// Returns the path of `config.toml`.
@@ -173,11 +173,11 @@ mod tests {
         let dir = DataDir::for_home(Path::new("/Users/me"));
         assert_eq!(
             dir.config_file(),
-            Path::new("/Users/me/Library/Application Support/ancient-protector/config.toml")
+            Path::new("/Users/me/Library/Application Support/vigil/config.toml")
         );
         assert_eq!(
             dir.feeds_dir(),
-            Path::new("/Users/me/Library/Application Support/ancient-protector/feeds")
+            Path::new("/Users/me/Library/Application Support/vigil/feeds")
         );
     }
 }

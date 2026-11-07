@@ -377,11 +377,7 @@ mod tests {
 
     #[test]
     fn missing_program_is_none() {
-        assert!(
-            run("ancient-protector-no-such-tool", &[])
-                .unwrap()
-                .is_none()
-        );
+        assert!(run("vigil-no-such-tool", &[]).unwrap().is_none());
     }
 
     #[test]
@@ -471,7 +467,7 @@ mod tests {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
         for dir in [&first, &second] {
-            let probe = dir.path().join("ancient-protector-probe");
+            let probe = dir.path().join("vigil-probe");
             fs::write(&probe, "").unwrap();
             fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -484,14 +480,11 @@ mod tests {
             );
         };
         set(first.path());
-        assert_eq!(
-            which("ancient-protector-probe"),
-            Some(first.path().join("ancient-protector-probe"))
-        );
+        assert_eq!(which("vigil-probe"), Some(first.path().join("vigil-probe")));
         set(second.path());
         assert_eq!(
-            which("ancient-protector-probe"),
-            Some(second.path().join("ancient-protector-probe")),
+            which("vigil-probe"),
+            Some(second.path().join("vigil-probe")),
             "replaced, as after Look again"
         );
     }
@@ -505,7 +498,7 @@ mod tests {
         assert_eq!(which(dir.path().to_str().unwrap()), None, "a directory");
         assert!(which("sh").is_some());
         assert_eq!(which("/bin/sh"), Some(PathBuf::from("/bin/sh")));
-        assert_eq!(which("ancient-protector-no-such-tool"), None);
+        assert_eq!(which("vigil-no-such-tool"), None);
         assert_eq!(which("/nonexistent/tool"), None);
     }
 }

@@ -1,9 +1,9 @@
 [package]
-name = "ancient-protector-app"
+name = "vigil-app"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "Ancient Protector's menu-bar app"
+description = "Vigil's menu-bar app"
 
 [features]
 # Serves the built UI from inside the app instead of the dev server's URL. `cargo tauri build`
@@ -14,7 +14,7 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
-ancient-protector-core = { path = "../../crates/core" }
+vigil-core = { path = "../../crates/core" }
 # macos-private-api: the transparent window the HUD material shows through.
 tauri = { version = "2.12.5", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-notification = "2.7.0"

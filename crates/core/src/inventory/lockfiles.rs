@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn missing_root_is_reported() {
         let mut inventory = Inventory::default();
-        collect(Path::new("/nonexistent/ancient-protector"), &mut inventory);
+        collect(Path::new("/nonexistent/vigil"), &mut inventory);
         assert!(matches!(
             inventory.problems[..],
             [InventoryError::Io { .. }]

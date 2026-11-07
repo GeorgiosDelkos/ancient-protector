@@ -51,7 +51,7 @@ use crate::sweep::SweepError;
 /// Ends the heredoc that carries a command to a server's `sh`. Quoted, so this Mac's shell
 /// expands nothing in the command; a confirmed command is one line, and one that is exactly
 /// this word is refused, so none can end the heredoc early.
-const HEREDOC_END: &str = "ANCIENT_PROTECTOR_END";
+const HEREDOC_END: &str = "VIGIL_END";
 
 /// The JSON Schema of `result.json`, written into each fix folder for the agent.
 const RESULT_SCHEMA: &str = include_str!("fix-result.schema.json");
@@ -359,7 +359,7 @@ fn access(config: &Config, target: &str, key: FindingKey) -> Result<(String, Str
         let access = format!(
             "The GitHub repository {repo}, with the user's `gh` login.\n\n\
              - A change to files: clone it into this folder (`gh repo clone {repo} repo`), \
-             create the branch `ancient-protector/fix-{key}` from the default branch, make the \
+             create the branch `vigil/fix-{key}` from the default branch, make the \
              change, commit it with a message that names the advisory or issue, push the \
              branch, and open a pull request with `gh pr create`. Never push to the default \
              branch.\n\
@@ -545,10 +545,7 @@ mod tests {
         let (shown, repo) = access(&config, "github:o/r", key).unwrap();
         assert_eq!(shown, "the GitHub repository o/r, as a pull request");
         assert!(repo.contains("`gh repo clone o/r repo`"), "{repo}");
-        assert!(
-            repo.contains(&format!("`ancient-protector/fix-{key}`")),
-            "{repo}"
-        );
+        assert!(repo.contains(&format!("`vigil/fix-{key}`")), "{repo}");
         assert!(repo.contains("Never push to the default branch"), "{repo}");
 
         let (shown, server) = access(&config, "server:web", key).unwrap();
@@ -564,7 +561,7 @@ mod tests {
         assert!(
             server.contains(
                 "-l ops -i /k/id_ed -o IdentitiesOnly=yes -- 10.0.0.5 sh -s \
-                 <<'ANCIENT_PROTECTOR_END'\n<command>\nANCIENT_PROTECTOR_END\n"
+                 <<'VIGIL_END'\n<command>\nVIGIL_END\n"
             ),
             "{server}"
         );

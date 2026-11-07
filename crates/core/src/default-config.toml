@@ -1,4 +1,4 @@
-# Ancient Protector configuration. Edit here or in the app's settings window.
+# Vigil configuration. Edit here or in the app's settings window.
 #
 # The coding agent that runs sweeps and fixes: claude, grok, codex, gemini or opencode.
 # agent = "claude"

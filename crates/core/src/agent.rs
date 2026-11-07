@@ -65,11 +65,11 @@ fn opencode_sweep_config() -> String {
 
 /// Marks the lines of the login shell's answer, so nothing its startup files print is mistaken
 /// for the answer.
-const PATH_MARK: &str = "__ancient_protector_path__";
-const BINARY_MARK: &str = "__ancient_protector_binary__";
-const END_MARK: &str = "__ancient_protector_end__";
+const PATH_MARK: &str = "__vigil_path__";
+const BINARY_MARK: &str = "__vigil_binary__";
+const END_MARK: &str = "__vigil_end__";
 
-/// A coding-agent CLI that Ancient Protector can drive headless.
+/// A coding-agent CLI that Vigil can drive headless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {

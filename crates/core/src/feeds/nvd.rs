@@ -45,8 +45,8 @@ const MAX_DELTA: SignedDuration = SignedDuration::from_hours(24 * WINDOW_DAYS);
 const PAGE: usize = 500;
 
 /// The Keychain item holding an NVD API key, set with
-/// `security add-generic-password -s ancient-protector -a nvd-api-key -w <key>`.
-const KEYCHAIN_SERVICE: &str = "ancient-protector";
+/// `security add-generic-password -s vigil -a nvd-api-key -w <key>`.
+const KEYCHAIN_SERVICE: &str = "vigil";
 const KEYCHAIN_ACCOUNT: &str = "nvd-api-key";
 
 /// `security` exits with 44 (`errSecItemNotFound`) when the item does not exist.

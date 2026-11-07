@@ -39,7 +39,7 @@ impl Sandbox {
         let data = self.path().join("data");
         fs::create_dir_all(&data).expect("the temp dir is writable");
         fs::write(data.join("config.toml"), config).expect("the temp dir is writable");
-        Command::new(env!("CARGO_BIN_EXE_ancient-protector"))
+        Command::new(env!("CARGO_BIN_EXE_vigil"))
             .arg("--data-dir")
             .arg(&data)
             .arg("inventory")
