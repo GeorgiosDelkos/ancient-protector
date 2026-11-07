@@ -5,7 +5,7 @@ import type { SettingsView } from "./settings.ts";
 
 export function settingsView(changes: Partial<SettingsView> = {}): SettingsView {
   return {
-    headline: "2 settings need you",
+    headline: "1 setting needs you",
     ready: false,
     groups: [
       {
@@ -25,7 +25,7 @@ export function settingsView(changes: Partial<SettingsView> = {}): SettingsView 
       },
       {
         title: "Advisories",
-        sections: [{ id: "nvd", title: "NVD key", summary: "Not set", attention: true }],
+        sections: [{ id: "nvd", title: "NVD key", summary: "Not set", attention: false }],
       },
     ],
     agents: [

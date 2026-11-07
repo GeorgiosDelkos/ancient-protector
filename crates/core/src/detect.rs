@@ -12,6 +12,8 @@ use std::fs;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -58,6 +60,11 @@ const PROJECT_FOLDERS: [&str; 7] = [
 /// How many of the user's repositories `gh repo list` returns. Arbitrary: enough to pick from
 /// without a long wait.
 const REPO_LIMIT: &str = "100";
+
+/// How long an agent may take to list its models. Arbitrary: `opencode models` answered in
+/// about a second on 2026-11-07; a list that takes longer is skipped rather than holding up
+/// the settings.
+const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PATH_MARK: &str = "__ancient_protector_path__";
 const BIN_MARK: &str = "__ancient_protector_bin__";
@@ -135,10 +142,18 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
     let found = |program: &str| answer.as_ref().and_then(|a| a.binary(program));
     let agents: Vec<(AgentKind, Option<PathBuf>)> =
         AGENTS.iter().map(|&a| (a, found(a.binary()))).collect();
-    let models = agents
-        .iter()
-        .filter_map(|(agent, path)| Some((*agent, listed_models(*agent, path.as_deref()?)?)))
-        .collect();
+    // Each list takes a second or more and may reach the network, so they run side by side.
+    let models = thread::scope(|scope| {
+        let lists: Vec<_> = agents
+            .iter()
+            .filter_map(|(agent, path)| Some((*agent, path.as_deref()?)))
+            .map(|(agent, path)| scope.spawn(move || Some((agent, listed_models(agent, path)?))))
+            .collect();
+        lists
+            .into_iter()
+            .filter_map(|list| list.join().ok().flatten())
+            .collect()
+    });
     let tools: Vec<Tool> = TOOLS
         .iter()
         .map(|&(program, name)| Tool {
@@ -172,18 +187,17 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
 }
 
 /// The models `agent` at `binary` lists, or `None` when its CLI has no list (Claude Code takes
-/// aliases, Gemini CLI none, and codex's `debug models` is experimental) or the list fails.
+/// aliases, Gemini CLI none, and codex's `debug models` is experimental) or the list fails or
+/// takes longer than [`MODELS_TIMEOUT`].
 fn listed_models(agent: AgentKind, binary: &Path) -> Option<Vec<String>> {
-    let binary = binary.to_str()?;
-    match agent {
-        AgentKind::Grok => command::run(binary, &["models"])
-            .ok()?
-            .map(|out| grok_models(&out)),
-        AgentKind::Opencode => command::run(binary, &["models"])
-            .ok()?
-            .map(|out| opencode_models(&out)),
-        AgentKind::Claude | AgentKind::Codex | AgentKind::Gemini => None,
-    }
+    let read: fn(&str) -> Vec<String> = match agent {
+        AgentKind::Grok => grok_models,
+        AgentKind::Opencode => opencode_models,
+        AgentKind::Claude | AgentKind::Codex | AgentKind::Gemini => return None,
+    };
+    let out =
+        command::run_with_input(binary.to_str()?, &["models"], b"", MODELS_TIMEOUT).ok()??;
+    out.success.then(|| read(&out.stdout))
 }
 
 /// Reads `grok models`, which lists one model per line after "Available models:", marked `*`
@@ -199,11 +213,20 @@ fn grok_models(out: &str) -> Vec<String> {
         .collect()
 }
 
-/// Reads `opencode models`, which prints one `provider/model` per line.
+/// Reads `opencode models`, which prints one `provider/model` per line. A provider is a plain
+/// word, so a URL or a warning that happens to hold a `/` is not taken for a model.
 fn opencode_models(out: &str) -> Vec<String> {
     out.lines()
         .map(str::trim)
-        .filter(|l| l.contains('/') && l.parse::<ModelName>().is_ok())
+        .filter(|l| {
+            l.split_once('/').is_some_and(|(provider, model)| {
+                !provider.is_empty()
+                    && !model.is_empty()
+                    && provider
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            }) && l.parse::<ModelName>().is_ok()
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -373,7 +396,8 @@ mod tests {
                     Available models:\n  * grok-4.7 (default)\n  - grok-4.6\n  - $(id)\n";
         assert_eq!(grok_models(grok), ["grok-4.7", "grok-4.6"]);
         assert_eq!(grok_models("- before the list\n"), Vec::<String>::new());
-        let opencode = "opencode/big-pickle\nollama/gemma4:e4b\n\nWarning: x\n-a/b\n";
+        let opencode = "opencode/big-pickle\nollama/gemma4:e4b\n\nWarning: x\n-a/b\n\
+                        https://opencode.ai/x\n/lone\nempty/\n";
         assert_eq!(
             opencode_models(opencode),
             ["opencode/big-pickle", "ollama/gemma4:e4b"]

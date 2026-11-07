@@ -124,20 +124,24 @@ pub struct AgentChoice {
 pub struct ModelView {
     /// The agent, as [`crate::Setting::Model`] takes it.
     pub agent: AgentKind,
-    /// The model in the config, or `None` for the agent's own default.
-    pub chosen: Option<String>,
+    /// Whether the agent runs its own default model, as no model is chosen.
+    pub default: bool,
     /// Who serves the models, each with its models; one provider unless the agent is
     /// opencode. Empty when the agent lists no models and none is chosen.
     pub providers: Vec<ProviderChoice>,
     /// Whether the agent's CLI lists its models; when it does not, the user types one.
     pub listed: bool,
+    /// What the field for a typed model says while empty.
+    pub hint: &'static str,
 }
 
 /// A provider and its models.
 #[derive(Debug, Serialize)]
 pub struct ProviderChoice {
-    /// Its name: "Anthropic", "ollama".
+    /// Its name: "Anthropic", "ollama"; empty for opencode models named without one.
     pub name: String,
+    /// Its name as shown: "Other" for the empty one.
+    pub label: String,
     /// Whether the chosen model is one of its models; the first provider when no model is.
     pub chosen: bool,
     /// Its models.
@@ -151,6 +155,8 @@ pub struct ModelOption {
     pub value: String,
     /// Its name without the provider: `gemma4:e4b`.
     pub label: String,
+    /// The full name under the label, when the label drops the provider.
+    pub sub: Option<String>,
     /// Whether it is the chosen model.
     pub chosen: bool,
 }
@@ -358,7 +364,9 @@ fn groups(config: &Config, detected: &Detected) -> Vec<SectionGroup> {
                 Section::Nvd,
                 "NVD key",
                 nvd.to_owned(),
-                !detected.nvd_key,
+                // Optional, as its page says: it speeds up the first sweep, and sweeps work
+                // without it, so it never counts as needing the user.
+                false,
             )],
         ),
     ]
@@ -400,12 +408,18 @@ fn model_view(config: &Config, detected: &Detected, agent: AgentKind) -> ModelVi
         };
         let option = ModelOption {
             chosen: chosen.as_ref() == Some(&value),
+            sub: (label != value).then(|| value.clone()),
             value,
             label,
         };
         match providers.iter_mut().find(|p| p.name == provider) {
             Some(group) => group.models.push(option),
             None => providers.push(ProviderChoice {
+                label: if provider.is_empty() {
+                    "Other".to_owned()
+                } else {
+                    provider.clone()
+                },
                 name: provider,
                 chosen: false,
                 models: vec![option],
@@ -419,11 +433,17 @@ fn model_view(config: &Config, detected: &Detected, agent: AgentKind) -> ModelVi
     if let Some(provider) = providers.get_mut(on) {
         provider.chosen = true;
     }
+    let listed = listed.is_some_and(|l| !l.is_empty());
     ModelView {
         agent,
-        chosen,
+        default: chosen.is_none(),
         providers,
-        listed: listed.is_some_and(|l| !l.is_empty()),
+        listed,
+        hint: if listed {
+            "Another model"
+        } else {
+            "Model name, as --model takes it"
+        },
     }
 }
 
@@ -589,12 +609,14 @@ mod tests {
     }
 
     #[test]
-    fn one_section_that_needs_the_user_reads_as_one() {
-        let mut found = detected();
-        found.nvd_key = true;
-        let view = settings_view(&config(""), &found, Path::new(HOME));
-        assert_eq!(view.headline, "1 setting needs you");
-        assert!(!view.ready);
+    fn the_headline_counts_what_needs_the_user_and_the_nvd_key_is_optional() {
+        assert_eq!(headline(0), "Ready to sweep");
+        assert_eq!(headline(1), "1 setting needs you");
+        assert_eq!(headline(3), "3 settings need you");
+        let view = settings_view(&config("agent = \"claude\""), &detected(), Path::new(HOME));
+        assert!(!detected().nvd_key);
+        assert_eq!(view.headline, "Ready to sweep");
+        assert!(view.ready);
     }
 
     /// A provider as the tests compare it: its name, whether it is chosen, and each model's
@@ -633,8 +655,8 @@ mod tests {
         let view = settings_view(&config("agent = \"claude\""), &detected(), Path::new(HOME));
         let model = view.model.as_ref().unwrap();
         assert_eq!(
-            (model.agent, model.chosen.as_deref(), model.listed),
-            (AgentKind::Claude, None, true)
+            (model.agent, model.default, model.listed, model.hint),
+            (AgentKind::Claude, true, true, "Another model")
         );
         assert_eq!(
             models(&view),
@@ -673,6 +695,11 @@ mod tests {
             summaries(&view)[0],
             ("Agent", "opencode · ollama/gemma4:e4b", false)
         );
+        let model = view.model.as_ref().unwrap();
+        assert!(!model.default);
+        let gemma = &model.providers[1].models[0];
+        assert_eq!(gemma.sub.as_deref(), Some("ollama/gemma4:e4b"));
+        assert_eq!(model.providers[1].label, "ollama");
     }
 
     #[test]
@@ -681,6 +708,7 @@ mod tests {
         let model = view.model.as_ref().unwrap();
         assert!(!model.listed);
         assert!(model.providers.is_empty());
+        assert_eq!(model.hint, "Model name, as --model takes it");
 
         let text = "agent = \"gemini\"\nmodels.gemini = \"gemini-3.1-pro\"";
         let view = settings_view(&config(text), &detected(), Path::new(HOME));
@@ -711,6 +739,9 @@ mod tests {
         let view = settings_view(&config(text), &detected(), Path::new(HOME));
         assert_eq!(models(&view)[0].0, "", "a name without a provider has none");
         assert!(models(&view)[0].1);
+        let other = &view.model.as_ref().unwrap().providers[0];
+        assert_eq!(other.label, "Other");
+        assert_eq!(other.models[0].sub, None, "the label is the whole name");
     }
 
     fn summaries(view: &SettingsView) -> Vec<(&str, &str, bool)> {
@@ -732,10 +763,10 @@ mod tests {
                 ("This Mac", "0 folders", false),
                 ("GitHub", "0 repositories", false),
                 ("Servers", "0 servers", false),
-                ("NVD key", "Not set", true),
+                ("NVD key", "Not set", false),
             ]
         );
-        assert_eq!(view.headline, "2 settings need you");
+        assert_eq!(view.headline, "1 setting needs you");
         assert!(!view.ready);
         let titles: Vec<&str> = view.groups.iter().map(|g| g.title).collect();
         assert_eq!(titles, ["Sweeps", "Targets", "Advisories"]);

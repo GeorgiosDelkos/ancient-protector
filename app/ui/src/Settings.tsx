@@ -32,20 +32,26 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
   // Rust applies changes one at a time, but replies can arrive out of order; only the reply
   // to the newest command is shown, so an older view never replaces a newer one.
   let newest = 0;
-  /** Runs a command that returns the new settings, and shows them. */
-  const update = (command: Promise<SettingsView | null>) => {
+  /** Runs a command that returns the new settings, and shows them. Resolves to whether Rust
+   * applied the change, so a form keeps what was typed until it is saved. */
+  const update = (command: Promise<SettingsView | null>): Promise<boolean> => {
     newest += 1;
     const asked = newest;
     setError(null);
     setSaved(false);
-    command
-      .then((next) => {
+    return command.then(
+      (next) => {
         if (next !== null && asked === newest) {
           mutate(next);
           setSaved(true);
         }
-      })
-      .catch((e: unknown) => setError(String(e)));
+        return next !== null;
+      },
+      (e: unknown) => {
+        setError(String(e));
+        return false;
+      },
+    );
   };
   const save = (setting: Setting) => update(invoke<SettingsView>("save", { setting }));
   const lookAgain = () => {
@@ -204,7 +210,9 @@ function SectionRow(props: { line: SectionLine; onOpen: () => void }) {
         <Show when={props.line.attention}>
           <i class="dot" aria-hidden="true" />
         </Show>
-        <span class={props.line.attention ? "warn" : ""}>{props.line.summary}</span>
+        <span class={`val ${props.line.attention ? "warn" : ""}`} title={props.line.summary}>
+          {props.line.summary}
+        </span>
         <Icon name="chev" />
       </span>
     </button>
@@ -279,22 +287,23 @@ function Segmented(props: {
   );
 }
 
-type Props = { view: SettingsView; save: (setting: Setting) => void };
+type Props = { view: SettingsView; save: (setting: Setting) => Promise<boolean> };
 
 function Agent(props: Props) {
   return (
     <div class="block">
-      <div class="group list">
+      <div class="group list" role="radiogroup" aria-label="Agent">
         <For each={props.view.agents}>
           {(agent) => (
             <button
               type="button"
               class="srow choice"
+              role="radio"
               disabled={!agent.available}
-              aria-pressed={agent.chosen}
-              onClick={() => props.save({ kind: "agent", agent: agent.agent })}
+              aria-checked={agent.chosen}
+              onClick={() => void props.save({ kind: "agent", agent: agent.agent })}
             >
-              <span class={`radio ${agent.chosen ? "on" : ""}`} />
+              <span class={`radio ${agent.chosen ? "on" : ""}`} aria-hidden="true" />
               <span class="what">
                 <span class="t">{agent.name}</span>
                 <span class="s">{agent.path ?? "not on your login shell's PATH"}</span>
@@ -315,49 +324,54 @@ function Agent(props: Props) {
 type ModelView = NonNullable<SettingsView["model"]>;
 
 /** The chosen agent's model: its default, one it lists under a provider, or a typed name. */
-function Model(props: { model: ModelView; save: (setting: Setting) => void }) {
-  // Which provider's models are shown; until the user picks one, the provider Rust marked.
-  const [picked, setPicked] = createSignal<string | null>(null);
+function Model(props: { model: ModelView; save: Props["save"] }) {
+  // Which provider's models are shown. A pick holds only for the view it was made on: each
+  // view Rust returns (a save, another agent) shows the provider Rust marked again.
+  const [picked, setPicked] = createSignal<{ name: string; on: ModelView } | null>(null);
   const [typed, setTyped] = createSignal("");
-  const shown = () =>
-    props.model.providers.find((p) => p.name === picked()) ??
-    props.model.providers.find((p) => p.chosen);
+  const shown = () => {
+    const pick = picked();
+    const name = pick !== null && pick.on === props.model ? pick.name : null;
+    return (
+      props.model.providers.find((p) => p.name === name) ??
+      props.model.providers.find((p) => p.chosen)
+    );
+  };
   const choose = (model: string | null) =>
     props.save({ kind: "model", agent: props.model.agent, model });
   return (
     <div class="block model">
       <h2 class="label">Model</h2>
       <Show when={props.model.providers.length > 1}>
-        <div class="chips" role="tablist" aria-label="Provider">
+        <div class="chips" role="group" aria-label="Provider">
           <For each={props.model.providers}>
             {(p) => (
               <button
                 type="button"
-                role="tab"
-                aria-selected={p === shown()}
+                aria-pressed={p === shown()}
                 class={`chip ${p === shown() ? "on" : ""}`}
-                onClick={() => setPicked(p.name)}
+                onClick={() => setPicked({ name: p.name, on: props.model })}
               >
-                {p.name === "" ? "Other" : p.name}
+                {p.label}
               </button>
             )}
           </For>
         </div>
       </Show>
-      <div class="group list scroll">
+      <div class="group list scroll" role="radiogroup" aria-label="Model">
         <ModelRow
           label="Default"
           sub="the agent's own choice"
-          on={props.model.chosen === null}
-          pick={() => choose(null)}
+          on={props.model.default}
+          pick={() => void choose(null)}
         />
         <For each={shown()?.models ?? []}>
           {(m) => (
             <ModelRow
               label={m.label}
-              {...(m.label === m.value ? {} : { sub: m.value })}
+              {...(m.sub === null ? {} : { sub: m.sub })}
               on={m.chosen}
-              pick={() => choose(m.value)}
+              pick={() => void choose(m.value)}
             />
           )}
         </For>
@@ -366,14 +380,13 @@ function Model(props: { model: ModelView; save: (setting: Setting) => void }) {
         class="inline-add"
         onSubmit={(e) => {
           e.preventDefault();
-          choose(typed());
-          setTyped("");
+          void choose(typed()).then((ok) => ok && setTyped(""));
         }}
       >
         <input
           id="model"
           class="field grow mono"
-          placeholder={props.model.listed ? "Another model" : "Model name, as --model takes it"}
+          placeholder={props.model.hint}
           aria-label="Model name"
           autocomplete="off"
           value={typed()}
@@ -389,8 +402,14 @@ function Model(props: { model: ModelView; save: (setting: Setting) => void }) {
 
 function ModelRow(props: { label: string; sub?: string; on: boolean; pick: () => void }) {
   return (
-    <button type="button" class="srow choice" aria-pressed={props.on} onClick={() => props.pick()}>
-      <span class={`radio ${props.on ? "on" : ""}`} />
+    <button
+      type="button"
+      class="srow choice"
+      role="radio"
+      aria-checked={props.on}
+      onClick={() => props.pick()}
+    >
+      <span class={`radio ${props.on ? "on" : ""}`} aria-hidden="true" />
       <span class="what">
         <span class="t">{props.label}</span>
         <Show when={props.sub}>
@@ -581,8 +600,7 @@ function GitHub(props: Props) {
           class="inline-add"
           onSubmit={(e) => {
             e.preventDefault();
-            props.save({ kind: "add_repo", repo: typed() });
-            setTyped("");
+            void props.save({ kind: "add_repo", repo: typed() }).then((ok) => ok && setTyped(""));
           }}
         >
           <input
@@ -650,7 +668,7 @@ function Servers(props: Props) {
   );
 }
 
-function Nvd(props: { view: SettingsView; onSave: (key: string) => void }) {
+function Nvd(props: { view: SettingsView; onSave: (key: string) => Promise<boolean> }) {
   const [key, setKey] = createSignal("");
   return (
     <>
@@ -682,8 +700,8 @@ function Nvd(props: { view: SettingsView; onSave: (key: string) => void }) {
         class="inline-add"
         onSubmit={(e) => {
           e.preventDefault();
-          props.onSave(key());
-          setKey("");
+          // The key leaves the field only once it is in the Keychain.
+          void props.onSave(key()).then((ok) => ok && setKey(""));
         }}
       >
         <input

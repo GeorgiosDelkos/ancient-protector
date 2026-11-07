@@ -34,7 +34,7 @@ async function rate(label: string): Promise<string | undefined> {
 }
 
 function pressed(): string | null | undefined {
-  return screen.getByText("Claude Code").closest("button")?.ariaPressed;
+  return screen.getByText("Claude Code").closest("button")?.ariaChecked;
 }
 
 function open(start: Section | null = null) {
@@ -55,8 +55,9 @@ describe("the section list", () => {
     expect(screen.getByText("Looking at what this Mac has…")).toBeTruthy();
     expect(await screen.findByText("Choose one")).toBeTruthy();
     expect(document.querySelector(".banner")).toBeNull();
-    expect(screen.getByText("Choose one").className).toBe("warn");
-    expect(screen.getByText("1 folder").className).toBe("");
+    expect(screen.getByText("Choose one").className).toBe("val warn");
+    expect(screen.getByText("1 folder").className).toBe("val ");
+    expect(screen.getByText("1 folder").title).toBe("1 folder");
     fireEvent.click(screen.getByText("Done"));
     expect(onClose).toHaveBeenCalledOnce();
   });
@@ -64,7 +65,7 @@ describe("the section list", () => {
   it("opens with Rust's headline and the sections in Rust's groups", async () => {
     answer({ settings_data: () => settingsView() });
     open();
-    const headline = await screen.findByText("2 settings need you");
+    const headline = await screen.findByText("1 setting needs you");
     expect(headline.closest(".hero")?.className).toBe("hero needs");
     const labels = screen.getAllByRole("heading").map((h) => h.textContent);
     expect(labels).toEqual(["Sweeps", "Targets", "Advisories"]);
@@ -427,18 +428,35 @@ describe("the model", () => {
   const opencode = settingsView({
     model: {
       agent: "opencode",
-      chosen: "ollama/gemma4:e4b",
+      default: false,
       listed: true,
+      hint: "Another model",
       providers: [
         {
           name: "opencode",
+          label: "opencode",
           chosen: false,
-          models: [{ value: "opencode/big-pickle", label: "big-pickle", chosen: false }],
+          models: [
+            {
+              value: "opencode/big-pickle",
+              label: "big-pickle",
+              sub: "opencode/big-pickle",
+              chosen: false,
+            },
+          ],
         },
         {
           name: "ollama",
+          label: "ollama",
           chosen: true,
-          models: [{ value: "ollama/gemma4:e4b", label: "gemma4:e4b", chosen: true }],
+          models: [
+            {
+              value: "ollama/gemma4:e4b",
+              label: "gemma4:e4b",
+              sub: "ollama/gemma4:e4b",
+              chosen: true,
+            },
+          ],
         },
       ],
     },
@@ -454,13 +472,13 @@ describe("the model", () => {
   it("shows the chosen provider's models, and another provider's on a tap", async () => {
     answer({ settings_data: () => opencode, save: () => opencode });
     open("agent");
-    expect((await row("gemma4:e4b")).ariaPressed).toBe("true");
+    expect((await row("gemma4:e4b")).ariaChecked).toBe("true");
     expect(within(await row("gemma4:e4b")).getByText("ollama/gemma4:e4b")).toBeTruthy();
-    expect((await row("Default")).ariaPressed).toBe("false");
+    expect((await row("Default")).ariaChecked).toBe("false");
     expect(screen.queryByText("big-pickle")).toBeNull();
-    expect(screen.getByRole("tab", { name: "ollama" }).ariaSelected).toBe("true");
-    fireEvent.click(screen.getByRole("tab", { name: "opencode" }));
-    expect(screen.getByRole("tab", { name: "opencode" }).className).toBe("chip on");
+    expect(screen.getByRole("button", { name: "ollama" }).ariaPressed).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "opencode" }));
+    expect(screen.getByRole("button", { name: "opencode" }).className).toBe("chip on");
     fireEvent.click(await screen.findByText("big-pickle"));
     await screen.findByText("Saved");
     expect(invoke).toHaveBeenCalledWith("save", {
@@ -474,17 +492,50 @@ describe("the model", () => {
     );
   });
 
+  it("shows the provider Rust marks once a save returns, whatever tab was open", async () => {
+    // Rust sends a new view with every reply.
+    answer({ settings_data: () => opencode, save: () => structuredClone(opencode) });
+    open("agent");
+    fireEvent.click(await screen.findByRole("button", { name: "opencode" }));
+    expect(await screen.findByText("big-pickle")).toBeTruthy();
+    fireEvent.input(screen.getByPlaceholderText("Another model"), {
+      target: { value: "ollama/gemma4:e4b" },
+    });
+    fireEvent.submit(
+      screen.getByPlaceholderText("Another model").closest("form") as HTMLFormElement,
+    );
+    await screen.findByText("Saved");
+    expect(screen.getByRole("button", { name: "ollama" }).ariaPressed).toBe("true");
+    expect((await row("gemma4:e4b")).ariaChecked).toBe("true");
+  });
+
+  it("keeps a typed model that Rust refuses, to be corrected", async () => {
+    answer({ settings_data: () => opencode, save: () => Promise.reject("models.opencode: bad") });
+    open("agent");
+    const input = (await screen.findByPlaceholderText("Another model")) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "a b" } });
+    fireEvent.submit(input.form as HTMLFormElement);
+    expect(await screen.findByText(/models.opencode: bad/)).toBeTruthy();
+    expect(input.value).toBe("a b");
+  });
+
   it("takes a typed model, and asks for one when the agent lists none", async () => {
     const gemini = settingsView({
-      model: { agent: "gemini", chosen: null, listed: false, providers: [] },
+      model: {
+        agent: "gemini",
+        default: true,
+        listed: false,
+        hint: "Model name, as --model takes it",
+        providers: [],
+      },
     });
     answer({ settings_data: () => gemini, save: () => gemini });
     open("agent");
     const input = (await screen.findByPlaceholderText(
       "Model name, as --model takes it",
     )) as HTMLInputElement;
-    expect(screen.queryByRole("tablist")).toBeNull();
-    expect((await row("Default")).ariaPressed).toBe("true");
+    expect(screen.queryByRole("group", { name: "Provider" })).toBeNull();
+    expect((await row("Default")).ariaChecked).toBe("true");
     expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
     fireEvent.input(input, { target: { value: "gemini-3.1-pro" } });
     fireEvent.submit(input.form as HTMLFormElement);

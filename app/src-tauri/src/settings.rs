@@ -2,12 +2,13 @@
 //! change the config through [`save_setting`], returning the view as it now is so the UI
 //! shows a change without asking again.
 //!
-//! Detection takes about two seconds (the login shell and `gh` twice), so it runs once, when
-//! the app starts, and again only when the user asks; every view reuses it. It runs outside
-//! the lock, so a change never waits for it; a view asked for before the first detection
-//! finishes runs its own. A missing config reads as the default one, which the first change
-//! writes. The commands marked `async` are plain blocking functions that Tauri runs off the
-//! main thread; none of them is a future.
+//! Detection takes a few seconds (the login shell, `gh` twice, and the model lists of Grok and
+//! opencode, each cut off after ten seconds), so it runs once, when the app starts, and again
+//! only when the user asks; every view reuses it. It runs outside the lock, so a change never
+//! waits for it; a view asked for before the first detection finishes runs its own. A missing
+//! config reads as the default one, which the first change writes. The commands marked
+//! `async` are plain blocking functions that Tauri runs off the main thread; none of them is
+//! a future.
 
 use std::sync::Mutex;
 use std::sync::MutexGuard;

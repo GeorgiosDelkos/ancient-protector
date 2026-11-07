@@ -27,17 +27,20 @@ export type SettingsView = {
   }[];
   readonly model: {
     readonly agent: string;
-    readonly chosen: string | null;
+    readonly default: boolean;
     readonly providers: readonly {
       readonly name: string;
+      readonly label: string;
       readonly chosen: boolean;
       readonly models: readonly {
         readonly value: string;
         readonly label: string;
+        readonly sub: string | null;
         readonly chosen: boolean;
       }[];
     }[];
     readonly listed: boolean;
+    readonly hint: string;
   } | null;
   readonly schedule: {
     readonly automatic: boolean;

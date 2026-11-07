@@ -80,7 +80,8 @@ pub enum Setting {
     Model {
         /// The agent.
         agent: AgentKind,
-        /// The model, as the agent's CLI takes it; spaces around it are dropped.
+        /// The model, as the agent's CLI takes it; spaces around it are dropped, and a blank
+        /// one unsets it like `None`.
         model: Option<String>,
     },
 }
@@ -201,8 +202,8 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), No
         }
         Setting::Model { agent, model } => {
             let models = table(doc, "models")?;
-            match model {
-                Some(model) => models[agent.binary()] = value(model.trim()),
+            match model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+                Some(model) => models[agent.binary()] = value(model),
                 None => drop(models.remove(agent.binary())),
             }
         }
@@ -538,6 +539,8 @@ mod tests {
 
         let config = save(&data_dir, model(AgentKind::Claude, None)).unwrap();
         assert_eq!(config.models.len(), 1);
+        let config = save(&data_dir, model(AgentKind::Opencode, Some("  "))).unwrap();
+        assert!(config.models.is_empty(), "a blank model is the default");
         let err = save(&data_dir, model(AgentKind::Grok, Some("--yolo"))).unwrap_err();
         assert!(err.to_string().contains("models.grok"), "{err}");
         let text = fs::read_to_string(data_dir.config_file()).unwrap();
