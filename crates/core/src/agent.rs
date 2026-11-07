@@ -317,8 +317,10 @@ pub(crate) struct Located {
 }
 
 impl Located {
-    /// The agent, run with `model` when there is one.
-    pub(crate) fn with_model(self, model: Option<&ModelName>) -> Self {
+    /// The agent, run with `model` when there is one. Only
+    /// [`locate_configured`](crate::sweep::locate_configured) calls it, so every run gets the
+    /// configured model.
+    pub(crate) fn run_with(self, model: Option<&ModelName>) -> Self {
         Self {
             model: model.cloned(),
             ..self
@@ -425,7 +427,7 @@ mod tests {
     #[test]
     fn a_chosen_model_comes_before_the_prompt_in_sweeps_and_fixes() {
         let model: ModelName = "ollama/gemma4:e4b".parse().unwrap();
-        let at = located(Path::new("/bin/x")).with_model(Some(&model));
+        let at = located(Path::new("/bin/x")).run_with(Some(&model));
         let words = |command: Command| -> Vec<String> {
             command
                 .get_args()
@@ -451,7 +453,7 @@ mod tests {
                 "{kind}: {fix:?}"
             );
         }
-        let default = located(Path::new("/bin/x")).with_model(None);
+        let default = located(Path::new("/bin/x")).run_with(None);
         let args = words(AgentKind::Claude.sweep_command(&default, Path::new("/b"), "P"));
         assert!(!args.iter().any(|a| a == "--model"), "{args:?}");
     }

@@ -10,6 +10,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::MetadataExt as _;
+use std::panic;
 use std::path::Path;
 use std::path::PathBuf;
 use std::thread;
@@ -122,7 +123,8 @@ pub struct SshHost {
     pub host_name: Option<String>,
 }
 
-/// Detects what this Mac has. Takes a few seconds: it runs the login shell, `gh` twice and
+/// Detects what this Mac has. Takes a few seconds: it runs the login shell, `gh` twice, the
+/// model lists of Grok and opencode side by side (each cut off after [`MODELS_TIMEOUT`]) and
 /// the Keychain lookup.
 ///
 /// Every tool the core runs from then on is found on the login shell's `PATH`, as in the
@@ -151,7 +153,8 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
             .collect();
         lists
             .into_iter()
-            .filter_map(|list| list.join().ok().flatten())
+            // Listing only parses text, so a panic there is a bug to surface, not "no list".
+            .filter_map(|list| list.join().unwrap_or_else(|p| panic::resume_unwind(p)))
             .collect()
     });
     let tools: Vec<Tool> = TOOLS
@@ -389,6 +392,33 @@ fn without_comment(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn models_are_listed_by_the_agents_that_list_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let grok = script(
+            "grok",
+            r#"[ "$1" = models ] && printf 'Available models:\n  * grok-4.7 (default)\n'"#,
+        );
+        let failing = script("failing", "echo 'Available models:'; echo '- x'; exit 1");
+        assert_eq!(
+            listed_models(AgentKind::Grok, &grok),
+            Some(vec!["grok-4.7".to_owned()])
+        );
+        assert_eq!(listed_models(AgentKind::Grok, &failing), None);
+        assert_eq!(listed_models(AgentKind::Claude, &grok), None);
+        assert_eq!(
+            listed_models(AgentKind::Opencode, &script("oc", "echo ollama/qwen3")),
+            Some(vec!["ollama/qwen3".to_owned()])
+        );
+    }
 
     #[test]
     fn grok_and_opencode_model_lists_are_read_line_by_line() {
@@ -430,7 +460,6 @@ mod tests {
 
     /// Writes an executable shell script.
     fn script(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt as _;
         fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }

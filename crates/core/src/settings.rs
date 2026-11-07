@@ -200,13 +200,7 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), No
             server["ssh"] = value(ssh.as_str());
             servers(doc)?.push(server);
         }
-        Setting::Model { agent, model } => {
-            let models = table(doc, "models")?;
-            match model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-                Some(model) => models[agent.binary()] = value(model),
-                None => drop(models.remove(agent.binary())),
-            }
-        }
+        Setting::Model { agent, model } => set_model(doc, *agent, model.as_deref())?,
         Setting::RemoveServer { name } => {
             let servers = servers(doc)?;
             servers.retain(|t| t.get("name").and_then(Item::as_str) != Some(name));
@@ -214,6 +208,21 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), No
                 doc.remove("servers");
             }
         }
+    }
+    Ok(())
+}
+
+/// Sets `agent`'s model under `[models]`, or removes it for `None` or a blank one, which leaves
+/// the agent its own default.
+fn set_model(
+    doc: &mut DocumentMut,
+    agent: AgentKind,
+    model: Option<&str>,
+) -> Result<(), NotEditable> {
+    let models = table(doc, "models")?;
+    match model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(model) => models[agent.binary()] = value(model),
+        None => drop(models.remove(agent.binary())),
     }
     Ok(())
 }

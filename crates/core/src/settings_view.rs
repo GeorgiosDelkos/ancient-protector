@@ -129,7 +129,8 @@ pub struct ModelView {
     /// Who serves the models, each with its models; one provider unless the agent is
     /// opencode. Empty when the agent lists no models and none is chosen.
     pub providers: Vec<ProviderChoice>,
-    /// Whether the agent's CLI lists its models; when it does not, the user types one.
+    /// Whether there are models to offer (the agent's own list, or Claude Code's aliases);
+    /// when there are none, the user types one.
     pub listed: bool,
     /// What the field for a typed model says while empty.
     pub hint: &'static str,
@@ -399,6 +400,24 @@ fn model_view(config: &Config, detected: &Detected, agent: AgentKind) -> ModelVi
         values.insert(0, chosen.clone());
     }
 
+    let providers = by_provider(agent, values, chosen.as_deref());
+    let listed = listed.is_some_and(|l| !l.is_empty());
+    ModelView {
+        agent,
+        default: chosen.is_none(),
+        providers,
+        listed,
+        hint: if listed {
+            "Another model"
+        } else {
+            "Model name, as --model takes it"
+        },
+    }
+}
+
+/// `values` grouped by who serves them, in order, with the chosen model's provider marked
+/// (the first provider when none is chosen).
+fn by_provider(agent: AgentKind, values: Vec<String>, chosen: Option<&str>) -> Vec<ProviderChoice> {
     let mut providers: Vec<ProviderChoice> = Vec::new();
     for value in values {
         let (provider, label) = match (agent.provider(), value.split_once('/')) {
@@ -407,7 +426,7 @@ fn model_view(config: &Config, detected: &Detected, agent: AgentKind) -> ModelVi
             (None, None) => (String::new(), value.clone()),
         };
         let option = ModelOption {
-            chosen: chosen.as_ref() == Some(&value),
+            chosen: chosen == Some(value.as_str()),
             sub: (label != value).then(|| value.clone()),
             value,
             label,
@@ -433,18 +452,7 @@ fn model_view(config: &Config, detected: &Detected, agent: AgentKind) -> ModelVi
     if let Some(provider) = providers.get_mut(on) {
         provider.chosen = true;
     }
-    let listed = listed.is_some_and(|l| !l.is_empty());
-    ModelView {
-        agent,
-        default: chosen.is_none(),
-        providers,
-        listed,
-        hint: if listed {
-            "Another model"
-        } else {
-            "Model name, as --model takes it"
-        },
-    }
+    providers
 }
 
 fn count(n: usize, one: &str, many: &str) -> String {
