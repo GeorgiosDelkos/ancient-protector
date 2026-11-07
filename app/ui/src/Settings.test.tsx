@@ -551,6 +551,8 @@ describe("the model", () => {
     expect((await menu("model")).value).toBe("-custom");
     expect(invoke).not.toHaveBeenCalledWith("save", expect.anything());
     expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.input(input, { target: { value: "  " } });
+    expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
     fireEvent.input(input, { target: { value: "ollama/qwen3" } });
     fireEvent.submit(input.form as HTMLFormElement);
     await screen.findByText("Saved");
@@ -598,7 +600,7 @@ describe("the model", () => {
     );
   });
 
-  it("offers Default and Custom when the agent lists no models", async () => {
+  it("offers Default and Custom, and a provider menu only for several providers", async () => {
     const gemini = settingsView({
       model: {
         agent: "gemini",
@@ -618,6 +620,13 @@ describe("the model", () => {
     expect(document.getElementById("provider")).toBeNull();
     await pick("model", "-custom");
     expect(await screen.findByPlaceholderText("Model name, as --model takes it")).toBeTruthy();
+    cleanup();
+    const one = opencode.model as NonNullable<SettingsView["model"]>;
+    const single = { ...one, providers: one.providers.slice(1) };
+    answer({ settings_data: () => settingsView({ model: single }) });
+    open("agent");
+    expect((await menu("model")).value).toBe("ollama/gemma4:e4b");
+    expect(document.getElementById("provider")).toBeNull();
   });
 });
 

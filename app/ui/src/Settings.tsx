@@ -352,7 +352,6 @@ function Agent(props: Props) {
 function Menu(props: {
   id: string;
   value: string;
-  disabled?: boolean;
   onPick: (value: string) => void;
   children: JSX.Element;
 }) {
@@ -361,7 +360,6 @@ function Menu(props: {
       <select
         id={props.id}
         value={props.value}
-        disabled={props.disabled === true}
         onChange={(e) => props.onPick(e.currentTarget.value)}
       >
         {props.children}
@@ -445,8 +443,8 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
           class="srow custom"
           onSubmit={(e) => {
             e.preventDefault();
-            const sent = typed();
-            void choose(sent).then((ok) => ok && typed() === sent && setTyped(""));
+            // A saved name closes the field, as Rust's next view does; a refused one stays.
+            void choose(typed());
           }}
         >
           <input
