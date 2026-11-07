@@ -188,8 +188,8 @@ pub(crate) fn refresh(app: &AppHandle) {
     };
     let look = look(app);
     // Best effort: a stale icon is corrected by the next change.
-    // One call for both: `set_icon` alone redraws without the template flag, so setting the
-    // flag after it would flash the black template pixels on a dark menu bar.
+    // One call for both, as tauri's `TrayIcon::set_icon_with_as_template` docs advise:
+    // `set_icon` then `set_icon_as_template` redraws twice, flashing the untinted pixels.
     drop(tray.set_icon_with_as_template(Some(look.image()), look.template()));
     drop(tray.set_tooltip(Some(look.tooltip())));
 }

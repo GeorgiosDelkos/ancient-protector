@@ -8,6 +8,10 @@ use std::path::PathBuf;
 
 use crate::config::DEFAULT_CONFIG;
 
+/// The app's bundle id, as `identifier` in `app/src-tauri/tauri.conf.json`. It names the data
+/// folder and the Keychain service, as `vigil` alone is generic enough for another app to use.
+pub(crate) const BUNDLE_ID: &str = "io.github.georgiosdelkos.vigil";
+
 /// The data directory: config, feed cache, state and sweep reports.
 ///
 /// Everything is a plain file so the user and agents can read and edit it.
@@ -25,7 +29,7 @@ impl DataDir {
     /// Returns the standard macOS location for the user whose home is `home`:
     /// `~/Library/Application Support/io.github.georgiosdelkos.vigil`.
     pub fn for_home(home: &Path) -> Self {
-        Self::new(home.join("Library/Application Support/io.github.georgiosdelkos.vigil"))
+        Self::new(home.join("Library/Application Support").join(BUNDLE_ID))
     }
 
     /// Returns the path of `config.toml`.
