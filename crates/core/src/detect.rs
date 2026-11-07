@@ -1,6 +1,7 @@
 //! What this Mac already has, for the settings to start from: the agents and tools on
-//! the login shell's `PATH`, the `gh` login and its repositories, the hosts in
-//! `~/.ssh/config`, the usual project folders, and whether an NVD key is in the Keychain.
+//! the login shell's `PATH`, the models the agents list, the `gh` login and its repositories,
+//! the hosts in `~/.ssh/config`, the usual project folders, and whether an NVD key is in the
+//! Keychain.
 //!
 //! Nothing here changes anything; every part that cannot be read comes back empty, since a
 //! settings view that fails to open over one missing tool helps no one.
@@ -9,12 +10,16 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::MetadataExt as _;
+use std::panic;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::agent::AgentKind;
+use crate::config::ModelName;
 use crate::inventory::command;
 
 /// The agents a sweep can run, in the order the settings list them.
@@ -57,6 +62,11 @@ const PROJECT_FOLDERS: [&str; 7] = [
 /// without a long wait.
 const REPO_LIMIT: &str = "100";
 
+/// How long an agent may take to list its models. Arbitrary: `opencode models` answered in
+/// about a second on 2026-11-07; a list that takes longer is skipped rather than holding up
+/// the settings.
+const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+
 const PATH_MARK: &str = "__ancient_protector_path__";
 const BIN_MARK: &str = "__ancient_protector_bin__";
 const END_MARK: &str = "__ancient_protector_end__";
@@ -66,6 +76,9 @@ const END_MARK: &str = "__ancient_protector_end__";
 pub struct Detected {
     /// Each agent, and where the login shell finds it.
     pub agents: Vec<(AgentKind, Option<PathBuf>)>,
+    /// The models each found agent lists, for the agents whose CLI lists them (Grok and
+    /// opencode); opencode's are `provider/model`.
+    pub models: Vec<(AgentKind, Vec<String>)>,
     /// Each tool, and where the login shell finds it.
     pub tools: Vec<Tool>,
     /// The `gh` login, or `None` when gh is missing or not logged in.
@@ -110,7 +123,8 @@ pub struct SshHost {
     pub host_name: Option<String>,
 }
 
-/// Detects what this Mac has. Takes a few seconds: it runs the login shell, `gh` twice and
+/// Detects what this Mac has. Takes a few seconds: it runs the login shell, `gh` twice, the
+/// model lists of Grok and opencode side by side (each cut off after [`MODELS_TIMEOUT`]) and
 /// the Keychain lookup.
 ///
 /// Every tool the core runs from then on is found on the login shell's `PATH`, as in the
@@ -128,7 +142,21 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
         command::use_search_path(answer.path.clone());
     }
     let found = |program: &str| answer.as_ref().and_then(|a| a.binary(program));
-    let agents = AGENTS.iter().map(|&a| (a, found(a.binary()))).collect();
+    let agents: Vec<(AgentKind, Option<PathBuf>)> =
+        AGENTS.iter().map(|&a| (a, found(a.binary()))).collect();
+    // Each list takes a second or more and may reach the network, so they run side by side.
+    let models = thread::scope(|scope| {
+        let lists: Vec<_> = agents
+            .iter()
+            .filter_map(|(agent, path)| Some((*agent, path.as_deref()?)))
+            .map(|(agent, path)| scope.spawn(move || Some((agent, listed_models(agent, path)?))))
+            .collect();
+        lists
+            .into_iter()
+            // Listing only parses text, so a panic there is a bug to surface, not "no list".
+            .filter_map(|list| list.join().unwrap_or_else(|p| panic::resume_unwind(p)))
+            .collect()
+    });
     let tools: Vec<Tool> = TOOLS
         .iter()
         .map(|&(program, name)| Tool {
@@ -151,6 +179,7 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
     let folders = project_folders(home);
     Detected {
         agents,
+        models,
         tools,
         gh_login,
         repos,
@@ -158,6 +187,51 @@ fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Dete
         folders,
         nvd_key: nvd_key(),
     }
+}
+
+/// The models `agent` at `binary` lists, or `None` when its CLI has no list (Claude Code takes
+/// aliases, Gemini CLI none, and codex's `debug models` is experimental) or the list fails or
+/// takes longer than [`MODELS_TIMEOUT`].
+fn listed_models(agent: AgentKind, binary: &Path) -> Option<Vec<String>> {
+    let read: fn(&str) -> Vec<String> = match agent {
+        AgentKind::Grok => grok_models,
+        AgentKind::Opencode => opencode_models,
+        AgentKind::Claude | AgentKind::Codex | AgentKind::Gemini => return None,
+    };
+    let out =
+        command::run_with_input(binary.to_str()?, &["models"], b"", MODELS_TIMEOUT).ok()??;
+    out.success.then(|| read(&out.stdout))
+}
+
+/// Reads `grok models`, which lists one model per line after "Available models:", marked `*`
+/// for the default and `-` for the rest (checked with grok on 2026-11-07).
+fn grok_models(out: &str) -> Vec<String> {
+    out.lines()
+        .skip_while(|l| !l.trim_start().starts_with("Available models"))
+        .filter_map(|l| {
+            let rest = l.trim().strip_prefix(['*', '-'])?;
+            let name = rest.split_whitespace().next()?;
+            name.parse::<ModelName>().is_ok().then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Reads `opencode models`, which prints one `provider/model` per line. A provider is a plain
+/// word, so a URL or a warning that happens to hold a `/` is not taken for a model.
+fn opencode_models(out: &str) -> Vec<String> {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| {
+            l.split_once('/').is_some_and(|(provider, model)| {
+                !provider.is_empty()
+                    && !model.is_empty()
+                    && provider
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            }) && l.parse::<ModelName>().is_ok()
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The usual project folders that exist, each once. The default macOS file system ignores
@@ -318,6 +392,46 @@ fn without_comment(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn models_are_listed_by_the_agents_that_list_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            script(&path, body);
+            path
+        };
+        let grok = at(
+            "grok",
+            r#"[ "$1" = models ] && printf 'Available models:\n  * grok-4.7 (default)\n'"#,
+        );
+        let failing = at("failing", "echo 'Available models:'; echo '- x'; exit 1");
+        assert_eq!(
+            listed_models(AgentKind::Grok, &grok),
+            Some(vec!["grok-4.7".to_owned()])
+        );
+        assert_eq!(listed_models(AgentKind::Grok, &failing), None);
+        assert_eq!(listed_models(AgentKind::Claude, &grok), None);
+        assert_eq!(
+            listed_models(AgentKind::Opencode, &at("oc", "echo ollama/qwen3")),
+            Some(vec!["ollama/qwen3".to_owned()])
+        );
+    }
+
+    #[test]
+    fn grok_and_opencode_model_lists_are_read_line_by_line() {
+        let grok = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\n\
+                    Available models:\n  * grok-4.7 (default)\n  - grok-4.6\n  - $(id)\n";
+        assert_eq!(grok_models(grok), ["grok-4.7", "grok-4.6"]);
+        assert_eq!(grok_models("- before the list\n"), Vec::<String>::new());
+        let opencode = "opencode/big-pickle\nollama/gemma4:e4b\n\nWarning: x\n-a/b\n\
+                        https://opencode.ai/x\n/lone\nempty/\n";
+        assert_eq!(
+            opencode_models(opencode),
+            ["opencode/big-pickle", "ollama/gemma4:e4b"]
+        );
+    }
 
     #[test]
     fn the_login_shell_answer_is_read_between_its_marks() {
@@ -345,7 +459,6 @@ mod tests {
 
     /// Writes an executable shell script.
     fn script(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt as _;
         fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }

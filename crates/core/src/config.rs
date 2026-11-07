@@ -4,6 +4,7 @@
 //! [`Config`]. Resolving checks the whole file and reports every problem at once, so one edit
 //! fixes them all. [`Config::load`] returns only valid targets with unique names.
 
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -38,6 +39,9 @@ pub struct Config {
     pub repos: Vec<RepoSlug>,
     /// Servers to sweep, with unique names.
     pub servers: Vec<Server>,
+    /// The model each agent runs with, where the user chose one; otherwise the agent's own
+    /// default.
+    pub models: BTreeMap<AgentKind, ModelName>,
 }
 
 impl Config {
@@ -51,6 +55,7 @@ impl Config {
             project_dirs: Vec::new(),
             repos: Vec::new(),
             servers: Vec::new(),
+            models: BTreeMap::new(),
         }
     }
 
@@ -232,6 +237,53 @@ impl fmt::Display for RepoSlug {
         write!(f, "{}/{}", self.owner, self.name)
     }
 }
+
+/// A model as its agent's CLI takes it after `--model`: `opus`, `grok-4.7`, or for opencode
+/// `provider/model` such as `ollama/gemma4:e4b`.
+///
+/// It is passed as its own argument, never through a shell, so only flag confusion is a risk:
+/// a name never starts with `-`. Up to 128 ASCII letters, digits and `.`, `_`, `-`, `:`, `/`,
+/// `@`; the length is arbitrary, well above every listed model name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelName(String);
+
+impl ModelName {
+    /// The name as the CLI takes it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for ModelName {
+    type Err = ParseModelNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let valid = (1..=128).contains(&s.len())
+            && !s.starts_with('-')
+            && s.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':' | b'/' | b'@')
+            });
+        if valid {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(ParseModelNameError)
+        }
+    }
+}
+
+impl fmt::Display for ModelName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Why a string is not a model name.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "a model is 1-128 letters, digits, '.', '_', '-', ':', '/' or '@', and does not start \
+     with '-'"
+)]
+pub struct ParseModelNameError;
 
 /// Why a string is not an `owner/name` repository.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -426,6 +478,16 @@ pub enum ConfigProblem {
         /// What is wrong with it.
         reason: ParseRepoSlugError,
     },
+    /// A model is not a name an agent's CLI takes.
+    #[error("models.{agent} = {value:?}: {reason}")]
+    Model {
+        /// The agent it is for.
+        agent: AgentKind,
+        /// The value found.
+        value: String,
+        /// Why it is refused.
+        reason: ParseModelNameError,
+    },
     /// A repository is listed twice.
     #[error("github.repos[{index}] = \"{repo}\" is listed twice; remove one")]
     DuplicateRepo {
@@ -515,6 +577,8 @@ struct RawConfig {
     github: RawGithub,
     #[serde(default)]
     servers: Vec<RawServer>,
+    #[serde(default)]
+    models: BTreeMap<AgentKind, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -568,6 +632,7 @@ impl RawConfig {
         let project_dirs = resolve_project_dirs(self.mac.project_dirs, home, &mut problems);
         let repos = resolve_repos(self.github.repos, &mut problems);
         let servers = resolve_servers(self.servers, home, &mut problems);
+        let models = resolve_models(self.models, &mut problems);
 
         if !problems.is_empty() {
             return Err(problems);
@@ -579,8 +644,27 @@ impl RawConfig {
             project_dirs,
             repos,
             servers,
+            models,
         })
     }
+}
+
+fn resolve_models(
+    raw: BTreeMap<AgentKind, String>,
+    problems: &mut Vec<ConfigProblem>,
+) -> BTreeMap<AgentKind, ModelName> {
+    let mut models = BTreeMap::new();
+    for (agent, value) in raw {
+        match value.parse() {
+            Ok(model) => drop(models.insert(agent, model)),
+            Err(reason) => problems.push(ConfigProblem::Model {
+                agent,
+                value,
+                reason,
+            }),
+        }
+    }
+    models
 }
 
 /// A missing `since` means the full history, matching the default config.
@@ -802,7 +886,50 @@ mod tests {
                 project_dirs: vec![],
                 repos: vec![],
                 servers: vec![],
+                models: BTreeMap::new(),
             }
+        );
+    }
+
+    #[test]
+    fn models_are_names_a_cli_takes_after_model() {
+        let config = resolve(
+            r#"
+            [models]
+            claude = "opus"
+            opencode = "ollama/gemma4:e4b"
+            gemini = "gemini-3.1-pro@latest"
+            "#,
+        )
+        .unwrap();
+        let chosen: Vec<&str> = config.models.values().map(ModelName::as_str).collect();
+        assert_eq!(
+            chosen,
+            ["opus", "gemini-3.1-pro@latest", "ollama/gemma4:e4b"]
+        );
+
+        let problems = resolve("models.claude = \"-p\"\nmodels.grok = \"a b\"").unwrap_err();
+        assert_eq!(
+            problems.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                format!("models.claude = \"-p\": {ParseModelNameError}"),
+                format!("models.grok = \"a b\": {ParseModelNameError}"),
+            ]
+        );
+        for bad in ["", "x;y", "$(id)", &"m".repeat(129)] {
+            assert_eq!(
+                bad.parse::<ModelName>(),
+                Err(ParseModelNameError),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            "m".repeat(128).parse::<ModelName>().unwrap().to_string(),
+            "m".repeat(128)
+        );
+        assert!(
+            toml::from_str::<RawConfig>("models.cursor = \"x\"").is_err(),
+            "only known agents"
         );
     }
 

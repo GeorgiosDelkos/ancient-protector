@@ -295,8 +295,7 @@ pub fn sweep(
         Targets::All => true,
         Targets::Only(only) => only == target,
     };
-    let agent = config.agent.ok_or(SweepError::NoAgent)?;
-    let located = agent.locate()?.ok_or(SweepError::AgentNotFound { agent })?;
+    let (agent, located) = locate_configured(config)?;
     let sweeps = data_dir.sweeps_dir();
     let _lock = Lock::acquire(&sweeps)?;
     let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
@@ -968,6 +967,22 @@ fn fetch_nvd(
     found.into_values().collect()
 }
 
+/// The agent the config names, found on the login shell's `PATH`, set to run the model the
+/// config gives it. Sweeps and fixes both start their agent through this, so neither can
+/// forget the model.
+///
+/// # Errors
+///
+/// [`SweepError::NoAgent`] when none is chosen, [`SweepError::AgentNotFound`] when the login
+/// shell does not find it, and the error from running the shell.
+pub(crate) fn locate_configured(config: &Config) -> Result<(AgentKind, Located), SweepError> {
+    let agent = config.agent.ok_or(SweepError::NoAgent)?;
+    let located = agent
+        .locate(config.models.get(&agent))?
+        .ok_or(SweepError::AgentNotFound { agent })?;
+    Ok((agent, located))
+}
+
 /// Runs the agent and validates its findings, once more with the problems if they are
 /// rejected. Returns why there is no verdict otherwise.
 ///
@@ -1462,6 +1477,12 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn no_agent_is_found_until_one_is_chosen() {
+        let err = locate_configured(&Config::default_for_tests()).unwrap_err();
+        assert!(matches!(err, SweepError::NoAgent), "{err}");
+    }
 
     #[test]
     fn target_names_list_the_mac_then_repositories_then_servers() {

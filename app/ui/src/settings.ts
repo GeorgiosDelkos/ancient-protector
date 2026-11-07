@@ -4,12 +4,19 @@
 
 export type Section = "agent" | "schedule" | "mac" | "github" | "servers" | "nvd";
 
+export type SectionLine = {
+  readonly id: Section;
+  readonly title: string;
+  readonly summary: string;
+  readonly attention: boolean;
+};
+
 export type SettingsView = {
-  readonly sections: readonly {
-    readonly id: Section;
+  readonly headline: string;
+  readonly ready: boolean;
+  readonly groups: readonly {
     readonly title: string;
-    readonly summary: string;
-    readonly attention: boolean;
+    readonly sections: readonly SectionLine[];
   }[];
   readonly agents: readonly {
     readonly agent: string;
@@ -18,6 +25,23 @@ export type SettingsView = {
     readonly available: boolean;
     readonly chosen: boolean;
   }[];
+  readonly model: {
+    readonly agent: string;
+    readonly default: boolean;
+    readonly providers: readonly {
+      readonly name: string;
+      readonly label: string;
+      readonly chosen: boolean;
+      readonly models: readonly {
+        readonly value: string;
+        readonly label: string;
+        readonly sub: string | null;
+        readonly chosen: boolean;
+      }[];
+    }[];
+    readonly listed: boolean;
+    readonly hint: string;
+  } | null;
   readonly schedule: {
     readonly automatic: boolean;
     readonly hours: number;
@@ -43,6 +67,11 @@ export type SettingsView = {
     readonly addable: boolean;
   }[];
   readonly nvd_key: boolean;
+  readonly nvd_rates: readonly {
+    readonly label: string;
+    readonly per_30_seconds: number;
+    readonly applies: boolean;
+  }[];
 };
 
 export type Setting =
@@ -54,4 +83,5 @@ export type Setting =
   | { readonly kind: "add_repo"; readonly repo: string }
   | { readonly kind: "remove_repo"; readonly repo: string }
   | { readonly kind: "add_server"; readonly ssh: string }
-  | { readonly kind: "remove_server"; readonly name: string };
+  | { readonly kind: "remove_server"; readonly name: string }
+  | { readonly kind: "model"; readonly agent: string; readonly model: string | null };

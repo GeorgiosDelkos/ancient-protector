@@ -5,18 +5,34 @@ import type { SettingsView } from "./settings.ts";
 
 export function settingsView(changes: Partial<SettingsView> = {}): SettingsView {
   return {
-    sections: [
-      { id: "agent", title: "Agent", summary: "Choose one", attention: true },
-      { id: "schedule", title: "Schedule", summary: "Manual", attention: false },
-      { id: "mac", title: "This Mac", summary: "1 folder", attention: false },
-      { id: "github", title: "GitHub", summary: "0 repositories", attention: false },
-      { id: "servers", title: "Servers", summary: "0 servers", attention: false },
-      { id: "nvd", title: "NVD key", summary: "Not set", attention: true },
+    headline: "1 setting needs you",
+    ready: false,
+    groups: [
+      {
+        title: "Sweeps",
+        sections: [
+          { id: "agent", title: "Agent", summary: "Choose one", attention: true },
+          { id: "schedule", title: "Schedule", summary: "Manual", attention: false },
+        ],
+      },
+      {
+        title: "Targets",
+        sections: [
+          { id: "mac", title: "This Mac", summary: "1 folder", attention: false },
+          { id: "github", title: "GitHub", summary: "0 repositories", attention: false },
+          { id: "servers", title: "Servers", summary: "0 servers", attention: false },
+        ],
+      },
+      {
+        title: "Advisories",
+        sections: [{ id: "nvd", title: "NVD key", summary: "Not set", attention: false }],
+      },
     ],
     agents: [
       { agent: "claude", name: "Claude Code", path: "/bin/claude", available: true, chosen: false },
       { agent: "codex", name: "Codex", path: null, available: false, chosen: false },
     ],
+    model: null,
     schedule: { automatic: false, hours: 6, all_history: true, since: "2025-01-01" },
     folders: [
       { value: "~/code", chosen: true },
@@ -34,6 +50,10 @@ export function settingsView(changes: Partial<SettingsView> = {}): SettingsView 
       { alias: "bad host", host_name: null, addable: false },
     ],
     nvd_key: false,
+    nvd_rates: [
+      { label: "Without a key", per_30_seconds: 5, applies: true },
+      { label: "With a key", per_30_seconds: 50, applies: false },
+    ],
     ...changes,
   };
 }

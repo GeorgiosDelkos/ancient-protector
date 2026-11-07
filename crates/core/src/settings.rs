@@ -76,6 +76,14 @@ pub enum Setting {
         /// Its name.
         name: String,
     },
+    /// The model an agent runs with; `None` leaves it to the agent's own default.
+    Model {
+        /// The agent.
+        agent: AgentKind,
+        /// The model, as the agent's CLI takes it; spaces around it are dropped, and a blank
+        /// one unsets it like `None`.
+        model: Option<String>,
+    },
 }
 
 /// Applies `setting` to the config in `data_dir`, writes it, and returns the config as the
@@ -192,6 +200,7 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), No
             server["ssh"] = value(ssh.as_str());
             servers(doc)?.push(server);
         }
+        Setting::Model { agent, model } => set_model(doc, *agent, model.as_deref())?,
         Setting::RemoveServer { name } => {
             let servers = servers(doc)?;
             servers.retain(|t| t.get("name").and_then(Item::as_str) != Some(name));
@@ -199,6 +208,21 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), No
                 doc.remove("servers");
             }
         }
+    }
+    Ok(())
+}
+
+/// Sets `agent`'s model under `[models]`, or removes it for `None` or a blank one, which leaves
+/// the agent its own default.
+fn set_model(
+    doc: &mut DocumentMut,
+    agent: AgentKind,
+    model: Option<&str>,
+) -> Result<(), NotEditable> {
+    let models = table(doc, "models")?;
+    match model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(model) => models[agent.binary()] = value(model),
+        None => drop(models.remove(agent.binary())),
     }
     Ok(())
 }
@@ -493,6 +517,46 @@ mod tests {
         assert_eq!(config.schedule, Schedule::Manual);
         let config = save(&data_dir, Setting::Agent { agent: None }).unwrap();
         assert_eq!(config.agent, None);
+    }
+
+    #[test]
+    fn a_model_is_set_per_agent_and_unset_back_to_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let model = |agent, model: Option<&str>| Setting::Model {
+            agent,
+            model: model.map(str::to_owned),
+        };
+        save(&data_dir, model(AgentKind::Claude, Some(" opus "))).unwrap();
+        let config = save(
+            &data_dir,
+            model(AgentKind::Opencode, Some("ollama/gemma4:e4b")),
+        )
+        .unwrap();
+        let chosen: Vec<(AgentKind, &str)> = config
+            .models
+            .iter()
+            .map(|(a, m)| (*a, m.as_str()))
+            .collect();
+        assert_eq!(
+            chosen,
+            [
+                (AgentKind::Claude, "opus"),
+                (AgentKind::Opencode, "ollama/gemma4:e4b")
+            ]
+        );
+
+        let config = save(&data_dir, model(AgentKind::Claude, None)).unwrap();
+        assert_eq!(config.models.len(), 1);
+        let config = save(&data_dir, model(AgentKind::Opencode, Some("  "))).unwrap();
+        assert!(config.models.is_empty(), "a blank model is the default");
+        let err = save(&data_dir, model(AgentKind::Grok, Some("--yolo"))).unwrap_err();
+        assert!(err.to_string().contains("models.grok"), "{err}");
+        let text = fs::read_to_string(data_dir.config_file()).unwrap();
+        assert!(
+            !text.contains("yolo"),
+            "a refused model is not written: {text}"
+        );
     }
 
     fn repo_added(repo: &str) -> Setting {

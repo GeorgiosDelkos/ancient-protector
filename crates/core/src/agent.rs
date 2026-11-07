@@ -27,6 +27,7 @@ use std::process::Stdio;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::config::ModelName;
 use crate::inventory::InventoryError;
 use crate::inventory::command;
 
@@ -69,7 +70,7 @@ const BINARY_MARK: &str = "__ancient_protector_binary__";
 const END_MARK: &str = "__ancient_protector_end__";
 
 /// A coding-agent CLI that Ancient Protector can drive headless.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     /// Claude Code (`claude`).
@@ -107,17 +108,30 @@ impl AgentKind {
         }
     }
 
+    /// Who serves the agent's models, or `None` for opencode, whose model names start with
+    /// their provider.
+    pub(crate) fn provider(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("Anthropic"),
+            Self::Grok => Some("xAI"),
+            Self::Codex => Some("OpenAI"),
+            Self::Gemini => Some("Google"),
+            Self::Opencode => None,
+        }
+    }
+
     /// Finds the agent's executable the way a login shell would (zsh reads `.zprofile`, not
     /// `.zshrc`), since an app started at login gets a `PATH` without `~/.local/bin`, nvm or
     /// Homebrew. Returns `None` when the shell cannot find it as a file (an alias or a shell
     /// function does not count).
     ///
-    /// Runs `$SHELL -lc`, which reads the user's shell startup files.
+    /// Runs `$SHELL -lc`, which reads the user's shell startup files. The agent found runs
+    /// `model`, or its own default for `None`.
     ///
     /// # Errors
     ///
     /// Fails when the shell itself cannot be run.
-    pub(crate) fn locate(self) -> Result<Option<Located>, AgentError> {
+    pub(crate) fn locate(self, model: Option<&ModelName>) -> Result<Option<Located>, AgentError> {
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
         let script = format!(
             "printf '%s\\n' {PATH_MARK} \"$PATH\" {BINARY_MARK}; command -v {}; \
@@ -125,7 +139,7 @@ impl AgentKind {
             self.binary()
         );
         match command::run_any_status(&shell, &["-lc", &script]) {
-            Ok(Some(output)) => Ok(parse_located(&output.stdout)),
+            Ok(Some(output)) => Ok(parse_located(&output.stdout, model)),
             Ok(None) => Err(AgentError::NoShell { shell }),
             Err(source) => Err(AgentError::Locate {
                 agent: self,
@@ -142,6 +156,7 @@ impl AgentKind {
         // `brew info *` cannot load a formula from a cloned repository; developer mode is
         // believed to lift that refusal, so it is never passed on.
         command.env_remove("HOMEBREW_DEVELOPER");
+        self.start_args(&mut command, located);
         let bundle = bundle.as_os_str();
         match self {
             Self::Claude => {
@@ -163,12 +178,7 @@ impl AgentKind {
                 command.args(["--deny", "Bash", "--cwd"]).arg(bundle);
             }
             Self::Codex => {
-                command.args([
-                    "exec",
-                    "--sandbox",
-                    "workspace-write",
-                    "--skip-git-repo-check",
-                ]);
+                command.args(["--sandbox", "workspace-write", "--skip-git-repo-check"]);
                 command.arg("-C").arg(bundle).arg(prompt);
             }
             Self::Gemini => {
@@ -176,7 +186,7 @@ impl AgentKind {
             }
             Self::Opencode => {
                 command.env("OPENCODE_CONFIG_CONTENT", opencode_sweep_config());
-                command.args(["run", "--dir"]).arg(bundle).arg(prompt);
+                command.arg("--dir").arg(bundle).arg(prompt);
             }
         }
         command
@@ -188,6 +198,7 @@ impl AgentKind {
     fn fix_command(self, located: &Located, dir: &Path, prompt: &str) -> Command {
         let mut command = Command::new(&located.binary);
         command.current_dir(dir).env("PATH", &located.path);
+        self.start_args(&mut command, located);
         match self {
             Self::Claude => {
                 command.args(["-p", prompt, "--permission-mode", "bypassPermissions"]);
@@ -204,7 +215,6 @@ impl AgentKind {
             }
             Self::Codex => {
                 command.args([
-                    "exec",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "--skip-git-repo-check",
                 ]);
@@ -214,11 +224,26 @@ impl AgentKind {
                 command.args(["-p", prompt, "--approval-mode", "yolo", "--skip-trust"]);
             }
             Self::Opencode => {
-                command.args(["run", "--dangerously-skip-permissions", "--dir"]);
+                command.args(["--dangerously-skip-permissions", "--dir"]);
                 command.arg(dir).arg(prompt);
             }
         }
         command
+    }
+
+    /// Starts the arguments of a headless run: the subcommand codex and opencode need, then
+    /// the chosen model. Every CLI takes `--model` (checked on 2026-11-07 in each `--help`, and
+    /// for codex in its CLI reference); it comes before the prompt, which codex and opencode
+    /// take as their last argument.
+    fn start_args(self, command: &mut Command, located: &Located) {
+        match self {
+            Self::Codex => drop(command.arg("exec")),
+            Self::Opencode => drop(command.arg("run")),
+            Self::Claude | Self::Grok | Self::Gemini => {}
+        }
+        if let Some(model) = &located.model {
+            command.arg("--model").arg(model.as_str());
+        }
     }
 
     /// Runs a restricted sweep in `bundle` with `prompt`, writing the agent's stdout and stderr
@@ -288,6 +313,8 @@ pub(crate) struct Located {
     /// The login shell's `PATH`, so the agent (an npm script, say) and the tools it calls
     /// start as they do in the user's terminal.
     path: OsString,
+    /// The model it runs with, or `None` for its own default.
+    model: Option<ModelName>,
 }
 
 #[cfg(test)]
@@ -297,13 +324,14 @@ impl Located {
         Self {
             binary: binary.to_owned(),
             path: OsString::from("/usr/bin:/bin"),
+            model: None,
         }
     }
 }
 
 /// Reads the marked lines of the login shell's answer: the `PATH`, then exactly one absolute
-/// path to an executable regular file.
-fn parse_located(stdout: &str) -> Option<Located> {
+/// path to an executable regular file. The agent found runs `model`.
+fn parse_located(stdout: &str, model: Option<&ModelName>) -> Option<Located> {
     let lines: Vec<&str> = stdout.lines().collect();
     let at = |mark: &str| lines.iter().position(|l| l.trim() == mark);
     let (path_at, binary_at, end_at) = (at(PATH_MARK)?, at(BINARY_MARK)?, at(END_MARK)?);
@@ -316,6 +344,7 @@ fn parse_located(stdout: &str) -> Option<Located> {
     (binary.is_absolute() && executable).then(|| Located {
         binary,
         path: OsString::from(lines[path_at + 1]),
+        model: model.cloned(),
     })
 }
 
@@ -380,7 +409,45 @@ mod tests {
         Located {
             binary: binary.to_owned(),
             path: OsString::from("/usr/bin:/bin"),
+            model: None,
         }
+    }
+
+    #[test]
+    fn a_chosen_model_comes_before_the_prompt_in_sweeps_and_fixes() {
+        let model: ModelName = "ollama/gemma4:e4b".parse().unwrap();
+        let at = Located {
+            model: Some(model),
+            ..located(Path::new("/bin/x"))
+        };
+        let words = |command: Command| -> Vec<String> {
+            command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        for kind in ALL {
+            let sweep = words(kind.sweep_command(&at, Path::new("/b"), "P"));
+            let fix = words(kind.fix_command(&at, Path::new("/f"), "P"));
+            let start: &[&str] = match kind {
+                AgentKind::Codex => &["exec", "--model", "ollama/gemma4:e4b"],
+                AgentKind::Opencode => &["run", "--model", "ollama/gemma4:e4b"],
+                AgentKind::Claude | AgentKind::Grok | AgentKind::Gemini => {
+                    &["--model", "ollama/gemma4:e4b"]
+                }
+            };
+            assert!(
+                sweep.iter().take(start.len()).eq(start.iter()),
+                "{kind}: {sweep:?}"
+            );
+            assert!(
+                fix.iter().take(start.len()).eq(start.iter()),
+                "{kind}: {fix:?}"
+            );
+        }
+        let default = located(Path::new("/bin/x"));
+        let args = words(AgentKind::Claude.sweep_command(&default, Path::new("/b"), "P"));
+        assert!(!args.iter().any(|a| a == "--model"), "{args:?}");
     }
 
     /// The config name, the binary and the display name are the same word, so a user who
@@ -574,27 +641,35 @@ mod tests {
                  /usr/bin/also-evil\n"
             )
         };
-        let found = parse_located(&answer(agent.to_str().unwrap())).unwrap();
+        let found = parse_located(&answer(agent.to_str().unwrap()), None).unwrap();
         assert_eq!(found.binary, agent);
         assert_eq!(found.path, OsString::from("/a:/b"));
+        assert_eq!(found.model, None);
+        let opus: ModelName = "opus".parse().unwrap();
+        let found = parse_located(&answer(agent.to_str().unwrap()), Some(&opus)).unwrap();
+        assert_eq!(
+            found.model,
+            Some(opus),
+            "the configured model reaches the agent"
+        );
 
         // An alias, a function, a missing file and a file that cannot run are not agents.
-        assert!(parse_located(&answer("alias claude='rm -rf ~'")).is_none());
-        assert!(parse_located(&answer("/nonexistent/claude")).is_none());
+        assert!(parse_located(&answer("alias claude='rm -rf ~'"), None).is_none());
+        assert!(parse_located(&answer("/nonexistent/claude"), None).is_none());
         let plain = tmp.path().join("plain");
         fs::write(&plain, "").unwrap();
-        assert!(parse_located(&answer(plain.to_str().unwrap())).is_none());
-        assert!(parse_located(&answer(tmp.path().to_str().unwrap())).is_none());
+        assert!(parse_located(&answer(plain.to_str().unwrap()), None).is_none());
+        assert!(parse_located(&answer(tmp.path().to_str().unwrap()), None).is_none());
         // `command -v` printed nothing: the next mark follows at once.
         let none = format!("{PATH_MARK}\n/a\n{BINARY_MARK}\n{END_MARK}\n");
-        assert!(parse_located(&none).is_none());
-        assert!(parse_located("no marks at all").is_none());
+        assert!(parse_located(&none, None).is_none());
+        assert!(parse_located("no marks at all", None).is_none());
         // Each mark must be exactly where it belongs, even around a real executable.
         let agent = agent.to_str().unwrap();
         let no_path = format!("{PATH_MARK}\n{BINARY_MARK}\n{agent}\n{END_MARK}\n");
-        assert!(parse_located(&no_path).is_none());
+        assert!(parse_located(&no_path, None).is_none());
         let extra = format!("{PATH_MARK}\n/a\n{BINARY_MARK}\n{agent}\nmore\n{END_MARK}\n");
-        assert!(parse_located(&extra).is_none());
+        assert!(parse_located(&extra, None).is_none());
     }
 
     #[test]

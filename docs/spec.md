@@ -313,6 +313,18 @@ A confirmed fix runs with full access, in its fix folder (flags checked 2026-11-
 <prompt> --approval-mode yolo --skip-trust`, `opencode run --dangerously-skip-permissions --dir
 <dir> <prompt>` (rules the user's own opencode config denies stay denied).
 
+Model (decided 2026-11-07, at the owner's request to choose provider and model): `[models]` in
+`config.toml` maps an agent to the model it runs with (`claude = "opus"`, `opencode =
+"ollama/gemma4:e4b"`); an agent left out runs its own default. Every CLI takes `--model <name>`
+(each `--help` on 2026-11-07, codex in its CLI reference), passed right after `exec` or `run`
+for codex and opencode and first for the others, in sweeps and fixes alike. A model name is up
+to 128 ASCII letters, digits and `. _ - : / @`, never starting with `-`. The settings offer the
+chosen agent's models: Claude Code's aliases (`opus`, `sonnet`, `haiku`), what `grok models`
+and `opencode models` list at detection, and a typed name for any agent (codex's `debug
+models` is experimental and Gemini CLI lists none). The provider is fixed by the agent
+(Anthropic, xAI, OpenAI, Google) except for opencode, whose `provider/model` names group its
+models by provider.
+
 The prompt argument is one line pointing at `PROMPT.md` in the bundle, so the real prompt is a
 file the user can read and edit (`prompts/sweep.md` in the data dir, copied from the built-in
 default on first use). The agent's stdout and stderr go to `agent-<attempt>.log` beside the

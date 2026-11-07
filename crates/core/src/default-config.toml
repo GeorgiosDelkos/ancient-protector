@@ -3,6 +3,10 @@
 # The coding agent that runs sweeps and fixes: claude, grok, codex, gemini or opencode.
 # agent = "claude"
 
+# The model each agent runs with, as its CLI takes it after --model. Leave an agent out to use
+# its own default. opencode names the provider too: opencode = "ollama/gemma4:e4b".
+[models]
+
 # Sweep automatically every N hours (every_hours = 24). Leave it unset to sweep only on
 # demand.
 [schedule]

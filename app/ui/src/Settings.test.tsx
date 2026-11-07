@@ -23,8 +23,23 @@ async function row(name: string): Promise<HTMLElement> {
   return (await screen.findByText(name)).closest("button") as HTMLElement;
 }
 
+/** Whether the switch in the row holding `name` is on. */
+async function on(name: string): Promise<string | null> {
+  return (await row(name)).getAttribute("aria-checked");
+}
+
+/** The width of the meter on NVD's rate line labelled `label`. */
+function meter(label: string): string | undefined {
+  return screen.getByText(label).closest(".rate")?.querySelector("i")?.style.width;
+}
+
+/** The class of NVD's rate line labelled `label`. */
+async function rate(label: string): Promise<string | undefined> {
+  return (await screen.findByText(label)).closest(".rate")?.className;
+}
+
 function pressed(): string | null | undefined {
-  return screen.getByText("Claude Code").closest("button")?.ariaPressed;
+  return screen.getByText("Claude Code").closest("button")?.ariaChecked;
 }
 
 function open(start: Section | null = null) {
@@ -45,17 +60,87 @@ describe("the section list", () => {
     expect(screen.getByText("Looking at what this Mac has…")).toBeTruthy();
     expect(await screen.findByText("Choose one")).toBeTruthy();
     expect(document.querySelector(".banner")).toBeNull();
-    expect(screen.getByText("Choose one").className).toBe("warn");
-    expect(screen.getByText("1 folder").className).toBe("");
+    expect(screen.getByText("Choose one").className).toBe("val warn");
+    expect(screen.getByText("1 folder").className).toBe("val ");
+    expect(screen.getByText("1 folder").title).toBe("1 folder");
     fireEvent.click(screen.getByText("Done"));
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("opens with Rust's headline and the sections in Rust's groups", async () => {
+    answer({ settings_data: () => settingsView() });
+    open();
+    const headline = await screen.findByText("1 setting needs you");
+    expect(headline.closest(".hero")?.className).toBe("hero needs");
+    const labels = screen.getAllByRole("heading").map((h) => h.textContent);
+    expect(labels).toEqual(["Sweeps", "Targets", "Advisories"]);
+    cleanup();
+    answer({ settings_data: () => settingsView({ headline: "Ready to sweep", ready: true }) });
+    open();
+    const ready = await screen.findByText("Ready to sweep");
+    expect(ready.closest(".hero")?.className).toBe("hero ready");
+  });
+
+  it("marks a suggested folder, off until added", async () => {
+    answer({ settings_data: () => settingsView() });
+    open("mac");
+    expect(await on("~/code")).toBe("true");
+    expect(await on("~/src")).toBe("false");
+    expect(within(await row("~/src")).getByText("suggested")).toBeTruthy();
+    expect((await row("~/code")).querySelector(".s")).toBeNull();
+  });
+
+  it("draws each choice's state: switches, radios, segments and meters", async () => {
+    answer({ settings_data: () => settingsView() });
+    open("github");
+    const knob = async (name: string) => (await row(name)).querySelector(".switch")?.className;
+    expect(await knob("me/app")).toBe("switch on");
+    expect(await knob("me/site")).toBe("switch ");
+    expect((await row("me/app")).querySelector(".icon.lock")).toBeTruthy();
+    expect((await row("me/site")).querySelector(".icon.repo")).toBeTruthy();
+    expect(screen.getByText("M").className).toBe("avatar");
+    cleanup();
+    answer({ settings_data: () => settingsView() });
+    open("agent");
+    expect((await row("Claude Code")).querySelector(".radio")?.className).toBe("radio ");
+    cleanup();
+    answer({ settings_data: () => settingsView() });
+    open("schedule");
+    expect((await screen.findByText("Since")).ariaPressed).toBe("false");
+    expect(screen.getByText("All").ariaPressed).toBe("true");
+    expect(screen.getByText("Sweep every").closest("label")?.className).toBe("field-row off");
+    expect(screen.getByText("Advisories since").closest("label")?.className).toBe("field-row off");
+    cleanup();
+    answer({ settings_data: () => settingsView() });
+    open("nvd");
+    await screen.findByText("With a key");
+    expect(meter("With a key")).toBe("100%");
+    expect(screen.getByText("Not set").className).toBe("state warn");
+  });
+
+  it("highlights the NVD rate Rust says applies", async () => {
+    answer({ settings_data: () => settingsView() });
+    open("nvd");
+    expect(await rate("Without a key")).toBe("rate on");
+    expect(await rate("With a key")).toBe("rate ");
+    cleanup();
+    const rates = [
+      { label: "Slow", per_30_seconds: 10, applies: false },
+      { label: "Fast", per_30_seconds: 40, applies: true },
+    ];
+    answer({ settings_data: () => settingsView({ nvd_rates: rates }) });
+    open("nvd");
+    expect(await rate("Fast")).toBe("rate on");
+    expect(meter("Slow")).toBe("25%");
+    expect(meter("Fast")).toBe("100%");
+    expect(screen.getByText("40")).toBeTruthy();
   });
 
   it("opens a section and goes back to the list", async () => {
     answer({ settings_data: () => settingsView() });
     open();
     fireEvent.click(await screen.findByText("This Mac"));
-    expect(screen.getByText("folders searched for lockfiles")).toBeTruthy();
+    expect(screen.getByText("Folders searched for lockfiles")).toBeTruthy();
     fireEvent.click(screen.getByText("Settings"));
     expect(screen.getByText("Choose one")).toBeTruthy();
   });
@@ -121,14 +206,14 @@ describe("a change", () => {
       Promise.reject("mac.project_dirs[1]: use an absolute path"),
     );
     open("mac");
-    fireEvent.click(await screen.findByText("Remove"));
+    fireEvent.click(await screen.findByText("~/code"));
     expect(await screen.findByText(/use an absolute path/)).toBeTruthy();
     expect(screen.queryByText("Saved")).toBeNull();
     expect(screen.getByText("~/code")).toBeTruthy();
   });
 
   it.each([
-    ["mac", "Remove", { kind: "remove_folder", dir: "~/code" }],
+    ["mac", "~/code", { kind: "remove_folder", dir: "~/code" }],
     ["mac", "~/src", { kind: "add_folder", dir: "~/src" }],
     ["github", "me/app", { kind: "remove_repo", repo: "me/app" }],
     ["github", "me/site", { kind: "add_repo", repo: "me/site" }],
@@ -249,9 +334,9 @@ describe("each section shows what Rust found", () => {
     });
     open("github");
     expect(within(await row("me/app")).getByText("private")).toBeTruthy();
-    expect(within(await row("me/app")).getByText("Swept")).toBeTruthy();
+    expect(await on("me/app")).toBe("true");
     expect(within(await row("me/site")).getByText("public")).toBeTruthy();
-    expect(within(await row("me/site")).getByText("Not swept")).toBeTruthy();
+    expect(await on("me/site")).toBe("false");
     expect((await row("other/lib")).querySelector(".s")).toBeNull();
   });
 
@@ -277,7 +362,8 @@ describe("each section shows what Rust found", () => {
     expect(await screen.findByText("ssh web · /srv/app, /srv/api")).toBeTruthy();
     expect(screen.getByText("ssh ops@10.0.0.9:2222")).toBeTruthy();
     expect(screen.queryByText(/No hosts/)).toBeNull();
-    fireEvent.click(screen.getAllByText("Remove")[1] as HTMLElement);
+    expect(await on("web")).toBe("true");
+    fireEvent.click(screen.getByText("box"));
     await screen.findByText("Saved");
     expect(invoke).toHaveBeenCalledWith("save", {
       setting: { kind: "remove_server", name: "box" },
@@ -350,6 +436,202 @@ describe("the schedule", () => {
   });
 });
 
+describe("the model", () => {
+  const opencode = settingsView({
+    model: {
+      agent: "opencode",
+      default: false,
+      listed: true,
+      hint: "Another model",
+      providers: [
+        {
+          name: "opencode",
+          label: "opencode",
+          chosen: false,
+          models: [
+            {
+              value: "opencode/big-pickle",
+              label: "big-pickle",
+              sub: "opencode/big-pickle",
+              chosen: false,
+            },
+          ],
+        },
+        {
+          name: "ollama",
+          label: "ollama",
+          chosen: true,
+          models: [
+            {
+              value: "ollama/gemma4:e4b",
+              label: "gemma4:e4b",
+              sub: "ollama/gemma4:e4b",
+              chosen: true,
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  it("is offered only once an agent is chosen", async () => {
+    answer({ settings_data: () => settingsView() });
+    open("agent");
+    await screen.findByText("Claude Code");
+    expect(screen.queryByText("Model")).toBeNull();
+  });
+
+  it("shows the chosen provider's models, and another provider's on a tap", async () => {
+    answer({ settings_data: () => opencode, save: () => opencode });
+    open("agent");
+    expect((await row("gemma4:e4b")).ariaChecked).toBe("true");
+    expect(within(await row("gemma4:e4b")).getByText("ollama/gemma4:e4b")).toBeTruthy();
+    expect((await row("Default")).ariaChecked).toBe("false");
+    expect(screen.queryByText("big-pickle")).toBeNull();
+    expect(screen.getByRole("button", { name: "ollama" }).ariaPressed).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "opencode" }));
+    expect(screen.getByRole("button", { name: "opencode" }).className).toBe("chip on");
+    fireEvent.click(await screen.findByText("big-pickle"));
+    await screen.findByText("Saved");
+    expect(invoke).toHaveBeenCalledWith("save", {
+      setting: { kind: "model", agent: "opencode", model: "opencode/big-pickle" },
+    });
+    fireEvent.click(screen.getByText("Default"));
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("save", {
+        setting: { kind: "model", agent: "opencode", model: null },
+      }),
+    );
+  });
+
+  it("shows the provider Rust marks once a save returns, whatever tab was open", async () => {
+    // Rust sends a new view with every reply.
+    answer({ settings_data: () => opencode, save: () => structuredClone(opencode) });
+    open("agent");
+    fireEvent.click(await screen.findByRole("button", { name: "opencode" }));
+    expect(await screen.findByText("big-pickle")).toBeTruthy();
+    fireEvent.input(screen.getByPlaceholderText("Another model"), {
+      target: { value: "ollama/gemma4:e4b" },
+    });
+    fireEvent.submit(
+      screen.getByPlaceholderText("Another model").closest("form") as HTMLFormElement,
+    );
+    await screen.findByText("Saved");
+    expect(screen.getByRole("button", { name: "ollama" }).ariaPressed).toBe("true");
+    expect((await row("gemma4:e4b")).ariaChecked).toBe("true");
+  });
+
+  it("clears a typed model when the agent changes", async () => {
+    const claude = settingsView({
+      model: { ...(opencode.model as NonNullable<SettingsView["model"]>), agent: "claude" },
+    });
+    answer({ settings_data: () => opencode, save: () => claude });
+    open("agent");
+    const input = (await screen.findByPlaceholderText("Another model")) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "half typed" } });
+    fireEvent.click(screen.getByText("Claude Code"));
+    await screen.findByText("Saved");
+    expect(input.value).toBe("");
+  });
+
+  it("keeps a typed model that Rust refuses, to be corrected", async () => {
+    answer({ settings_data: () => opencode, save: () => Promise.reject("models.opencode: bad") });
+    open("agent");
+    const input = (await screen.findByPlaceholderText("Another model")) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "a b" } });
+    fireEvent.submit(input.form as HTMLFormElement);
+    expect(await screen.findByText(/models.opencode: bad/)).toBeTruthy();
+    expect(input.value).toBe("a b");
+  });
+
+  it("takes a typed model, and asks for one when the agent lists none", async () => {
+    const gemini = settingsView({
+      model: {
+        agent: "gemini",
+        default: true,
+        listed: false,
+        hint: "Model name, as --model takes it",
+        providers: [],
+      },
+    });
+    answer({ settings_data: () => gemini, save: () => gemini });
+    open("agent");
+    const input = (await screen.findByPlaceholderText(
+      "Model name, as --model takes it",
+    )) as HTMLInputElement;
+    expect(screen.queryByRole("group", { name: "Provider" })).toBeNull();
+    expect((await row("Default")).ariaChecked).toBe("true");
+    expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.input(input, { target: { value: "gemini-3.1-pro" } });
+    fireEvent.submit(input.form as HTMLFormElement);
+    await screen.findByText("Saved");
+    expect(invoke).toHaveBeenCalledWith("save", {
+      setting: { kind: "model", agent: "gemini", model: "gemini-3.1-pro" },
+    });
+    expect(input.value).toBe("");
+    cleanup();
+    answer({ settings_data: () => opencode });
+    open("agent");
+    expect(await screen.findByPlaceholderText("Another model")).toBeTruthy();
+  });
+});
+
+describe("replies out of order", () => {
+  it("drop a Look again reply that a newer change overtook", async () => {
+    const replies: ((view: SettingsView) => void)[] = [];
+    invoke.mockImplementation((command: string) =>
+      command === "settings_data"
+        ? Promise.resolve(settingsView())
+        : new Promise<SettingsView>((resolve) => replies.push(resolve)),
+    );
+    open();
+    fireEvent.click(await screen.findByText("Look again"));
+    fireEvent.click(screen.getByText("Agent"));
+    fireEvent.click(await screen.findByText("Claude Code"));
+    replies[1]?.(settingsView({ headline: "after the change" }));
+    await screen.findByText("Saved");
+    replies[0]?.(settingsView({ headline: "before the change" }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    fireEvent.click(screen.getByText("Settings"));
+    expect(screen.getByText("after the change")).toBeTruthy();
+    expect(screen.queryByText("before the change")).toBeNull();
+  });
+
+  it("show no error from a change a newer one overtook", async () => {
+    const replies: { ok: (v: SettingsView) => void; no: (e: string) => void }[] = [];
+    invoke.mockImplementation((command: string) =>
+      command === "settings_data"
+        ? Promise.resolve(settingsView())
+        : new Promise<SettingsView>((ok, no) => replies.push({ ok, no })),
+    );
+    open("github");
+    fireEvent.click(await screen.findByText("me/site"));
+    fireEvent.click(screen.getByText("me/app"));
+    replies[1]?.ok(settingsView());
+    await screen.findByText("Saved");
+    replies[0]?.no("stale refusal");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(screen.queryByText(/stale refusal/)).toBeNull();
+  });
+
+  it("keep what was typed after a save was sent", async () => {
+    let reply: ((view: SettingsView) => void) | undefined;
+    invoke.mockImplementation((command: string) =>
+      command === "settings_data"
+        ? Promise.resolve(settingsView())
+        : new Promise<SettingsView>((resolve) => (reply = resolve)),
+    );
+    open("github");
+    const input = (await screen.findByPlaceholderText("owner/name")) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "me/one" } });
+    fireEvent.submit(input.form as HTMLFormElement);
+    fireEvent.input(input, { target: { value: "me/two" } });
+    reply?.(settingsView());
+    await screen.findByText("Saved");
+    expect(input.value).toBe("me/two");
+  });
+});
+
 describe("errors", () => {
   it("clear on the next change, and Saved shows only after one succeeds", async () => {
     answer({ settings_data: () => settingsView() });
@@ -357,9 +639,9 @@ describe("errors", () => {
     invoke.mockImplementationOnce(() => Promise.reject("refused"));
     invoke.mockImplementationOnce(() => Promise.resolve(settingsView()));
     open("mac");
-    fireEvent.click(await screen.findByText("Remove"));
+    fireEvent.click(await screen.findByText("~/code"));
     expect(await screen.findByText(/refused/)).toBeTruthy();
-    fireEvent.click(screen.getByText("Remove"));
+    fireEvent.click(screen.getByText("~/code"));
     expect(await screen.findByText("Saved")).toBeTruthy();
     expect(screen.queryByText(/refused/)).toBeNull();
   });
@@ -404,7 +686,7 @@ describe("inputs", () => {
     answer({ settings_data: () => settingsView({ nvd_key: true }) });
     open("nvd");
     expect(await screen.findByPlaceholderText("Replace the stored key")).toBeTruthy();
-    expect(screen.getByText("In Keychain").className).toBe("state right ok");
+    expect(screen.getByText("In Keychain").className).toBe("state ok");
   });
 });
 
@@ -429,7 +711,7 @@ describe("quick changes", () => {
     await screen.findByText("Saved");
     replies[0]?.(settingsView());
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(within((await row("me/app")) as HTMLElement).getByText("Not swept")).toBeTruthy();
-    expect(within(await row("me/site")).getByText("Swept")).toBeTruthy();
+    expect(await on("me/app")).toBe("false");
+    expect(await on("me/site")).toBe("true");
   });
 });

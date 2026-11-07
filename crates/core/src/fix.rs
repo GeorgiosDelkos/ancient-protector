@@ -131,8 +131,7 @@ pub fn plan_fix(data_dir: &DataDir, config: &Config, key: FindingKey) -> Result<
     }
 
     let (destination, access) = access(config, &report.target, key)?;
-    let agent = config.agent.ok_or(SweepError::NoAgent)?;
-    let located = agent.locate()?.ok_or(SweepError::AgentNotFound { agent })?;
+    let (agent, located) = sweep::locate_configured(config)?;
     let brief = json!({
         "key": key,
         "target": report.target,
