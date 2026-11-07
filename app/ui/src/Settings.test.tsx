@@ -84,6 +84,34 @@ describe("the section list", () => {
     expect((await row("~/code")).querySelector(".s")).toBeNull();
   });
 
+  it("draws each choice's state: switches, radios, segments and meters", async () => {
+    answer({ settings_data: () => settingsView() });
+    open("github");
+    const knob = async (name: string) => (await row(name)).querySelector(".switch")?.className;
+    expect(await knob("me/app")).toBe("switch on");
+    expect(await knob("me/site")).toBe("switch ");
+    expect((await row("me/app")).querySelector(".icon.lock")).toBeTruthy();
+    expect((await row("me/site")).querySelector(".icon.repo")).toBeTruthy();
+    expect(screen.getByText("M").className).toBe("avatar");
+    cleanup();
+    answer({ settings_data: () => settingsView() });
+    open("agent");
+    expect((await row("Claude Code")).querySelector(".radio")?.className).toBe("radio ");
+    cleanup();
+    answer({ settings_data: () => settingsView() });
+    open("schedule");
+    expect((await screen.findByText("Since")).ariaPressed).toBe("false");
+    expect(screen.getByText("All").ariaPressed).toBe("true");
+    expect(screen.getByText("Sweep every").closest("label")?.className).toBe("field-row off");
+    expect(screen.getByText("Advisories since").closest("label")?.className).toBe("field-row off");
+    cleanup();
+    answer({ settings_data: () => settingsView() });
+    open("nvd");
+    const meter = (await screen.findByText("With a key")).closest(".rate")?.querySelector("i");
+    expect(meter?.style.width).toBe("100%");
+    expect(screen.getByText("Not set").className).toBe("state warn");
+  });
+
   it("highlights the NVD rate that applies", async () => {
     answer({ settings_data: () => settingsView() });
     open("nvd");
