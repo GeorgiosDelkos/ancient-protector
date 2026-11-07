@@ -628,7 +628,7 @@ button.srow:active:not(:disabled) {
   background: rgba(0, 0, 0, 0.14);
   font-size: 11px;
   line-height: 1.4;
-  color: var(--l3);
+  color: var(--l2);
 }
 .fld-custom {
   display: flex;
@@ -644,7 +644,8 @@ button.srow:active:not(:disabled) {
   min-width: 0;
 }
 /* The menus and the custom-name field share one look: a 1 pixel edge at --l3, about 3:1
-   against the card as a control's edge needs (WCAG 1.4.11), and one focus ring. */
+   against the card as a control's edge needs (WCAG 1.4.11). Focus keeps the popover's 2px
+   outline from style.css and only tints the edge. */
 .menu-pick select,
 .fld-custom .field {
   height: 30px;
@@ -658,10 +659,7 @@ button.srow:active:not(:disabled) {
 }
 .menu-pick select:focus-visible,
 .fld-custom .field:focus-visible {
-  outline: none;
-  box-shadow:
-    inset 0 0 0 1px var(--run),
-    0 0 0 3px color-mix(in srgb, var(--run) 28%, transparent);
+  box-shadow: inset 0 0 0 1px var(--run);
 }
 .menu-pick select {
   appearance: none;

@@ -517,6 +517,7 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
               class="field grow mono"
               placeholder={props.model.hint}
               aria-label="Model name"
+              aria-describedby="model-hint"
               autocomplete="off"
               value={typed()}
               onInput={(e) => setTyped(e.currentTarget.value)}

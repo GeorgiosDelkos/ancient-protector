@@ -709,7 +709,9 @@ describe("the model", () => {
     expect((await menu("model")).value).toBe("-default");
     expect(document.getElementById("provider")).toBeNull();
     await pick("model", "-custom");
-    expect(await screen.findByPlaceholderText("Model name, as --model takes it")).toBeTruthy();
+    const name = await screen.findByPlaceholderText("Model name, as --model takes it");
+    // The field that takes the name hears the same constraint as the menu.
+    expect(described(name)).toMatch(/any name its --model accepts/);
     cleanup();
     const one = opencode.model as NonNullable<SettingsView["model"]>;
     const single = { ...one, providers: one.providers.slice(1) };
