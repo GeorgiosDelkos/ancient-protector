@@ -5,13 +5,28 @@ import type { SettingsView } from "./settings.ts";
 
 export function settingsView(changes: Partial<SettingsView> = {}): SettingsView {
   return {
-    sections: [
-      { id: "agent", title: "Agent", summary: "Choose one", attention: true },
-      { id: "schedule", title: "Schedule", summary: "Manual", attention: false },
-      { id: "mac", title: "This Mac", summary: "1 folder", attention: false },
-      { id: "github", title: "GitHub", summary: "0 repositories", attention: false },
-      { id: "servers", title: "Servers", summary: "0 servers", attention: false },
-      { id: "nvd", title: "NVD key", summary: "Not set", attention: true },
+    headline: "2 settings need you",
+    ready: false,
+    groups: [
+      {
+        title: "Sweeps",
+        sections: [
+          { id: "agent", title: "Agent", summary: "Choose one", attention: true },
+          { id: "schedule", title: "Schedule", summary: "Manual", attention: false },
+        ],
+      },
+      {
+        title: "Targets",
+        sections: [
+          { id: "mac", title: "This Mac", summary: "1 folder", attention: false },
+          { id: "github", title: "GitHub", summary: "0 repositories", attention: false },
+          { id: "servers", title: "Servers", summary: "0 servers", attention: false },
+        ],
+      },
+      {
+        title: "Advisories",
+        sections: [{ id: "nvd", title: "NVD key", summary: "Not set", attention: true }],
+      },
     ],
     agents: [
       { agent: "claude", name: "Claude Code", path: "/bin/claude", available: true, chosen: false },

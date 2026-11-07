@@ -23,6 +23,16 @@ async function row(name: string): Promise<HTMLElement> {
   return (await screen.findByText(name)).closest("button") as HTMLElement;
 }
 
+/** Whether the switch in the row holding `name` is on. */
+async function on(name: string): Promise<string | null> {
+  return (await row(name)).getAttribute("aria-checked");
+}
+
+/** The class of NVD's rate line labelled `label`. */
+async function rate(label: string): Promise<string | undefined> {
+  return (await screen.findByText(label)).closest(".rate")?.className;
+}
+
 function pressed(): string | null | undefined {
   return screen.getByText("Claude Code").closest("button")?.ariaPressed;
 }
@@ -51,11 +61,45 @@ describe("the section list", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("opens with Rust's headline and the sections in Rust's groups", async () => {
+    answer({ settings_data: () => settingsView() });
+    open();
+    const headline = await screen.findByText("2 settings need you");
+    expect(headline.closest(".hero")?.className).toBe("hero needs");
+    const labels = screen.getAllByRole("heading").map((h) => h.textContent);
+    expect(labels).toEqual(["Sweeps", "Targets", "Advisories"]);
+    cleanup();
+    answer({ settings_data: () => settingsView({ headline: "Ready to sweep", ready: true }) });
+    open();
+    const ready = await screen.findByText("Ready to sweep");
+    expect(ready.closest(".hero")?.className).toBe("hero ready");
+  });
+
+  it("marks a suggested folder, off until added", async () => {
+    answer({ settings_data: () => settingsView() });
+    open("mac");
+    expect(await on("~/code")).toBe("true");
+    expect(await on("~/src")).toBe("false");
+    expect(within(await row("~/src")).getByText("suggested")).toBeTruthy();
+    expect((await row("~/code")).querySelector(".s")).toBeNull();
+  });
+
+  it("highlights the NVD rate that applies", async () => {
+    answer({ settings_data: () => settingsView() });
+    open("nvd");
+    expect(await rate("Without a key")).toBe("rate on");
+    expect(await rate("With a key")).toBe("rate ");
+    cleanup();
+    answer({ settings_data: () => settingsView({ nvd_key: true }) });
+    open("nvd");
+    expect(await rate("With a key")).toBe("rate on");
+  });
+
   it("opens a section and goes back to the list", async () => {
     answer({ settings_data: () => settingsView() });
     open();
     fireEvent.click(await screen.findByText("This Mac"));
-    expect(screen.getByText("folders searched for lockfiles")).toBeTruthy();
+    expect(screen.getByText("Folders searched for lockfiles")).toBeTruthy();
     fireEvent.click(screen.getByText("Settings"));
     expect(screen.getByText("Choose one")).toBeTruthy();
   });
@@ -121,14 +165,14 @@ describe("a change", () => {
       Promise.reject("mac.project_dirs[1]: use an absolute path"),
     );
     open("mac");
-    fireEvent.click(await screen.findByText("Remove"));
+    fireEvent.click(await screen.findByText("~/code"));
     expect(await screen.findByText(/use an absolute path/)).toBeTruthy();
     expect(screen.queryByText("Saved")).toBeNull();
     expect(screen.getByText("~/code")).toBeTruthy();
   });
 
   it.each([
-    ["mac", "Remove", { kind: "remove_folder", dir: "~/code" }],
+    ["mac", "~/code", { kind: "remove_folder", dir: "~/code" }],
     ["mac", "~/src", { kind: "add_folder", dir: "~/src" }],
     ["github", "me/app", { kind: "remove_repo", repo: "me/app" }],
     ["github", "me/site", { kind: "add_repo", repo: "me/site" }],
@@ -249,9 +293,9 @@ describe("each section shows what Rust found", () => {
     });
     open("github");
     expect(within(await row("me/app")).getByText("private")).toBeTruthy();
-    expect(within(await row("me/app")).getByText("Swept")).toBeTruthy();
+    expect(await on("me/app")).toBe("true");
     expect(within(await row("me/site")).getByText("public")).toBeTruthy();
-    expect(within(await row("me/site")).getByText("Not swept")).toBeTruthy();
+    expect(await on("me/site")).toBe("false");
     expect((await row("other/lib")).querySelector(".s")).toBeNull();
   });
 
@@ -277,7 +321,8 @@ describe("each section shows what Rust found", () => {
     expect(await screen.findByText("ssh web · /srv/app, /srv/api")).toBeTruthy();
     expect(screen.getByText("ssh ops@10.0.0.9:2222")).toBeTruthy();
     expect(screen.queryByText(/No hosts/)).toBeNull();
-    fireEvent.click(screen.getAllByText("Remove")[1] as HTMLElement);
+    expect(await on("web")).toBe("true");
+    fireEvent.click(screen.getByText("box"));
     await screen.findByText("Saved");
     expect(invoke).toHaveBeenCalledWith("save", {
       setting: { kind: "remove_server", name: "box" },
@@ -357,9 +402,9 @@ describe("errors", () => {
     invoke.mockImplementationOnce(() => Promise.reject("refused"));
     invoke.mockImplementationOnce(() => Promise.resolve(settingsView()));
     open("mac");
-    fireEvent.click(await screen.findByText("Remove"));
+    fireEvent.click(await screen.findByText("~/code"));
     expect(await screen.findByText(/refused/)).toBeTruthy();
-    fireEvent.click(screen.getByText("Remove"));
+    fireEvent.click(screen.getByText("~/code"));
     expect(await screen.findByText("Saved")).toBeTruthy();
     expect(screen.queryByText(/refused/)).toBeNull();
   });
@@ -404,7 +449,7 @@ describe("inputs", () => {
     answer({ settings_data: () => settingsView({ nvd_key: true }) });
     open("nvd");
     expect(await screen.findByPlaceholderText("Replace the stored key")).toBeTruthy();
-    expect(screen.getByText("In Keychain").className).toBe("state right ok");
+    expect(screen.getByText("In Keychain").className).toBe("state ok");
   });
 });
 
@@ -429,7 +474,7 @@ describe("quick changes", () => {
     await screen.findByText("Saved");
     replies[0]?.(settingsView());
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(within((await row("me/app")) as HTMLElement).getByText("Not swept")).toBeTruthy();
-    expect(within(await row("me/site")).getByText("Swept")).toBeTruthy();
+    expect(await on("me/app")).toBe("false");
+    expect(await on("me/site")).toBe("true");
   });
 });

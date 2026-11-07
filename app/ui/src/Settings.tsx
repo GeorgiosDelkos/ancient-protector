@@ -1,11 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { JSX } from "solid-js";
 import { For, Match, Show, Switch, createResource, createSignal } from "solid-js";
 
 import { Icon } from "./icons.tsx";
-import type { Section, Setting, SettingsView } from "./settings.ts";
+import type { IconName } from "./icons.tsx";
+import type { Section, SectionLine, Setting, SettingsView } from "./settings.ts";
 
-/** Settings inside the popover: a list of sections, each opening on its own with Back. Every
- * value and choice comes from Rust; a change returns the settings as they now are. */
+/** Each section's icon and the line under its title. Copy only: what a section holds and
+ * whether it needs the user come from Rust. */
+const PAGES: Record<Section, { readonly icon: IconName; readonly blurb: string }> = {
+  agent: { icon: "agent", blurb: "Runs each sweep and, after you confirm, each fix." },
+  schedule: { icon: "clock", blurb: "When sweeps run, and how far back the first one looks." },
+  mac: { icon: "mac", blurb: "Lockfiles in these folders, and the tools on this Mac." },
+  github: {
+    icon: "repo",
+    blurb: "Dependencies, alerts and workflows of the repositories you pick.",
+  },
+  servers: { icon: "server", blurb: "Read over SSH with a fixed, read-only script." },
+  nvd: { icon: "key", blurb: "Optional. Makes the first sweep about ten times faster." },
+};
+
+/** Settings inside the popover: grouped sections, each opening on its own page with Back.
+ * Every value and choice comes from Rust; a change returns the settings as they now are. */
 export function Settings(props: { start: Section | null; onClose: () => void }) {
   const [view, { mutate }] = createResource(() => invoke<SettingsView>("settings_data"));
   const [section, setSection] = createSignal<Section | null>(props.start);
@@ -40,10 +56,12 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
       .catch((e: unknown) => setError(String(e)))
       .finally(() => setLooking(false));
   };
-  // Reading an errored resource throws, so the title checks first.
-  const title = () =>
-    (view.error === undefined ? view() : undefined)?.sections.find((s) => s.id === section())
-      ?.title ?? "Settings";
+  // Reading an errored resource throws, so check for an error first.
+  const loaded = () => (view.error === undefined ? view() : undefined);
+  const line = () =>
+    loaded()
+      ?.groups.flatMap((g) => g.sections)
+      .find((s) => s.id === section());
 
   return (
     <section class="settings-view">
@@ -56,10 +74,15 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
           <Icon name="chev" />
           {section() === null ? "Done" : "Settings"}
         </button>
-        <span class="navtitle">{title()}</span>
-        <Show when={saved()} fallback={<span class="navside" />}>
-          <span class="navside savedtag">Saved</span>
-        </Show>
+        <span class="navtitle">{line()?.title ?? "Settings"}</span>
+        <span class="navside">
+          <Show when={saved()}>
+            <span class="savedtag">
+              <Icon name="check" />
+              Saved
+            </span>
+          </Show>
+        </span>
       </div>
       <Show when={error() ?? (view.error === undefined ? null : String(view.error))}>
         {(e) => (
@@ -72,7 +95,7 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
         )}
       </Show>
       <Show
-        when={view.error === undefined ? view() : undefined}
+        when={loaded()}
         fallback={
           <Show when={view.loading}>
             <p class="quiet">Looking at what this Mac has…</p>
@@ -80,64 +103,179 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
         }
       >
         {(v) => (
-          <Switch>
-            <Match when={section() === null}>
-              <div class="group list">
-                <For each={v().sections}>
-                  {(s) => (
-                    <button type="button" class="srow nav-row" onClick={() => setSection(s.id)}>
-                      <span class={`sicon ${s.id}`} aria-hidden="true">
-                        {s.title.slice(0, 1)}
-                      </span>
-                      <span class="t">{s.title}</span>
-                      <span class="sum">
-                        <span class={s.attention ? "warn" : ""}>{s.summary}</span>
-                        <Icon name="chev" />
-                      </span>
-                    </button>
-                  )}
-                </For>
-              </div>
-              <p class="note">
-                Saved to config.toml as you change it.{" "}
-                <button type="button" class="link" onClick={() => void invoke("open_config")}>
-                  Open config.toml
-                </button>{" "}
-                ·{" "}
-                <button type="button" class="link" disabled={looking()} onClick={lookAgain}>
-                  {looking() ? "Looking…" : "Look again"}
-                </button>
-              </p>
-            </Match>
-            <Match when={section() === "agent"}>
-              <Agent view={v()} save={save} />
-            </Match>
-            <Match when={section() === "schedule"}>
-              <ScheduleSection view={v()} save={save} />
-            </Match>
-            <Match when={section() === "mac"}>
-              <Mac
-                view={v()}
-                save={save}
-                onAdd={() => update(invoke<SettingsView | null>("add_folder"))}
-              />
-            </Match>
-            <Match when={section() === "github"}>
-              <GitHub view={v()} save={save} />
-            </Match>
-            <Match when={section() === "servers"}>
-              <Servers view={v()} save={save} />
-            </Match>
-            <Match when={section() === "nvd"}>
-              <Nvd
-                view={v()}
-                onSave={(key) => update(invoke<SettingsView>("set_nvd_key", { key }))}
-              />
-            </Match>
-          </Switch>
+          <Show
+            when={line()}
+            fallback={
+              <Overview view={v()} looking={looking()} onOpen={setSection} onLook={lookAgain} />
+            }
+          >
+            {(l) => (
+              <Page line={l()}>
+                <Switch>
+                  <Match when={l().id === "agent"}>
+                    <Agent view={v()} save={save} />
+                  </Match>
+                  <Match when={l().id === "schedule"}>
+                    <ScheduleSection view={v()} save={save} />
+                  </Match>
+                  <Match when={l().id === "mac"}>
+                    <Mac
+                      view={v()}
+                      save={save}
+                      onAdd={() => update(invoke<SettingsView | null>("add_folder"))}
+                    />
+                  </Match>
+                  <Match when={l().id === "github"}>
+                    <GitHub view={v()} save={save} />
+                  </Match>
+                  <Match when={l().id === "servers"}>
+                    <Servers view={v()} save={save} />
+                  </Match>
+                  <Match when={l().id === "nvd"}>
+                    <Nvd
+                      view={v()}
+                      onSave={(key) => update(invoke<SettingsView>("set_nvd_key", { key }))}
+                    />
+                  </Match>
+                </Switch>
+              </Page>
+            )}
+          </Show>
         )}
       </Show>
     </section>
+  );
+}
+
+/** The list of sections under Rust's headline. */
+function Overview(props: {
+  view: SettingsView;
+  looking: boolean;
+  onOpen: (section: Section) => void;
+  onLook: () => void;
+}) {
+  return (
+    <div class="page">
+      <div class={`hero ${props.view.ready ? "ready" : "needs"}`}>
+        <span class="tile big shield" aria-hidden="true">
+          <Icon name="shield" />
+        </span>
+        <span class="what">
+          <span class="hero-title">{props.view.headline}</span>
+          <span class="hero-sub">Changes save to config.toml as you make them.</span>
+        </span>
+      </div>
+      <For each={props.view.groups}>
+        {(group) => (
+          <div class="block">
+            <h2 class="label">{group.title}</h2>
+            <div class="group list">
+              <For each={group.sections}>
+                {(s) => <SectionRow line={s} onOpen={() => props.onOpen(s.id)} />}
+              </For>
+            </div>
+          </div>
+        )}
+      </For>
+      <div class="footer">
+        <button type="button" class="foot-btn" onClick={() => void invoke("open_config")}>
+          <Icon name="doc" />
+          Open config.toml
+        </button>
+        <button type="button" class="foot-btn" disabled={props.looking} onClick={props.onLook}>
+          <span class={props.looking ? "spin" : "still"}>
+            <Icon name="sweep" />
+          </span>
+          {props.looking ? "Looking…" : "Look again"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SectionRow(props: { line: SectionLine; onOpen: () => void }) {
+  return (
+    <button type="button" class="srow nav-row" onClick={() => props.onOpen()}>
+      <span class={`tile ${props.line.id}`} aria-hidden="true">
+        <Icon name={PAGES[props.line.id].icon} />
+      </span>
+      <span class="t">{props.line.title}</span>
+      <span class="sum">
+        <Show when={props.line.attention}>
+          <i class="dot" aria-hidden="true" />
+        </Show>
+        <span class={props.line.attention ? "warn" : ""}>{props.line.summary}</span>
+        <Icon name="chev" />
+      </span>
+    </button>
+  );
+}
+
+/** A section's page: its icon, title and what it is for, then its content. */
+function Page(props: { line: SectionLine; children: JSX.Element }) {
+  const page = () => PAGES[props.line.id];
+  return (
+    <div class="page enter">
+      <div class="head">
+        <span class={`tile big ${props.line.id}`} aria-hidden="true">
+          <Icon name={page().icon} />
+        </span>
+        <span class="what">
+          <h1>{props.line.title}</h1>
+          <span class="blurb">{page().blurb}</span>
+        </span>
+      </div>
+      {props.children}
+    </div>
+  );
+}
+
+/** A row that turns something on or off, such as sweeping a repository. */
+function Toggle(props: {
+  on: boolean;
+  title: string;
+  icon: IconName;
+  sub?: JSX.Element;
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      class="srow toggle"
+      role="switch"
+      aria-checked={props.on}
+      disabled={props.disabled === true}
+      onClick={() => props.onToggle()}
+    >
+      <span class="lead-icon">
+        <Icon name={props.icon} />
+      </span>
+      <span class="what">
+        <span class="t">{props.title}</span>
+        <Show when={props.sub}>
+          <span class="s">{props.sub}</span>
+        </Show>
+      </span>
+      <span class={`switch ${props.on ? "on" : ""}`} aria-hidden="true" />
+    </button>
+  );
+}
+
+/** Two choices side by side, one of them on. */
+function Segmented(props: {
+  choices: readonly { label: string; on: boolean; pick: () => void }[];
+}) {
+  return (
+    <span class="seg wide">
+      <For each={props.choices}>
+        {(c) => (
+          <button type="button" aria-pressed={c.on} class={c.on ? "on" : ""} onClick={c.pick}>
+            {c.label}
+          </button>
+        )}
+      </For>
+    </span>
   );
 }
 
@@ -145,14 +283,13 @@ type Props = { view: SettingsView; save: (setting: Setting) => void };
 
 function Agent(props: Props) {
   return (
-    <section class="section">
-      <p class="lead">runs sweeps and, after you confirm, fixes</p>
-      <div class="group">
+    <div class="block">
+      <div class="group list">
         <For each={props.view.agents}>
           {(agent) => (
             <button
               type="button"
-              class="srow"
+              class="srow choice"
               disabled={!agent.available}
               aria-pressed={agent.chosen}
               onClick={() => props.save({ kind: "agent", agent: agent.agent })}
@@ -170,283 +307,289 @@ function Agent(props: Props) {
         </For>
       </div>
       <p class="note">Found through your login shell, the same way a sweep starts the agent.</p>
-    </section>
+    </div>
   );
 }
 
 function ScheduleSection(props: Props) {
   const s = () => props.view.schedule;
   return (
-    <section class="section">
-      <div class="line">
-        <span class="seg">
-          <button
-            type="button"
-            class={s().automatic ? "" : "on"}
-            onClick={() => props.save({ kind: "schedule", every_hours: null })}
-          >
-            Manual
-          </button>
-          <button
-            type="button"
-            class={s().automatic ? "on" : ""}
-            onClick={() => props.save({ kind: "schedule", every_hours: s().hours })}
-          >
-            Every
-          </button>
-        </span>
-        <input
-          id="hours"
-          class="field num"
-          type="number"
-          min="1"
-          max="168"
-          value={s().hours}
-          disabled={!s().automatic}
-          onChange={(e) =>
-            props.save({ kind: "schedule", every_hours: Number(e.currentTarget.value) })
-          }
-        />
-        <span class="dim">hours</span>
+    <>
+      <div class="block">
+        <h2 class="label">Sweeps</h2>
+        <div class="group pad">
+          <Segmented
+            choices={[
+              {
+                label: "Manual",
+                on: !s().automatic,
+                pick: () => props.save({ kind: "schedule", every_hours: null }),
+              },
+              {
+                label: "Every",
+                on: s().automatic,
+                pick: () => props.save({ kind: "schedule", every_hours: s().hours }),
+              },
+            ]}
+          />
+          <label class={`field-row ${s().automatic ? "" : "off"}`} for="hours">
+            <span>Sweep every</span>
+            <input
+              id="hours"
+              class="field num"
+              type="number"
+              min="1"
+              max="168"
+              value={s().hours}
+              disabled={!s().automatic}
+              onChange={(e) =>
+                props.save({ kind: "schedule", every_hours: Number(e.currentTarget.value) })
+              }
+            />
+            <span class="dim">hours</span>
+          </label>
+        </div>
       </div>
-      <h2>History</h2>
-      <p class="note">How far back the first advisory download goes; later sweeps fetch changes.</p>
-      <div class="line">
-        <span class="seg">
-          <button
-            type="button"
-            class={s().all_history ? "on" : ""}
-            onClick={() => props.save({ kind: "history", since: "all" })}
-          >
-            All
-          </button>
-          <button
-            type="button"
-            class={s().all_history ? "" : "on"}
-            onClick={() => props.save({ kind: "history", since: s().since })}
-          >
-            Since
-          </button>
-        </span>
-        <input
-          id="since"
-          class="field"
-          type="date"
-          value={s().since}
-          disabled={s().all_history}
-          onChange={(e) => props.save({ kind: "history", since: e.currentTarget.value })}
-        />
+      <div class="block">
+        <h2 class="label">History</h2>
+        <div class="group pad">
+          <Segmented
+            choices={[
+              {
+                label: "All",
+                on: s().all_history,
+                pick: () => props.save({ kind: "history", since: "all" }),
+              },
+              {
+                label: "Since",
+                on: !s().all_history,
+                pick: () => props.save({ kind: "history", since: s().since }),
+              },
+            ]}
+          />
+          <label class={`field-row ${s().all_history ? "off" : ""}`} for="since">
+            <span>Advisories since</span>
+            <input
+              id="since"
+              class="field"
+              type="date"
+              value={s().since}
+              disabled={s().all_history}
+              onChange={(e) => props.save({ kind: "history", since: e.currentTarget.value })}
+            />
+          </label>
+        </div>
+        <p class="note">
+          How far back the first advisory download goes; later sweeps fetch changes.
+        </p>
       </div>
-    </section>
+    </>
   );
 }
 
 function Mac(props: Props & { onAdd: () => void }) {
   return (
-    <section class="section">
-      <p class="lead">folders searched for lockfiles</p>
-      <Show when={props.view.folders.length > 0}>
-        <div class="group">
+    <>
+      <div class="block">
+        <h2 class="label">Folders searched for lockfiles</h2>
+        <div class="group list">
           <For each={props.view.folders}>
             {(dir) => (
-              <Show
-                when={dir.chosen}
-                fallback={
-                  <button
-                    type="button"
-                    class="srow"
-                    onClick={() => props.save({ kind: "add_folder", dir: dir.value })}
-                  >
-                    <span class="chk" />
-                    <span class="what">
-                      <span class="t">{dir.value}</span>
-                    </span>
-                    <span class="state sugg">Add</span>
-                  </button>
+              <Toggle
+                on={dir.chosen}
+                icon="folder"
+                title={dir.value}
+                {...(dir.chosen ? {} : { sub: "suggested" })}
+                onToggle={() =>
+                  props.save({
+                    kind: dir.chosen ? "remove_folder" : "add_folder",
+                    dir: dir.value,
+                  })
                 }
+              />
+            )}
+          </For>
+          <button type="button" class="srow add" onClick={() => props.onAdd()}>
+            <span class="lead-icon">
+              <Icon name="plus" />
+            </span>
+            <span class="t">Add folder…</span>
+          </button>
+        </div>
+      </div>
+      <div class="block">
+        <h2 class="label">Tools a Mac sweep reads</h2>
+        <div class="tools">
+          <For each={props.view.tools}>
+            {(tool) => (
+              <span
+                class={`tool ${tool.path === null ? "no" : ""}`}
+                title={tool.path ?? "not found"}
               >
-                <div class="srow static">
-                  <span class="chk on" />
-                  <span class="what">
-                    <span class="t">{dir.value}</span>
-                  </span>
-                  <button
-                    type="button"
-                    class="btn small"
-                    onClick={() => props.save({ kind: "remove_folder", dir: dir.value })}
-                  >
-                    Remove
-                  </button>
-                </div>
-              </Show>
+                <i />
+                {tool.name}
+              </span>
             )}
           </For>
         </div>
-      </Show>
-      <div class="line">
-        <button type="button" class="btn" onClick={() => props.onAdd()}>
-          Add folder…
-        </button>
+        <p class="note">The ones not installed are skipped.</p>
       </div>
-      <h2>Tools a Mac sweep reads</h2>
-      <div class="tools">
-        <For each={props.view.tools}>
-          {(tool) => (
-            <span class={`tool ${tool.path === null ? "no" : ""}`} title={tool.path ?? "not found"}>
-              <i />
-              {tool.name}
-            </span>
-          )}
-        </For>
-      </div>
-      <p class="note">The ones not installed are skipped.</p>
-    </section>
+    </>
   );
 }
 
 function GitHub(props: Props) {
   const [typed, setTyped] = createSignal("");
   return (
-    <section class="section">
-      <div class="status-line">
-        <Show
-          when={props.view.gh_login}
-          fallback={
-            <>
-              <span class="lead">Run gh auth login in a terminal to list your repositories.</span>
-              <span class="state warn right">gh not logged in</span>
-            </>
-          }
+    <>
+      <div class="group">
+        <div class="srow account">
+          <Show
+            when={props.view.gh_login}
+            fallback={
+              <>
+                <span class="avatar off">?</span>
+                <span class="what">
+                  <span class="t">Not signed in</span>
+                  <span class="s">Run gh auth login in a terminal to list your repositories.</span>
+                </span>
+                <span class="state warn">gh not logged in</span>
+              </>
+            }
+          >
+            {(login) => (
+              <>
+                <span class="avatar">{login().slice(0, 1).toUpperCase()}</span>
+                <span class="what">
+                  <span class="t">{login()}</span>
+                  <span class="s">signed in with gh</span>
+                </span>
+                <span class="state ok">gh ready</span>
+              </>
+            )}
+          </Show>
+        </div>
+      </div>
+      <div class="block">
+        <h2 class="label">Repositories</h2>
+        <div class="group list scroll">
+          <For each={props.view.repos}>
+            {(repo) => (
+              <Toggle
+                on={repo.chosen}
+                icon={repo.private === true ? "lock" : "repo"}
+                title={repo.repo}
+                {...(repo.private === null ? {} : { sub: repo.private ? "private" : "public" })}
+                onToggle={() =>
+                  props.save({ kind: repo.chosen ? "remove_repo" : "add_repo", repo: repo.repo })
+                }
+              />
+            )}
+          </For>
+        </div>
+        <form
+          class="inline-add"
+          onSubmit={(e) => {
+            e.preventDefault();
+            props.save({ kind: "add_repo", repo: typed() });
+            setTyped("");
+          }}
         >
-          {(login) => (
-            <>
-              <span class="lead">Your repositories, with your gh login {login()}.</span>
-              <span class="state ok right">gh ready</span>
-            </>
-          )}
-        </Show>
+          <input
+            id="repo"
+            class="field grow"
+            placeholder="owner/name"
+            aria-label="Another repository"
+            value={typed()}
+            onInput={(e) => setTyped(e.currentTarget.value)}
+          />
+          <button type="submit" class="btn" disabled={typed().trim() === ""}>
+            Add
+          </button>
+        </form>
       </div>
-      <div class="group scroll">
-        <For each={props.view.repos}>
-          {(repo) => (
-            <button
-              type="button"
-              class="srow"
-              aria-pressed={repo.chosen}
-              onClick={() =>
-                props.save({ kind: repo.chosen ? "remove_repo" : "add_repo", repo: repo.repo })
-              }
-            >
-              <span class={`chk ${repo.chosen ? "on" : ""}`} />
-              <span class="what">
-                <span class="t">{repo.repo}</span>
-                <Show when={repo.private !== null}>
-                  <span class="s">{repo.private === true ? "private" : "public"}</span>
-                </Show>
-              </span>
-              <span class={`state ${repo.chosen ? "ok" : "no"}`}>
-                {repo.chosen ? "Swept" : "Not swept"}
-              </span>
-            </button>
-          )}
-        </For>
-      </div>
-      <form
-        class="line"
-        onSubmit={(e) => {
-          e.preventDefault();
-          props.save({ kind: "add_repo", repo: typed() });
-          setTyped("");
-        }}
-      >
-        <input
-          id="repo"
-          class="field grow"
-          placeholder="owner/name"
-          value={typed()}
-          onInput={(e) => setTyped(e.currentTarget.value)}
-        />
-        <button type="submit" class="btn" disabled={typed().trim() === ""}>
-          Add
-        </button>
-      </form>
-    </section>
+    </>
   );
 }
 
 function Servers(props: Props) {
   return (
-    <section class="section">
-      <p class="lead">read over SSH with a fixed, read-only script</p>
-      <div class="group scroll">
-        <For each={props.view.servers}>
-          {(server) => (
-            <div class="srow static">
-              <span class="chk on" />
-              <span class="what">
-                <span class="t">{server.name}</span>
-                <span class="s">
-                  ssh {server.reach}
-                  <Show when={server.dirs.length > 0}> · {server.dirs.join(", ")}</Show>
-                </span>
-              </span>
-              <button
-                type="button"
-                class="btn small"
-                onClick={() => props.save({ kind: "remove_server", name: server.name })}
-              >
-                Remove
-              </button>
-            </div>
-          )}
-        </For>
-        <For each={props.view.hosts}>
-          {(host) => (
-            <button
-              type="button"
-              class="srow"
-              disabled={!host.addable}
-              onClick={() => props.save({ kind: "add_server", ssh: host.alias })}
-            >
-              <span class="chk" />
-              <span class="what">
-                <span class="t">{host.alias}</span>
-                <span class="s">
-                  from ~/.ssh/config{host.host_name === null ? "" : ` · ${host.host_name}`}
-                </span>
-              </span>
-              <span class="state sugg">Add</span>
-            </button>
-          )}
-        </For>
-      </div>
-      <Show when={props.view.servers.length === 0 && props.view.hosts.length === 0}>
-        <p class="quiet">No hosts in ~/.ssh/config. Add one there, or edit config.toml.</p>
+    <div class="block">
+      <Show
+        when={props.view.servers.length > 0 || props.view.hosts.length > 0}
+        fallback={
+          <p class="empty">No hosts in ~/.ssh/config. Add one there, or edit config.toml.</p>
+        }
+      >
+        <div class="group list scroll">
+          <For each={props.view.servers}>
+            {(server) => (
+              <Toggle
+                on
+                icon="server"
+                title={server.name}
+                sub={
+                  <>
+                    ssh {server.reach}
+                    <Show when={server.dirs.length > 0}> · {server.dirs.join(", ")}</Show>
+                  </>
+                }
+                onToggle={() => props.save({ kind: "remove_server", name: server.name })}
+              />
+            )}
+          </For>
+          <For each={props.view.hosts}>
+            {(host) => (
+              <Toggle
+                on={false}
+                icon="server"
+                title={host.alias}
+                sub={`from ~/.ssh/config${host.host_name === null ? "" : ` · ${host.host_name}`}`}
+                disabled={!host.addable}
+                onToggle={() => props.save({ kind: "add_server", ssh: host.alias })}
+              />
+            )}
+          </For>
+        </div>
       </Show>
       <p class="note">
         A host needs its key in ~/.ssh/known_hosts and a login that does not prompt. Folders to
         search for lockfiles are set in config.toml.
       </p>
-    </section>
+    </div>
   );
 }
 
 function Nvd(props: { view: SettingsView; onSave: (key: string) => void }) {
   const [key, setKey] = createSignal("");
   return (
-    <section class="section">
-      <div class="status-line">
-        <span class="lead">Optional, and free from nvd.nist.gov.</span>
-        <span class={`state right ${props.view.nvd_key ? "ok" : "warn"}`}>
-          {props.view.nvd_key ? "In Keychain" : "Not set"}
-        </span>
+    <>
+      <div class="group">
+        <div class="srow account">
+          <span class="lead-icon">
+            <Icon name="key" />
+          </span>
+          <span class="what">
+            <span class="t">NVD API key</span>
+            <span class="s">free from nvd.nist.gov</span>
+          </span>
+          <span class={`state ${props.view.nvd_key ? "ok" : "warn"}`}>
+            {props.view.nvd_key ? "In Keychain" : "Not set"}
+          </span>
+        </div>
       </div>
-      <p class="lead">
-        Without a key, NVD allows 5 requests per 30 seconds, so a first sweep of a Mac with many
-        Homebrew formulae takes several minutes. A key raises that to 50.
-      </p>
+      <div class="block">
+        <h2 class="label">Requests NVD allows per 30 seconds</h2>
+        <div class="group pad rates">
+          <Rate label="Without a key" value={5} on={!props.view.nvd_key} />
+          <Rate label="With a key" value={50} on={props.view.nvd_key} />
+        </div>
+        <p class="note">
+          Without a key, a first sweep of a Mac with many Homebrew formulae takes several minutes.
+        </p>
+      </div>
       <form
-        class="line"
+        class="inline-add"
         onSubmit={(e) => {
           e.preventDefault();
           props.onSave(key());
@@ -458,6 +601,7 @@ function Nvd(props: { view: SettingsView; onSave: (key: string) => void }) {
           class="field grow mono"
           type="password"
           autocomplete="off"
+          aria-label="NVD API key"
           placeholder={props.view.nvd_key ? "Replace the stored key" : "Paste your key"}
           value={key()}
           onInput={(e) => setKey(e.currentTarget.value)}
@@ -469,6 +613,19 @@ function Nvd(props: { view: SettingsView; onSave: (key: string) => void }) {
       <p class="note">
         Stored in your Keychain (service ancient-protector), never in config.toml or a report.
       </p>
-    </section>
+    </>
+  );
+}
+
+/** One of NVD's two published rate limits, drawn against the higher one (50). */
+function Rate(props: { label: string; value: number; on: boolean }) {
+  return (
+    <div class={`rate ${props.on ? "on" : ""}`}>
+      <span class="rate-label">{props.label}</span>
+      <span class="meter">
+        <i style={{ width: `${props.value * 2}%` }} />
+      </span>
+      <span class="rate-n">{props.value}</span>
+    </div>
   );
 }

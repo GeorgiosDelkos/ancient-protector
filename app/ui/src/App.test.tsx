@@ -86,7 +86,9 @@ describe("the popover", () => {
     render(() => <App />);
     expect(await screen.findByText("Choose an agent to start")).toBeTruthy();
     fireEvent.click(screen.getByText("Choose an agent"));
-    expect(await screen.findByText("runs sweeps and, after you confirm, fixes")).toBeTruthy();
+    expect(
+      await screen.findByText("Runs each sweep and, after you confirm, each fix."),
+    ).toBeTruthy();
   });
 
   it("lists the findings in the order Rust ranked them, with its headline", async () => {

@@ -28,7 +28,7 @@ export function Glyph(props: { severity: Severity }) {
   );
 }
 
-type IconName =
+export type IconName =
   | "sweep"
   | "wrench"
   | "mac"
@@ -38,7 +38,15 @@ type IconName =
   | "check"
   | "done"
   | "wait"
-  | "chev";
+  | "chev"
+  | "agent"
+  | "clock"
+  | "key"
+  | "folder"
+  | "plus"
+  | "lock"
+  | "doc"
+  | "shield";
 
 const PATHS: Record<IconName, string> = {
   sweep: "M13.5 8A5.5 5.5 0 1 1 11.9 4.1M13.5 2.5v3h-3",
@@ -53,6 +61,15 @@ const PATHS: Record<IconName, string> = {
   done: "M5 8.2 7.1 10.2 11 5.9",
   wait: "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11z",
   chev: "M10 3.5 5.5 8l4.5 4.5",
+  agent: "M2.5 4.5 6 8l-3.5 3.5M8 12h5.5",
+  clock: "M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zM8 4.8V8l2.3 1.6",
+  key: "M5.5 4.3a2.9 2.9 0 1 0 0 5.8 2.9 2.9 0 0 0 0-5.8zM8.4 7.2h6M12.4 7.2v2.4M14.4 7.2v1.8",
+  folder: "M2 4.2a1 1 0 0 1 1-1h3.2l1.5 1.6H13a1 1 0 0 1 1 1v6.4a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z",
+  plus: "M8 3v10M3 8h10",
+  lock: "M4.5 7.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1zM5.5 7.5V5.3a2.5 2.5 0 0 1 5 0v2.2",
+  doc: "M4 1.8h5.2L12.5 5v8.2a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2.8a1 1 0 0 1 1-1zM9 1.8V5h3.5M5.5 8.5h5M5.5 11h3.5",
+  shield:
+    "M8 1.6 13.2 3.5v4.1c0 3.2-2.2 5.6-5.2 6.8-3-1.2-5.2-3.6-5.2-6.8V3.5zM5.6 8l1.7 1.7 3.2-3.4",
 };
 
 /** A line icon, drawn in the current text colour. */

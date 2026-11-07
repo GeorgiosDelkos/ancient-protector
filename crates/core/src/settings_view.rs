@@ -1,6 +1,6 @@
 //! What the settings show, worked out from the config and what [`crate::detect`] found, so the
-//! app's UI only lays it out: each section's one-line summary, the choices in it, and which
-//! are chosen.
+//! app's UI only lays it out: the headline, the sections in their groups with each one's
+//! one-line summary, the choices in them, and which are chosen.
 //!
 //! Folders are shown as people write them (`~/code`) and compared after `~/` expansion;
 //! repositories are compared ignoring case, as GitHub does. Folders and repositories in the
@@ -32,8 +32,12 @@ const DEFAULT_SINCE: &str = "2025-01-01";
 /// The settings' content.
 #[derive(Debug, Serialize)]
 pub struct SettingsView {
-    /// Each section, in order, with its summary.
-    pub sections: Vec<SectionLine>,
+    /// The top line: "Ready to sweep", "2 settings need you".
+    pub headline: String,
+    /// Whether no section needs the user.
+    pub ready: bool,
+    /// The sections in their groups, in order, each with its summary.
+    pub groups: Vec<SectionGroup>,
     /// The agents, chosen or not, found or not.
     pub agents: Vec<AgentChoice>,
     /// The schedule and history.
@@ -70,6 +74,15 @@ pub enum Section {
     Servers,
     /// The NVD API key.
     Nvd,
+}
+
+/// Sections listed together under a title.
+#[derive(Debug, Serialize)]
+pub struct SectionGroup {
+    /// The group's title: "Sweeps", "Targets".
+    pub title: &'static str,
+    /// Its sections, in order.
+    pub sections: Vec<SectionLine>,
 }
 
 /// A section's line in the list.
@@ -195,8 +208,16 @@ pub fn settings_view(config: &Config, detected: &Detected, home: &Path) -> Setti
                 && SshWord::parse(&h.alias).is_some(),
         })
         .collect();
+    let groups = groups(config, detected);
+    let attention = groups
+        .iter()
+        .flat_map(|g| &g.sections)
+        .filter(|s| s.attention)
+        .count();
     SettingsView {
-        sections: sections(config, detected),
+        headline: headline(attention),
+        ready: attention == 0,
+        groups,
         agents: detected
             .agents
             .iter()
@@ -226,7 +247,7 @@ pub fn settings_view(config: &Config, detected: &Detected, home: &Path) -> Setti
     }
 }
 
-fn sections(config: &Config, detected: &Detected) -> Vec<SectionLine> {
+fn groups(config: &Config, detected: &Detected) -> Vec<SectionGroup> {
     let line = |id, title, summary: String, attention| SectionLine {
         id,
         title,
@@ -243,34 +264,62 @@ fn sections(config: &Config, detected: &Detected) -> Vec<SectionLine> {
     } else {
         "Not set"
     };
+    let group = |title, sections| SectionGroup { title, sections };
     vec![
-        line(
-            Section::Agent,
-            "Agent",
-            agent.to_owned(),
-            config.agent.is_none(),
+        group(
+            "Sweeps",
+            vec![
+                line(
+                    Section::Agent,
+                    "Agent",
+                    agent.to_owned(),
+                    config.agent.is_none(),
+                ),
+                line(Section::Schedule, "Schedule", schedule, false),
+            ],
         ),
-        line(Section::Schedule, "Schedule", schedule, false),
-        line(
-            Section::Mac,
-            "This Mac",
-            count(config.project_dirs.len(), "folder", "folders"),
-            false,
+        group(
+            "Targets",
+            vec![
+                line(
+                    Section::Mac,
+                    "This Mac",
+                    count(config.project_dirs.len(), "folder", "folders"),
+                    false,
+                ),
+                line(
+                    Section::Github,
+                    "GitHub",
+                    count(config.repos.len(), "repository", "repositories"),
+                    false,
+                ),
+                line(
+                    Section::Servers,
+                    "Servers",
+                    count(config.servers.len(), "server", "servers"),
+                    false,
+                ),
+            ],
         ),
-        line(
-            Section::Github,
-            "GitHub",
-            count(config.repos.len(), "repository", "repositories"),
-            false,
+        group(
+            "Advisories",
+            vec![line(
+                Section::Nvd,
+                "NVD key",
+                nvd.to_owned(),
+                !detected.nvd_key,
+            )],
         ),
-        line(
-            Section::Servers,
-            "Servers",
-            count(config.servers.len(), "server", "servers"),
-            false,
-        ),
-        line(Section::Nvd, "NVD key", nvd.to_owned(), !detected.nvd_key),
     ]
+}
+
+/// "Ready to sweep" once nothing needs the user, else how many sections do.
+fn headline(attention: usize) -> String {
+    match attention {
+        0 => "Ready to sweep".to_owned(),
+        1 => "1 setting needs you".to_owned(),
+        n => format!("{n} settings need you"),
+    }
 }
 
 fn count(n: usize, one: &str, many: &str) -> String {
@@ -426,9 +475,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn one_section_that_needs_the_user_reads_as_one() {
+        let mut found = detected();
+        found.nvd_key = true;
+        let view = settings_view(&config(""), &found, Path::new(HOME));
+        assert_eq!(view.headline, "1 setting needs you");
+        assert!(!view.ready);
+    }
+
     fn summaries(view: &SettingsView) -> Vec<(&str, &str, bool)> {
-        view.sections
+        view.groups
             .iter()
+            .flat_map(|g| &g.sections)
             .map(|s| (s.title, s.summary.as_str(), s.attention))
             .collect()
     }
@@ -447,6 +506,10 @@ mod tests {
                 ("NVD key", "Not set", true),
             ]
         );
+        assert_eq!(view.headline, "2 settings need you");
+        assert!(!view.ready);
+        let titles: Vec<&str> = view.groups.iter().map(|g| g.title).collect();
+        assert_eq!(titles, ["Sweeps", "Targets", "Advisories"]);
         assert!(view.agents.iter().all(|a| !a.chosen));
         assert_eq!(view.agents[0].name, "Claude Code");
         assert!(view.agents[0].available);
@@ -494,6 +557,8 @@ dirs = ["/srv/app"]
                 ("NVD key", "In Keychain", false),
             ]
         );
+        assert_eq!(view.headline, "Ready to sweep");
+        assert!(view.ready);
         assert!(view.agents[0].chosen);
         let s = &view.schedule;
         assert_eq!(

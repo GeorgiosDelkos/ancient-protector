@@ -4,12 +4,19 @@
 
 export type Section = "agent" | "schedule" | "mac" | "github" | "servers" | "nvd";
 
+export type SectionLine = {
+  readonly id: Section;
+  readonly title: string;
+  readonly summary: string;
+  readonly attention: boolean;
+};
+
 export type SettingsView = {
-  readonly sections: readonly {
-    readonly id: Section;
+  readonly headline: string;
+  readonly ready: boolean;
+  readonly groups: readonly {
     readonly title: string;
-    readonly summary: string;
-    readonly attention: boolean;
+    readonly sections: readonly SectionLine[];
   }[];
   readonly agents: readonly {
     readonly agent: string;
