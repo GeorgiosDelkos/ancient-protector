@@ -60,6 +60,7 @@ export type Overview = {
   readonly counts: Counts;
   readonly headline: string;
   readonly last_swept: string | null;
+  readonly first_sweep_hint: string | null;
   readonly all_clear: boolean;
   readonly target_count: string;
   readonly targets: readonly TargetLine[];
