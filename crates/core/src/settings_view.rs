@@ -79,13 +79,6 @@ pub struct NvdRate {
     pub applies: bool,
 }
 
-/// NVD's limits as the settings show them: each one's label, its rate, and whether it is the
-/// one with a key.
-const NVD_RATES: [(&str, u32, bool); 2] = [
-    ("Without a key", NVD_PER_30_SECONDS_ANONYMOUS, false),
-    ("With a key", NVD_PER_30_SECONDS_WITH_KEY, true),
-];
-
 /// A section of the settings.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -322,11 +315,18 @@ pub fn settings_view(config: &Config, detected: &Detected, home: &Path) -> Setti
         servers,
         hosts,
         nvd_key: detected.nvd_key,
-        nvd_rates: NVD_RATES.map(|(label, per_30_seconds, with_key)| NvdRate {
-            label,
-            per_30_seconds,
-            applies: with_key == detected.nvd_key,
-        }),
+        nvd_rates: [
+            NvdRate {
+                label: "Without a key",
+                per_30_seconds: NVD_PER_30_SECONDS_ANONYMOUS,
+                applies: !detected.nvd_key,
+            },
+            NvdRate {
+                label: "With a key",
+                per_30_seconds: NVD_PER_30_SECONDS_WITH_KEY,
+                applies: detected.nvd_key,
+            },
+        ],
     }
 }
 

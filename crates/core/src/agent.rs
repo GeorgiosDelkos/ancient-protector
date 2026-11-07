@@ -139,10 +139,7 @@ impl AgentKind {
             self.binary()
         );
         match command::run_any_status(&shell, &["-lc", &script]) {
-            Ok(Some(output)) => Ok(parse_located(&output.stdout).map(|found| Located {
-                model: model.cloned(),
-                ..found
-            })),
+            Ok(Some(output)) => Ok(parse_located(&output.stdout, model)),
             Ok(None) => Err(AgentError::NoShell { shell }),
             Err(source) => Err(AgentError::Locate {
                 agent: self,
@@ -333,8 +330,8 @@ impl Located {
 }
 
 /// Reads the marked lines of the login shell's answer: the `PATH`, then exactly one absolute
-/// path to an executable regular file.
-fn parse_located(stdout: &str) -> Option<Located> {
+/// path to an executable regular file. The agent found runs `model`.
+fn parse_located(stdout: &str, model: Option<&ModelName>) -> Option<Located> {
     let lines: Vec<&str> = stdout.lines().collect();
     let at = |mark: &str| lines.iter().position(|l| l.trim() == mark);
     let (path_at, binary_at, end_at) = (at(PATH_MARK)?, at(BINARY_MARK)?, at(END_MARK)?);
@@ -347,7 +344,7 @@ fn parse_located(stdout: &str) -> Option<Located> {
     (binary.is_absolute() && executable).then(|| Located {
         binary,
         path: OsString::from(lines[path_at + 1]),
-        model: None,
+        model: model.cloned(),
     })
 }
 
@@ -644,27 +641,35 @@ mod tests {
                  /usr/bin/also-evil\n"
             )
         };
-        let found = parse_located(&answer(agent.to_str().unwrap())).unwrap();
+        let found = parse_located(&answer(agent.to_str().unwrap()), None).unwrap();
         assert_eq!(found.binary, agent);
         assert_eq!(found.path, OsString::from("/a:/b"));
+        assert_eq!(found.model, None);
+        let opus: ModelName = "opus".parse().unwrap();
+        let found = parse_located(&answer(agent.to_str().unwrap()), Some(&opus)).unwrap();
+        assert_eq!(
+            found.model,
+            Some(opus),
+            "the configured model reaches the agent"
+        );
 
         // An alias, a function, a missing file and a file that cannot run are not agents.
-        assert!(parse_located(&answer("alias claude='rm -rf ~'")).is_none());
-        assert!(parse_located(&answer("/nonexistent/claude")).is_none());
+        assert!(parse_located(&answer("alias claude='rm -rf ~'"), None).is_none());
+        assert!(parse_located(&answer("/nonexistent/claude"), None).is_none());
         let plain = tmp.path().join("plain");
         fs::write(&plain, "").unwrap();
-        assert!(parse_located(&answer(plain.to_str().unwrap())).is_none());
-        assert!(parse_located(&answer(tmp.path().to_str().unwrap())).is_none());
+        assert!(parse_located(&answer(plain.to_str().unwrap()), None).is_none());
+        assert!(parse_located(&answer(tmp.path().to_str().unwrap()), None).is_none());
         // `command -v` printed nothing: the next mark follows at once.
         let none = format!("{PATH_MARK}\n/a\n{BINARY_MARK}\n{END_MARK}\n");
-        assert!(parse_located(&none).is_none());
-        assert!(parse_located("no marks at all").is_none());
+        assert!(parse_located(&none, None).is_none());
+        assert!(parse_located("no marks at all", None).is_none());
         // Each mark must be exactly where it belongs, even around a real executable.
         let agent = agent.to_str().unwrap();
         let no_path = format!("{PATH_MARK}\n{BINARY_MARK}\n{agent}\n{END_MARK}\n");
-        assert!(parse_located(&no_path).is_none());
+        assert!(parse_located(&no_path, None).is_none());
         let extra = format!("{PATH_MARK}\n/a\n{BINARY_MARK}\n{agent}\nmore\n{END_MARK}\n");
-        assert!(parse_located(&extra).is_none());
+        assert!(parse_located(&extra, None).is_none());
     }
 
     #[test]

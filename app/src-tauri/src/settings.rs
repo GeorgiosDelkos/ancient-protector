@@ -61,8 +61,7 @@ pub(crate) fn detect_at_start(app: AppHandle) {
 )]
 pub(crate) fn settings_data(app: AppHandle) -> Result<SettingsView, String> {
     // Detection takes seconds, so the config is read after it, as Look again does: a change
-    // saved meanwhile shows. The other commands find detection done, as the settings open
-    // through this one first.
+    // saved meanwhile shows.
     if app.state::<Detection>().lock().is_none() {
         detect_now(&app);
     }
