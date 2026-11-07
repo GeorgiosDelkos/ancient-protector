@@ -16,7 +16,7 @@ and the user can approve a fix the agent then performs.
 
 | Area | Decision |
 |---|---|
-| Name | Vigil (2026-11-07; was Ancient Protector, which the owner found not technical enough). Mark: a ring around a vertical slit, an eye that stays open; sources in `app/src-tauri/icons/src/` |
+| Name | Vigil (2026-11-07; was Ancient Protector, which the owner found not technical enough). Mark: one spiral arm of dots growing outward, a sweep spreading from a point; sources and the script that draws them in `app/src-tauri/icons/src/`. The data folder and the Keychain service use the bundle id `io.github.georgiosdelkos.vigil`, as `vigil` alone is generic enough for another app to share |
 | Outcome | Report, and fix on per-finding approval |
 | Who decides "affected" | The agent. The app only narrows input |
 | Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
@@ -34,7 +34,7 @@ and the user can approve a fix the agent then performs.
 | Lifecycle | Dismiss with reason, diff vs last sweep, fix history (see "Lifecycle") |
 | Concurrency | One agent run per target, sequential |
 | UI | Tauri 2 + SolidJS/TS; one popover holding findings, details and settings; every value it shows is worked out in Rust, the UI only lays it out |
-| Storage | Files in `~/Library/Application Support/vigil/` |
+| Storage | Files in `~/Library/Application Support/io.github.georgiosdelkos.vigil/` |
 | CLI | Yes, thin CLI over the same core |
 | Distribution | Personal build first; signed + notarized DMG later; launch at login |
 | v1 | All three targets |
@@ -67,7 +67,7 @@ Core modules (one concept each):
 ### Data layout
 
 ```
-~/Library/Application Support/vigil/
+~/Library/Application Support/io.github.georgiosdelkos.vigil/
   config.toml
   prompts/{sweep,sweep-github,sweep-server,fix}.md
   feeds/osv/<id>.json, feeds/nvd/<product>.json
@@ -408,8 +408,9 @@ Built in step 9a (2026-11-06):
 
 - Settings were first only shown, with "Edit settings" opening `config.toml`; step 9b edits
   them in the popover. The config is read again on every refresh.
-- The tray icon is a coloured dot: green (nothing open), yellow, orange or red (worst open
-  severity), blue (sweeping), grey (the last sweep failed or a target got no verdict).
+- The tray icon is the mark: in the menu bar's own colour (nothing open), slate, amber or red
+  (worst open severity: low, medium, or critical and high), blue (sweeping), and an unfinished
+  spiral in the bar's colour (the last sweep failed or a target got no verdict).
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
   counts by severity, the six most severe open findings with their keys and fixes on hover,
   Sweep now, Edit settings, Launch at login (the autostart plugin's LaunchAgent) and Quit. It
@@ -424,8 +425,8 @@ Built in step 9a (2026-11-06):
   one is new, and when its last report cannot be read none is, so nothing is notified twice).
 - A tray click within 300 ms of the popover hiding on blur leaves it hidden: clicking the icon
   first takes focus from the open popover, then delivers the click.
-- Accepted: the grey "last sweep failed" dot is kept in memory, so after the app restarts the
-  dot shows the open findings until the next sweep.
+- Accepted: the "last sweep failed" icon is kept in memory, so after the app restarts the
+  icon shows the open findings until the next sweep.
 - Licenses: Tauri brings in MPL-2.0 crates (cssparser, selectors and others); MPL-2.0 was
   allowed for all crates by the owner on 2026-11-06. `cargo deny` checks only the macOS
   targets, so GTK and D-Bus crates (Linux only, with open advisories) are left out.

@@ -23,9 +23,9 @@ impl DataDir {
     }
 
     /// Returns the standard macOS location for the user whose home is `home`:
-    /// `~/Library/Application Support/vigil`.
+    /// `~/Library/Application Support/io.github.georgiosdelkos.vigil`.
     pub fn for_home(home: &Path) -> Self {
-        Self::new(home.join("Library/Application Support/vigil"))
+        Self::new(home.join("Library/Application Support/io.github.georgiosdelkos.vigil"))
     }
 
     /// Returns the path of `config.toml`.
@@ -173,11 +173,13 @@ mod tests {
         let dir = DataDir::for_home(Path::new("/Users/me"));
         assert_eq!(
             dir.config_file(),
-            Path::new("/Users/me/Library/Application Support/vigil/config.toml")
+            Path::new(
+                "/Users/me/Library/Application Support/io.github.georgiosdelkos.vigil/config.toml"
+            )
         );
         assert_eq!(
             dir.feeds_dir(),
-            Path::new("/Users/me/Library/Application Support/vigil/feeds")
+            Path::new("/Users/me/Library/Application Support/io.github.georgiosdelkos.vigil/feeds")
         );
     }
 }

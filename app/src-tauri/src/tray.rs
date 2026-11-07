@@ -1,6 +1,6 @@
-//! The menu-bar icon, Vigil's mark: a ring around a slit. Its colour shows the worst open
-//! finding or a running sweep, a broken ring shows a failure, and a left click shows or hides
-//! the popover under it.
+//! The menu-bar icon, Vigil's mark: a spiral arm of dots. Its colour shows the worst open
+//! finding or a running sweep, an unfinished spiral shows a failure, and a left click shows or
+//! hides the popover under it.
 
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -144,8 +144,9 @@ impl Look {
     }
 
     /// Whether macOS draws the icon in the menu bar's own colour, as it does the system's.
-    /// Only the looks without a colour are: nothing open, and a failure, which its broken ring
-    /// tells apart. The others keep their colour, which reads on a light and a dark bar alike.
+    /// Only the looks without a colour are: nothing open, and a failure, which its unfinished
+    /// spiral tells apart. The others keep their colour, which reads on a light and a dark bar
+    /// alike.
     fn template(self) -> bool {
         match self {
             Self::Clean | Self::Failed => true,
@@ -187,8 +188,9 @@ pub(crate) fn refresh(app: &AppHandle) {
     };
     let look = look(app);
     // Best effort: a stale icon is corrected by the next change.
-    drop(tray.set_icon(Some(look.image())));
-    drop(tray.set_icon_as_template(look.template()));
+    // One call for both: `set_icon` alone redraws without the template flag, so setting the
+    // flag after it would flash the black template pixels on a dark menu bar.
+    drop(tray.set_icon_with_as_template(Some(look.image()), look.template()));
     drop(tray.set_tooltip(Some(look.tooltip())));
 }
 

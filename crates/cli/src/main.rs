@@ -36,7 +36,7 @@ use vigil_core::undismiss;
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Cli {
-    /// Data directory [default: ~/Library/Application Support/vigil].
+    /// Data directory [default: ~/Library/Application Support/io.github.georgiosdelkos.vigil].
     #[arg(long, global = true, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 
@@ -53,8 +53,8 @@ enum Command {
     /// Fetch advisories for packages and NVD products, one JSON object per line.
     ///
     /// Uses `history.since` from config.toml. An NVD API key stored in the Keychain with
-    /// `security add-generic-password -s vigil -a nvd-api-key -w <key>` raises
-    /// NVD's rate limit from 5 to 50 requests per 30 seconds.
+    /// `security add-generic-password -s io.github.georgiosdelkos.vigil -a nvd-api-key -w <key>`
+    /// raises NVD's rate limit from 5 to 50 requests per 30 seconds.
     #[command(group(
         ArgGroup::new("what")
             .required(true)
