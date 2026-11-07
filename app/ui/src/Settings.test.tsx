@@ -28,6 +28,11 @@ async function on(name: string): Promise<string | null> {
   return (await row(name)).getAttribute("aria-checked");
 }
 
+/** The width of the meter on NVD's rate line labelled `label`. */
+function meter(label: string): string | undefined {
+  return screen.getByText(label).closest(".rate")?.querySelector("i")?.style.width;
+}
+
 /** The class of NVD's rate line labelled `label`. */
 async function rate(label: string): Promise<string | undefined> {
   return (await screen.findByText(label)).closest(".rate")?.className;
@@ -108,20 +113,27 @@ describe("the section list", () => {
     cleanup();
     answer({ settings_data: () => settingsView() });
     open("nvd");
-    const meter = (await screen.findByText("With a key")).closest(".rate")?.querySelector("i");
-    expect(meter?.style.width).toBe("100%");
+    await screen.findByText("With a key");
+    expect(meter("With a key")).toBe("100%");
     expect(screen.getByText("Not set").className).toBe("state warn");
   });
 
-  it("highlights the NVD rate that applies", async () => {
+  it("highlights the NVD rate Rust says applies", async () => {
     answer({ settings_data: () => settingsView() });
     open("nvd");
     expect(await rate("Without a key")).toBe("rate on");
     expect(await rate("With a key")).toBe("rate ");
     cleanup();
-    answer({ settings_data: () => settingsView({ nvd_key: true }) });
+    const rates = [
+      { label: "Slow", per_30_seconds: 10, applies: false },
+      { label: "Fast", per_30_seconds: 40, applies: true },
+    ];
+    answer({ settings_data: () => settingsView({ nvd_rates: rates }) });
     open("nvd");
-    expect(await rate("With a key")).toBe("rate on");
+    expect(await rate("Fast")).toBe("rate on");
+    expect(meter("Slow")).toBe("25%");
+    expect(meter("Fast")).toBe("100%");
+    expect(screen.getByText("40")).toBeTruthy();
   });
 
   it("opens a section and goes back to the list", async () => {
@@ -509,6 +521,19 @@ describe("the model", () => {
     expect((await row("gemma4:e4b")).ariaChecked).toBe("true");
   });
 
+  it("clears a typed model when the agent changes", async () => {
+    const claude = settingsView({
+      model: { ...(opencode.model as NonNullable<SettingsView["model"]>), agent: "claude" },
+    });
+    answer({ settings_data: () => opencode, save: () => claude });
+    open("agent");
+    const input = (await screen.findByPlaceholderText("Another model")) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "half typed" } });
+    fireEvent.click(screen.getByText("Claude Code"));
+    await screen.findByText("Saved");
+    expect(input.value).toBe("");
+  });
+
   it("keeps a typed model that Rust refuses, to be corrected", async () => {
     answer({ settings_data: () => opencode, save: () => Promise.reject("models.opencode: bad") });
     open("agent");
@@ -548,6 +573,62 @@ describe("the model", () => {
     answer({ settings_data: () => opencode });
     open("agent");
     expect(await screen.findByPlaceholderText("Another model")).toBeTruthy();
+  });
+});
+
+describe("replies out of order", () => {
+  it("drop a Look again reply that a newer change overtook", async () => {
+    const replies: ((view: SettingsView) => void)[] = [];
+    invoke.mockImplementation((command: string) =>
+      command === "settings_data"
+        ? Promise.resolve(settingsView())
+        : new Promise<SettingsView>((resolve) => replies.push(resolve)),
+    );
+    open();
+    fireEvent.click(await screen.findByText("Look again"));
+    fireEvent.click(screen.getByText("Agent"));
+    fireEvent.click(await screen.findByText("Claude Code"));
+    replies[1]?.(settingsView({ headline: "after the change" }));
+    await screen.findByText("Saved");
+    replies[0]?.(settingsView({ headline: "before the change" }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    fireEvent.click(screen.getByText("Settings"));
+    expect(screen.getByText("after the change")).toBeTruthy();
+    expect(screen.queryByText("before the change")).toBeNull();
+  });
+
+  it("show no error from a change a newer one overtook", async () => {
+    const replies: { ok: (v: SettingsView) => void; no: (e: string) => void }[] = [];
+    invoke.mockImplementation((command: string) =>
+      command === "settings_data"
+        ? Promise.resolve(settingsView())
+        : new Promise<SettingsView>((ok, no) => replies.push({ ok, no })),
+    );
+    open("github");
+    fireEvent.click(await screen.findByText("me/site"));
+    fireEvent.click(screen.getByText("me/app"));
+    replies[1]?.ok(settingsView());
+    await screen.findByText("Saved");
+    replies[0]?.no("stale refusal");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(screen.queryByText(/stale refusal/)).toBeNull();
+  });
+
+  it("keep what was typed after a save was sent", async () => {
+    let reply: ((view: SettingsView) => void) | undefined;
+    invoke.mockImplementation((command: string) =>
+      command === "settings_data"
+        ? Promise.resolve(settingsView())
+        : new Promise<SettingsView>((resolve) => (reply = resolve)),
+    );
+    open("github");
+    const input = (await screen.findByPlaceholderText("owner/name")) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "me/one" } });
+    fireEvent.submit(input.form as HTMLFormElement);
+    fireEvent.input(input, { target: { value: "me/two" } });
+    reply?.(settingsView());
+    await screen.findByText("Saved");
+    expect(input.value).toBe("me/two");
   });
 });
 

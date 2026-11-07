@@ -50,6 +50,10 @@ export function settingsView(changes: Partial<SettingsView> = {}): SettingsView 
       { alias: "bad host", host_name: null, addable: false },
     ],
     nvd_key: false,
+    nvd_rates: [
+      { label: "Without a key", per_30_seconds: 5, applies: true },
+      { label: "With a key", per_30_seconds: 50, applies: false },
+    ],
     ...changes,
   };
 }

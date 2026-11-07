@@ -62,7 +62,24 @@ pub struct SettingsView {
     pub hosts: Vec<HostChoice>,
     /// Whether an NVD API key is in the Keychain.
     pub nvd_key: bool,
+    /// NVD's request limits without and with a key, and which one applies.
+    pub nvd_rates: [NvdRate; 2],
 }
+
+/// One of NVD's request limits.
+#[derive(Debug, Serialize)]
+pub struct NvdRate {
+    /// When it applies: "Without a key".
+    pub label: &'static str,
+    /// Requests allowed in any 30 seconds.
+    pub per_30_seconds: u32,
+    /// Whether it is the limit sweeps run under now.
+    pub applies: bool,
+}
+
+/// NVD's published limits, in requests per rolling 30 seconds: 5 without a key and 50 with one
+/// (<https://nvd.nist.gov/developers/start-here>, "Rate Limits").
+const NVD_RATES: [(&str, u32); 2] = [("Without a key", 5), ("With a key", 50)];
 
 /// A section of the settings.
 #[derive(Debug, Serialize)]
@@ -300,6 +317,11 @@ pub fn settings_view(config: &Config, detected: &Detected, home: &Path) -> Setti
         servers,
         hosts,
         nvd_key: detected.nvd_key,
+        nvd_rates: NVD_RATES.map(|(label, per_30_seconds)| NvdRate {
+            label,
+            per_30_seconds,
+            applies: (per_30_seconds == NVD_RATES[1].1) == detected.nvd_key,
+        }),
     }
 }
 
@@ -623,6 +645,15 @@ mod tests {
         assert_eq!(headline(3), "3 settings need you");
         let view = settings_view(&config("agent = \"claude\""), &detected(), Path::new(HOME));
         assert!(!detected().nvd_key);
+        let rates: Vec<_> = view
+            .nvd_rates
+            .iter()
+            .map(|r| (r.label, r.per_30_seconds, r.applies))
+            .collect();
+        assert_eq!(
+            rates,
+            [("Without a key", 5, true), ("With a key", 50, false)]
+        );
         assert_eq!(view.headline, "Ready to sweep");
         assert!(view.ready);
     }
@@ -825,6 +856,8 @@ dirs = ["/srv/app"]
                 ("NVD key", "In Keychain", false),
             ]
         );
+        assert!(view.nvd_rates[1].applies, "a key in the Keychain");
+        assert!(!view.nvd_rates[0].applies);
         assert_eq!(view.headline, "Ready to sweep");
         assert!(view.ready);
         assert!(view.agents[0].chosen);

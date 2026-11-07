@@ -67,6 +67,11 @@ export type SettingsView = {
     readonly addable: boolean;
   }[];
   readonly nvd_key: boolean;
+  readonly nvd_rates: readonly {
+    readonly label: string;
+    readonly per_30_seconds: number;
+    readonly applies: boolean;
+  }[];
 };
 
 export type Setting =

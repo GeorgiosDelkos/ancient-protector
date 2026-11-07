@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { JSX } from "solid-js";
-import { For, Match, Show, Switch, createResource, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createResource, createSignal, on } from "solid-js";
 
 import { Icon } from "./icons.tsx";
 import type { IconName } from "./icons.tsx";
@@ -30,7 +30,8 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
   const [looking, setLooking] = createSignal(false);
 
   // Rust applies changes one at a time, but replies can arrive out of order; only the reply
-  // to the newest command is shown, so an older view never replaces a newer one.
+  // to the newest command (a change or Look again) is shown, so an older view or error never
+  // replaces a newer one.
   let newest = 0;
   /** Runs a command that returns the new settings, and shows them. Resolves to whether Rust
    * applied the change, so a form keeps what was typed until it is saved. */
@@ -48,7 +49,9 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
         return next !== null;
       },
       (e: unknown) => {
-        setError(String(e));
+        if (asked === newest) {
+          setError(String(e));
+        }
         return false;
       },
     );
@@ -56,10 +59,14 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
   const save = (setting: Setting) => update(invoke<SettingsView>("save", { setting }));
   const lookAgain = () => {
     setLooking(true);
+    newest += 1;
+    const asked = newest;
     setError(null);
     invoke<SettingsView>("detect_again")
-      .then(mutate)
-      .catch((e: unknown) => setError(String(e)))
+      .then(
+        (next) => asked === newest && mutate(next),
+        (e: unknown) => asked === newest && setError(String(e)),
+      )
       .finally(() => setLooking(false));
   };
   // Reading an errored resource throws, so check for an error first.
@@ -329,6 +336,14 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
   // view Rust returns (a save, another agent) shows the provider Rust marked again.
   const [picked, setPicked] = createSignal<{ name: string; on: ModelView } | null>(null);
   const [typed, setTyped] = createSignal("");
+  // A name typed for one agent is not meant for the next.
+  createEffect(
+    on(
+      () => props.model.agent,
+      () => setTyped(""),
+      { defer: true },
+    ),
+  );
   const shown = () => {
     const pick = picked();
     const name = pick !== null && pick.on === props.model ? pick.name : null;
@@ -380,7 +395,8 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
         class="inline-add"
         onSubmit={(e) => {
           e.preventDefault();
-          void choose(typed()).then((ok) => ok && setTyped(""));
+          const sent = typed();
+          void choose(sent).then((ok) => ok && typed() === sent && setTyped(""));
         }}
       >
         <input
@@ -600,7 +616,10 @@ function GitHub(props: Props) {
           class="inline-add"
           onSubmit={(e) => {
             e.preventDefault();
-            void props.save({ kind: "add_repo", repo: typed() }).then((ok) => ok && setTyped(""));
+            const sent = typed();
+            void props
+              .save({ kind: "add_repo", repo: sent })
+              .then((ok) => ok && typed() === sent && setTyped(""));
           }}
         >
           <input
@@ -689,8 +708,14 @@ function Nvd(props: { view: SettingsView; onSave: (key: string) => Promise<boole
       <div class="block">
         <h2 class="label">Requests NVD allows per 30 seconds</h2>
         <div class="group pad rates">
-          <Rate label="Without a key" value={5} on={!props.view.nvd_key} />
-          <Rate label="With a key" value={50} on={props.view.nvd_key} />
+          <For each={props.view.nvd_rates}>
+            {(rate) => (
+              <Rate
+                rate={rate}
+                most={Math.max(...props.view.nvd_rates.map((r) => r.per_30_seconds))}
+              />
+            )}
+          </For>
         </div>
         <p class="note">
           Without a key, a first sweep of a Mac with many Homebrew formulae takes several minutes.
@@ -701,7 +726,8 @@ function Nvd(props: { view: SettingsView; onSave: (key: string) => Promise<boole
         onSubmit={(e) => {
           e.preventDefault();
           // The key leaves the field only once it is in the Keychain.
-          void props.onSave(key()).then((ok) => ok && setKey(""));
+          const sent = key();
+          void props.onSave(sent).then((ok) => ok && key() === sent && setKey(""));
         }}
       >
         <input
@@ -725,15 +751,15 @@ function Nvd(props: { view: SettingsView; onSave: (key: string) => Promise<boole
   );
 }
 
-/** One of NVD's two published rate limits, drawn against the higher one (50). */
-function Rate(props: { label: string; value: number; on: boolean }) {
+/** One of NVD's rate limits, drawn against the highest, `most`. */
+function Rate(props: { rate: SettingsView["nvd_rates"][number]; most: number }) {
   return (
-    <div class={`rate ${props.on ? "on" : ""}`}>
-      <span class="rate-label">{props.label}</span>
+    <div class={`rate ${props.rate.applies ? "on" : ""}`}>
+      <span class="rate-label">{props.rate.label}</span>
       <span class="meter">
-        <i style={{ width: `${props.value * 2}%` }} />
+        <i style={{ width: `${(props.rate.per_30_seconds / props.most) * 100}%` }} />
       </span>
-      <span class="rate-n">{props.value}</span>
+      <span class="rate-n">{props.rate.per_30_seconds}</span>
     </div>
   );
 }

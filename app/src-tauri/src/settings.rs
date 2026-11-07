@@ -42,15 +42,6 @@ impl Detection {
     }
 }
 
-/// When detection runs again.
-#[derive(Debug, Clone, Copy)]
-enum Fresh {
-    /// Only when it has not run yet.
-    IfMissing,
-    /// Now, as the user asked.
-    Now,
-}
-
 /// Runs detection as the app starts, in the background, so the settings open at once and
 /// tools are found on the login shell's `PATH` (macOS starts an app with a minimal one). Any
 /// macOS prompt it raises (Documents access, the Keychain) shows before the popover opens.
@@ -70,18 +61,20 @@ pub(crate) fn detect_at_start(app: AppHandle) {
 )]
 pub(crate) fn settings_data(app: AppHandle) -> Result<SettingsView, String> {
     let config = read_config(&app)?;
-    Ok(view(&app, &config, Fresh::IfMissing))
+    Ok(view(&app, &config))
 }
 
-/// Detects the Mac again, for a tool installed or a repository created since.
+/// Detects the Mac again, for a tool installed or a repository created since. The config is
+/// read after detection, which takes seconds, so a change saved meanwhile shows.
 #[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
 pub(crate) fn detect_again(app: AppHandle) -> Result<SettingsView, String> {
+    detect_now(&app);
     let config = read_config(&app)?;
-    Ok(view(&app, &config, Fresh::Now))
+    Ok(view(&app, &config))
 }
 
 /// Applies one change to `config.toml`, refreshes the popover and the tray icon, and returns
@@ -93,7 +86,7 @@ pub(crate) fn detect_again(app: AppHandle) -> Result<SettingsView, String> {
 )]
 pub(crate) fn save(app: AppHandle, setting: Setting) -> Result<SettingsView, String> {
     let config = apply(&app, &setting)?;
-    Ok(view(&app, &config, Fresh::IfMissing))
+    Ok(view(&app, &config))
 }
 
 /// Lets the user pick a folder to search for lockfiles and adds it. `None` when the user
@@ -120,7 +113,7 @@ pub(crate) fn add_folder(app: AppHandle) -> Result<Option<SettingsView>, String>
         .ok_or_else(|| format!("{} is not UTF-8, which config.toml needs", dir.display()))?
         .to_owned();
     let config = apply(&app, &Setting::AddFolder { dir })?;
-    Ok(Some(view(&app, &config, Fresh::IfMissing)))
+    Ok(Some(view(&app, &config)))
 }
 
 /// Stores the NVD API key in the Keychain, and returns the settings as they now are.
@@ -135,7 +128,7 @@ pub(crate) fn set_nvd_key(app: AppHandle, key: String) -> Result<SettingsView, S
         found.nvd_key = true;
     }
     let config = read_config(&app)?;
-    Ok(view(&app, &config, Fresh::IfMissing))
+    Ok(view(&app, &config))
 }
 
 fn read_config(app: &AppHandle) -> Result<Config, String> {
@@ -156,25 +149,28 @@ fn apply(app: &AppHandle, setting: &Setting) -> Result<Config, String> {
     Ok(config)
 }
 
-/// The view of `config` with what detection found, detecting first when `fresh` says so or
-/// it has not run yet.
-fn view(app: &AppHandle, config: &Config, fresh: Fresh) -> SettingsView {
+/// The view of `config` with what detection found, detecting first when it has not run yet.
+fn view(app: &AppHandle, config: &Config) -> SettingsView {
     let runner = app.state::<Runner>();
     let home = runner.home();
     let detection = app.state::<Detection>();
-    if matches!(fresh, Fresh::IfMissing)
-        && let Some(found) = detection.lock().as_ref()
-    {
+    if let Some(found) = detection.lock().as_ref() {
         return settings_view(config, found, home);
     }
+    detect_now(app);
+    let found = detection.lock();
+    let found = found.as_ref().expect("detect_now stores what it found");
+    settings_view(config, found, home)
+}
+
+/// Detects the Mac, outside the lock, and keeps what it found.
+fn detect_now(app: &AppHandle) {
     let found = {
         // A prompt detection raises would take the focus and hide the popover.
         let _held = tray::hold_popover(app);
-        detect(home)
+        detect(app.state::<Runner>().home())
     };
-    let view = settings_view(config, &found, home);
-    *detection.lock() = Some(found);
-    view
+    *app.state::<Detection>().lock() = Some(found);
 }
 
 /// An error and its sources as one line, `outer: inner`.
