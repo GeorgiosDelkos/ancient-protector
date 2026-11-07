@@ -34,7 +34,7 @@ export type IconName =
   | "mac"
   | "repo"
   | "server"
-  | "gear"
+  | "settings"
   | "check"
   | "done"
   | "wait"
@@ -56,7 +56,9 @@ const PATHS: Record<IconName, string> = {
   repo: "M3.5 2.5h8a1 1 0 0 1 1 1v9.5h-8.5a1.5 1.5 0 0 1 0-3h8.5M3.5 2.5v9",
   server:
     "M3 2.5h10a1 1 0 0 1 1 1V6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1zM3 9h10a1 1 0 0 1 1 1v2.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1z",
-  gear: "M8 5.8a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4zM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4",
+  // Two sliders, the settings mark of most current apps; a small cog read as a sun.
+  settings:
+    "M2 4.5h6.5M12.5 4.5H14M2 11.5h1.5M7.5 11.5H14M10.5 3a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM5.5 10a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z",
   check: "M3.5 8.4 6.6 11.4 12.5 4.8",
   done: "M5 8.2 7.1 10.2 11 5.9",
   wait: "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11z",

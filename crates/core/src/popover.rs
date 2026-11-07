@@ -27,6 +27,10 @@ pub struct PopoverView {
     pub headline: String,
     /// When the newest sweep of any target started.
     pub last_swept: Option<Timestamp>,
+    /// The line under the headline while no sweep time is known, saying what Sweep does; the
+    /// headline already says "Not swept yet", so the line under it does not repeat it. None
+    /// once a sweep time is known, when the line says how long ago that was.
+    pub first_sweep_hint: Option<String>,
     /// Whether a sweep ran and nothing is open.
     pub all_clear: bool,
     /// How many targets there are: "1 target", "3 targets".
@@ -139,6 +143,9 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
         counts: Counts::of(findings.iter().map(|f| &f.open)),
         headline: headline(needs_you, findings.len(), last_swept),
         all_clear: findings.is_empty() && last_swept.is_some(),
+        first_sweep_hint: last_swept
+            .is_none()
+            .then(|| "Sweep checks your targets against the newest advisories.".to_owned()),
         target_count: match targets.len() {
             1 => "1 target".to_owned(),
             n => format!("{n} targets"),
@@ -329,10 +336,15 @@ mod tests {
         let view = popover_view(Vec::new());
         assert_eq!(view.headline, "Not swept yet");
         assert_eq!(view.last_swept, None);
+        assert_eq!(
+            view.first_sweep_hint.as_deref(),
+            Some("Sweep checks your targets against the newest advisories.")
+        );
         assert!(!view.all_clear, "nothing was swept yet");
         assert_eq!(view.target_count, "0 targets");
         let swept = popover_view(vec![target("mac", Some(1), Vec::new(), 0)]);
         assert!(swept.all_clear);
+        assert_eq!(swept.first_sweep_hint, None);
         assert_eq!(swept.target_count, "1 target");
         let open = popover_view(vec![target(
             "mac",

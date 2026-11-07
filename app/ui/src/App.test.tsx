@@ -68,6 +68,7 @@ const two = () =>
     counts: { critical: 0, high: 1, medium: 1, low: 1 },
     headline: "2 findings need you",
     last_swept: "2026-11-06T11:00:00Z",
+    first_sweep_hint: null,
   });
 
 beforeEach(() => {
@@ -134,7 +135,12 @@ describe("the popover", () => {
   });
 
   it("shows all clear once a sweep found nothing", async () => {
-    shown = overview({ last_swept: "2026-11-06T11:00:00Z", dismissed: 2, all_clear: true });
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      dismissed: 2,
+      all_clear: true,
+    });
     answer();
     render(() => <App />);
     expect(await screen.findByText("All clear")).toBeTruthy();
@@ -195,15 +201,12 @@ describe("a finding", () => {
 
 describe("the summary", () => {
   it("says when nothing was swept yet, and sweeps on demand", async () => {
-    shown = overview({
-      findings: [finding("a")],
-      needs_you: 1,
-      counts: { critical: 0, high: 1, medium: 0, low: 0 },
-      headline: "1 finding needs you",
-    });
+    shown = overview({ headline: "Not swept yet", first_sweep_hint: "Rust's first-sweep line" });
     answer({ sweep_now: () => null });
     render(() => <App />);
-    expect(await screen.findByText("not swept yet")).toBeTruthy();
+    expect(await screen.findByText("Rust's first-sweep line")).toBeTruthy();
+    // The headline says it once; the line under it shows Rust's hint, not a repeat.
+    expect(screen.getAllByText(/not swept yet/i)).toHaveLength(1);
     expect(screen.queryByText(/exploited in the wild/)).toBeNull();
     fireEvent.click(screen.getByText("Sweep"));
     expect(invoke).toHaveBeenCalledWith("sweep_now");
@@ -585,7 +588,11 @@ describe("state across commands", () => {
   });
 
   it("says nothing about dismissals when there are none", async () => {
-    shown = overview({ last_swept: "2026-11-06T11:00:00Z", all_clear: true });
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      all_clear: true,
+    });
     answer();
     render(() => <App />);
     const text = (await screen.findByText(/target swept/)).textContent ?? "";

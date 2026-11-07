@@ -49,6 +49,15 @@ async function menu(id: string): Promise<HTMLSelectElement> {
   });
 }
 
+/** The text of what `aria-describedby` points at, as a screen reader reads it after the name. */
+function described(element: HTMLElement): string {
+  return (element.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .filter((text) => text !== "")
+    .join(" ");
+}
+
 /** Picks `value` in the menu with this id. */
 async function pick(id: string, value: string): Promise<void> {
   fireEvent.change(await menu(id), { target: { value } });
@@ -594,6 +603,23 @@ describe("the model", () => {
     );
   });
 
+  it("names each menu by its label, and describes it by its hint and badge", async () => {
+    const agents = opencode.agents.map((a) => ({ ...a, chosen: a.agent === "claude" }));
+    answer({ settings_data: () => ({ ...opencode, agents }) });
+    open("agent");
+    await menu("model");
+    const agent = screen.getByRole("combobox", { name: "Agent" });
+    expect(agent.id).toBe("agent");
+    expect(described(agent)).toBe("Found /bin/claude");
+    expect(described(screen.getByRole("combobox", { name: "Provider" }))).toBe(
+      "Whose models the list below offers.",
+    );
+    expect(described(screen.getByRole("combobox", { name: "Model" }))).toMatch(
+      /^Default leaves the choice to the agent\./,
+    );
+    expect(screen.getByText(/Agents are found through your login shell/)).toBeTruthy();
+  });
+
   it("shows the provider Rust marks once a save returns, whatever was picked", async () => {
     // Rust sends a new view with every reply.
     answer({ settings_data: () => opencode, save: () => structuredClone(opencode) });
@@ -683,7 +709,9 @@ describe("the model", () => {
     expect((await menu("model")).value).toBe("-default");
     expect(document.getElementById("provider")).toBeNull();
     await pick("model", "-custom");
-    expect(await screen.findByPlaceholderText("Model name, as --model takes it")).toBeTruthy();
+    const name = await screen.findByPlaceholderText("Model name, as --model takes it");
+    // The field that takes the name hears the same constraint as the menu.
+    expect(described(name)).toMatch(/any name its --model accepts/);
     cleanup();
     const one = opencode.model as NonNullable<SettingsView["model"]>;
     const single = { ...one, providers: one.providers.slice(1) };

@@ -543,9 +543,11 @@ kbd {
   background: rgba(255, 255, 255, 0.16);
 }
 .btn.primary {
-  background: linear-gradient(180deg, #6e9bff, #4b74ea);
+  /* White text needs 4.5:1 on both ends: #3f6ae0 is about 4.8:1, #2f56c9 about 6.3:1. The
+     lighter #6e9bff of --run gave only 2.7:1. */
+  background: linear-gradient(180deg, #3f6ae0, #2f56c9);
   color: #fff;
-  box-shadow: 0 4px 14px -6px rgba(75, 116, 234, 0.9);
+  box-shadow: 0 4px 14px -6px rgba(47, 86, 201, 0.9);
 }
 .btn:disabled {
   opacity: 0.45;
