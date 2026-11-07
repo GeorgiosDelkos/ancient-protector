@@ -176,7 +176,10 @@ function Summary(props: { overview: Overview; now: Date; onSweep: () => void }) 
             <Show when={exploited() > 0}>
               <span class="kev-text">{exploited()} exploited in the wild</span> ·{" "}
             </Show>
-            {swept() === null ? "not swept yet" : `swept ${since(swept() ?? "", props.now)} ago`}
+            {/* Before the first sweep the headline already says so; this line says what to do. */}
+            {swept() === null
+              ? "Sweep checks your targets against the newest advisories."
+              : `swept ${since(swept() ?? "", props.now)} ago`}
           </p>
         </div>
         <button type="button" class="pill" onClick={() => props.onSweep()}>
@@ -632,10 +635,11 @@ function Footer(props: {
           type="button"
           class="ghost"
           aria-label="Settings"
+          title="Settings"
           aria-expanded={menu()}
           onClick={() => setMenu(!menu())}
         >
-          <Icon name="gear" />
+          <Icon name="settings" />
         </button>
         <Show when={menu()}>
           <div class="menu" role="menu">

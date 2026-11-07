@@ -314,52 +314,76 @@ const NONE = "-none";
 function Agent(props: Props) {
   const chosen = () => props.view.agents.find((a) => a.chosen);
   return (
-    <div class="block">
-      <div class="group list form">
-        <label class="srow pick" for="agent">
-          <span class="t">Agent</span>
-          <Menu
-            id="agent"
-            value={chosen()?.agent ?? NONE}
-            onPick={(agent) => void props.save({ kind: "agent", agent })}
-          >
-            <Show when={chosen() === undefined}>
-              <option value={NONE} disabled>
-                Choose one
-              </option>
-            </Show>
-            <For each={props.view.agents}>
-              {(agent) => (
-                <option value={agent.agent} disabled={!agent.available}>
-                  {agent.available ? agent.name : `${agent.name} (not found)`}
-                </option>
-              )}
-            </For>
-          </Menu>
-        </label>
-        <Show when={chosen()}>
-          {(agent) => (
-            <div class="srow found">
-              <span class="s">{agent().path ?? "not on your login shell's PATH"}</span>
+    <div class="group fields">
+      <Field
+        for="agent"
+        label="Agent"
+        aside={
+          <Show when={chosen()}>
+            {(agent) => (
               <span class={`state ${agent().path === null ? "no" : "ok"}`}>
                 {agent().path === null ? "Not found" : "Found"}
               </span>
-            </div>
+            )}
+          </Show>
+        }
+      >
+        <Menu
+          id="agent"
+          value={chosen()?.agent ?? NONE}
+          onPick={(agent) => void props.save({ kind: "agent", agent })}
+        >
+          <Show when={chosen() === undefined}>
+            <option value={NONE} disabled>
+              Choose one
+            </option>
+          </Show>
+          <For each={props.view.agents}>
+            {(agent) => (
+              <option value={agent.agent} disabled={!agent.available}>
+                {agent.available ? agent.name : `${agent.name} (not found)`}
+              </option>
+            )}
+          </For>
+        </Menu>
+        <Show when={chosen()}>
+          {(agent) => (
+            <span class="fld-path">{agent().path ?? "not on your login shell's PATH"}</span>
           )}
         </Show>
-        <Show when={props.view.model}>
-          {(model) => <Model model={model()} save={props.save} />}
-        </Show>
-      </div>
-      <p class="note">
-        Agents are found through your login shell, the same way a sweep starts them. Custom takes
-        any model name the agent's --model accepts.
+      </Field>
+      <Show when={props.view.model}>{(model) => <Model model={model()} save={props.save} />}</Show>
+      <p class="fld-foot">
+        Agents are found through your login shell, the same way a sweep starts them.
       </p>
     </div>
   );
 }
 
-/** A native drop-down menu that looks like a value at the end of a row. */
+/** One setting in a form card: its label (with an optional badge at the end of the line), an
+ * optional line saying what it does, then its control across the full width. */
+function Field(props: {
+  for: string;
+  label: string;
+  hint?: string;
+  aside?: JSX.Element;
+  children: JSX.Element;
+}) {
+  return (
+    <div class="fld">
+      <div class="fld-head">
+        <label for={props.for}>{props.label}</label>
+        {props.aside}
+      </div>
+      <Show when={props.hint}>
+        <p class="fld-hint">{props.hint}</p>
+      </Show>
+      {props.children}
+    </div>
+  );
+}
+
+/** A native drop-down menu, drawn as a full-width field with a chevron. */
 function Menu(props: {
   id: string;
   value: string;
@@ -439,8 +463,7 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
   return (
     <>
       <Show when={props.model.providers.length > 1}>
-        <label class="srow pick" for="provider">
-          <span class="t">Provider</span>
+        <Field for="provider" label="Provider" hint="Whose models the list below offers.">
           <Menu
             id="provider"
             value={shown()?.name ?? ""}
@@ -450,10 +473,13 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
               {(p) => <option value={p.name}>{p.label}</option>}
             </For>
           </Menu>
-        </label>
+        </Field>
       </Show>
-      <label class="srow pick" for="model">
-        <span class="t">Model</span>
+      <Field
+        for="model"
+        label="Model"
+        hint="Default leaves the choice to the agent. Custom takes any name its --model accepts."
+      >
         <Menu id="model" value={value()} onPick={pick}>
           <Show when={value() === NONE}>
             <option value={NONE} disabled>
@@ -466,31 +492,31 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
           </For>
           <option value={CUSTOM}>Custom…</option>
         </Menu>
-      </label>
-      <Show when={typing()}>
-        <form
-          class="srow custom"
-          onSubmit={(e) => {
-            e.preventDefault();
-            // A saved name closes the field, as Rust's next view does; a refused one stays.
-            void choose(typed());
-          }}
-        >
-          <input
-            ref={(el) => queueMicrotask(() => el.focus())}
-            id="model-name"
-            class="field grow mono"
-            placeholder={props.model.hint}
-            aria-label="Model name"
-            autocomplete="off"
-            value={typed()}
-            onInput={(e) => setTyped(e.currentTarget.value)}
-          />
-          <button type="submit" class="btn" disabled={typed().trim() === ""}>
-            Use
-          </button>
-        </form>
-      </Show>
+        <Show when={typing()}>
+          <form
+            class="fld-custom"
+            onSubmit={(e) => {
+              e.preventDefault();
+              // A saved name closes the field, as Rust's next view does; a refused one stays.
+              void choose(typed());
+            }}
+          >
+            <input
+              ref={(el) => queueMicrotask(() => el.focus())}
+              id="model-name"
+              class="field grow mono"
+              placeholder={props.model.hint}
+              aria-label="Model name"
+              autocomplete="off"
+              value={typed()}
+              onInput={(e) => setTyped(e.currentTarget.value)}
+            />
+            <button type="submit" class="btn primary" disabled={typed().trim() === ""}>
+              Use
+            </button>
+          </form>
+        </Show>
+      </Field>
     </>
   );
 }

@@ -203,7 +203,9 @@ describe("the summary", () => {
     });
     answer({ sweep_now: () => null });
     render(() => <App />);
-    expect(await screen.findByText("not swept yet")).toBeTruthy();
+    expect(
+      await screen.findByText("Sweep checks your targets against the newest advisories."),
+    ).toBeTruthy();
     expect(screen.queryByText(/exploited in the wild/)).toBeNull();
     fireEvent.click(screen.getByText("Sweep"));
     expect(invoke).toHaveBeenCalledWith("sweep_now");
