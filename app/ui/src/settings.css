@@ -327,16 +327,6 @@ button.srow:active:not(:disabled) {
 .switch.on::after {
   transform: translateX(12px);
 }
-.radio {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1.5px var(--l4);
-  transition: box-shadow 140ms;
-}
-.radio.on {
-  box-shadow: inset 0 0 0 5px var(--run);
-}
 .state {
   font: 600 10.5px/1 var(--ui);
   padding: 3px 7px;
@@ -594,9 +584,6 @@ button.srow:active:not(:disabled) {
   grid-template-columns: minmax(0, auto) minmax(0, 1fr);
   cursor: default;
 }
-.srow.pick:hover {
-  background: rgba(255, 255, 255, 0.03);
-}
 .menu-pick {
   position: relative;
   display: flex;
@@ -632,7 +619,11 @@ button.srow:active:not(:disabled) {
   pointer-events: none;
 }
 .srow.found {
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  text-align: right;
   min-height: 0;
   padding-block: 0 9px;
 }

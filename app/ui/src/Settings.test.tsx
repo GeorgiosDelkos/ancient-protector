@@ -493,6 +493,26 @@ describe("the model", () => {
     },
   });
 
+  it("keeps a menu on what Rust has when a pick is refused", async () => {
+    answer({ settings_data: () => opencode, save: () => Promise.reject("refused") });
+    open("agent");
+    await pick("agent", "claude");
+    await screen.findByText(/refused/);
+    expect((await menu("agent")).value).toBe("-none");
+    await pick("model", "-default");
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+    expect((await menu("model")).value).toBe("ollama/gemma4:e4b");
+  });
+
+  it("says when the chosen agent is not found", async () => {
+    const agents = settingsView().agents.map((a) => ({ ...a, chosen: a.agent === "codex" }));
+    answer({ settings_data: () => settingsView({ agents }) });
+    open("agent");
+    expect(await screen.findByText("not on your login shell's PATH")).toBeTruthy();
+    expect(screen.getByText("Not found").className).toBe("state no");
+    expect((await menu("agent")).value).toBe("codex");
+  });
+
   it("is offered only once an agent is chosen", async () => {
     answer({ settings_data: () => settingsView() });
     open("agent");
@@ -549,6 +569,7 @@ describe("the model", () => {
     await pick("model", "-custom");
     const input = (await screen.findByPlaceholderText("Another model")) as HTMLInputElement;
     expect((await menu("model")).value).toBe("-custom");
+    await vi.waitFor(() => expect(document.activeElement).toBe(input));
     expect(invoke).not.toHaveBeenCalledWith("save", expect.anything());
     expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
     fireEvent.input(input, { target: { value: "  " } });

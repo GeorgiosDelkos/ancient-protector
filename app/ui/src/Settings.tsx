@@ -331,8 +331,10 @@ function Agent(props: Props) {
         <Show when={chosen()}>
           {(agent) => (
             <div class="srow found">
-              <span class="s">{agent().path}</span>
-              <span class="state ok">Found</span>
+              <span class="s">{agent().path ?? "not on your login shell's PATH"}</span>
+              <span class={`state ${agent().path === null ? "no" : "ok"}`}>
+                {agent().path === null ? "Not found" : "Found"}
+              </span>
             </div>
           )}
         </Show>
@@ -360,7 +362,12 @@ function Menu(props: {
       <select
         id={props.id}
         value={props.value}
-        onChange={(e) => props.onPick(e.currentTarget.value)}
+        onChange={(e) => {
+          props.onPick(e.currentTarget.value);
+          // The menu shows what Rust has, not what was clicked: a pick that is saved moves it
+          // when Rust's next view arrives, and one that is refused leaves it where it was.
+          e.currentTarget.value = props.value;
+        }}
       >
         {props.children}
       </select>
@@ -448,6 +455,7 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
           }}
         >
           <input
+            ref={(el) => queueMicrotask(() => el.focus())}
             id="model-name"
             class="field grow mono"
             placeholder={props.model.hint}
