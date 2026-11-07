@@ -1,6 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { JSX } from "solid-js";
-import { For, Match, Show, Switch, createEffect, createResource, createSignal, on } from "solid-js";
+import {
+  For,
+  Match,
+  Show,
+  Switch,
+  children,
+  createEffect,
+  createResource,
+  createSignal,
+} from "solid-js";
 
 import { Icon } from "./icons.tsx";
 import type { IconName } from "./icons.tsx";
@@ -296,54 +305,107 @@ function Segmented(props: {
 
 type Props = { view: SettingsView; save: (setting: Setting) => Promise<boolean> };
 
+/** What the model menu shows besides the models themselves. Not model names: a name never
+ * starts with `-`, and Rust refuses one that does. */
+const DEFAULT = "-default";
+const CUSTOM = "-custom";
+const NONE = "-none";
+
 function Agent(props: Props) {
+  const chosen = () => props.view.agents.find((a) => a.chosen);
   return (
     <div class="block">
-      <div class="group list" role="radiogroup" aria-label="Agent">
-        <For each={props.view.agents}>
+      <div class="group list form">
+        <label class="srow pick" for="agent">
+          <span class="t">Agent</span>
+          <Menu
+            id="agent"
+            value={chosen()?.agent ?? NONE}
+            onPick={(agent) => void props.save({ kind: "agent", agent })}
+          >
+            <Show when={chosen() === undefined}>
+              <option value={NONE} disabled>
+                Choose one
+              </option>
+            </Show>
+            <For each={props.view.agents}>
+              {(agent) => (
+                <option value={agent.agent} disabled={!agent.available}>
+                  {agent.available ? agent.name : `${agent.name} (not found)`}
+                </option>
+              )}
+            </For>
+          </Menu>
+        </label>
+        <Show when={chosen()}>
           {(agent) => (
-            <button
-              type="button"
-              class="srow choice"
-              role="radio"
-              disabled={!agent.available}
-              aria-checked={agent.chosen}
-              onClick={() => void props.save({ kind: "agent", agent: agent.agent })}
-            >
-              <span class={`radio ${agent.chosen ? "on" : ""}`} aria-hidden="true" />
-              <span class="what">
-                <span class="t">{agent.name}</span>
-                <span class="s">{agent.path ?? "not on your login shell's PATH"}</span>
+            <div class="srow found">
+              <span class="s">{agent().path ?? "not on your login shell's PATH"}</span>
+              <span class={`state ${agent().path === null ? "no" : "ok"}`}>
+                {agent().path === null ? "Not found" : "Found"}
               </span>
-              <span class={`state ${agent.path === null ? "no" : "ok"}`}>
-                {agent.path === null ? "Not found" : "Found"}
-              </span>
-            </button>
+            </div>
           )}
-        </For>
+        </Show>
+        <Show when={props.view.model}>
+          {(model) => <Model model={model()} save={props.save} />}
+        </Show>
       </div>
-      <p class="note">Found through your login shell, the same way a sweep starts the agent.</p>
-      <Show when={props.view.model}>{(model) => <Model model={model()} save={props.save} />}</Show>
+      <p class="note">
+        Agents are found through your login shell, the same way a sweep starts them. Custom takes
+        any model name the agent's --model accepts.
+      </p>
     </div>
+  );
+}
+
+/** A native drop-down menu that looks like a value at the end of a row. */
+function Menu(props: {
+  id: string;
+  value: string;
+  onPick: (value: string) => void;
+  children: JSX.Element;
+}) {
+  let select: HTMLSelectElement | undefined;
+  const options = children(() => props.children);
+  // The value is set once the options are in place: set together with options that change in
+  // the same update (another provider's models), a select finds no option for it and WebKit
+  // falls back to the first one. An effect runs after the options are inserted.
+  createEffect(() => {
+    options();
+    if (select !== undefined) {
+      select.value = props.value;
+    }
+  });
+  return (
+    <span class="menu-pick">
+      <select
+        ref={(el) => (select = el)}
+        id={props.id}
+        onChange={(e) => {
+          props.onPick(e.currentTarget.value);
+          // The menu shows what Rust has, not what was clicked: a pick that is saved moves it
+          // when Rust's next view arrives, and one that is refused leaves it where it was.
+          e.currentTarget.value = props.value;
+        }}
+      >
+        {options()}
+      </select>
+      <Icon name="chev" />
+    </span>
   );
 }
 
 type ModelView = NonNullable<SettingsView["model"]>;
 
-/** The chosen agent's model: its default, one it lists under a provider, or a typed name. */
+/** The chosen agent's provider and model: its default, one it lists, or a custom name. */
 function Model(props: { model: ModelView; save: Props["save"] }) {
-  // Which provider's models are shown. A pick holds only for the view it was made on: each
-  // view Rust returns (a save, another agent) shows the provider Rust marked again.
+  // Which provider's models the menu offers, and whether the custom field is open. Both hold
+  // only for the view they were set on: each view Rust returns (a save, another agent) shows
+  // the provider Rust marked and closes the field.
   const [picked, setPicked] = createSignal<{ name: string; on: ModelView } | null>(null);
+  const [custom, setCustom] = createSignal<ModelView | null>(null);
   const [typed, setTyped] = createSignal("");
-  // A name typed for one agent is not meant for the next.
-  createEffect(
-    on(
-      () => props.model.agent,
-      () => setTyped(""),
-      { defer: true },
-    ),
-  );
   const shown = () => {
     const pick = picked();
     const name = pick !== null && pick.on === props.model ? pick.name : null;
@@ -352,87 +414,84 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
       props.model.providers.find((p) => p.chosen)
     );
   };
+  const typing = () => custom() === props.model;
+  const value = () => {
+    if (typing()) {
+      return CUSTOM;
+    }
+    if (props.model.default) {
+      return DEFAULT;
+    }
+    return shown()?.models.find((m) => m.chosen)?.value ?? NONE;
+  };
   const choose = (model: string | null) =>
     props.save({ kind: "model", agent: props.model.agent, model });
+  const pick = (option: string) => {
+    if (option === CUSTOM) {
+      setTyped("");
+      setCustom(props.model);
+    } else {
+      // Another pick closes the field, so the menu shows Rust's model, not Custom.
+      setCustom(null);
+      void choose(option === DEFAULT ? null : option);
+    }
+  };
   return (
-    <div class="block model">
-      <h2 class="label">Model</h2>
+    <>
       <Show when={props.model.providers.length > 1}>
-        <div class="chips" role="group" aria-label="Provider">
-          <For each={props.model.providers}>
-            {(p) => (
-              <button
-                type="button"
-                aria-pressed={p === shown()}
-                class={`chip ${p === shown() ? "on" : ""}`}
-                onClick={() => setPicked({ name: p.name, on: props.model })}
-              >
-                {p.label}
-              </button>
-            )}
-          </For>
-        </div>
+        <label class="srow pick" for="provider">
+          <span class="t">Provider</span>
+          <Menu
+            id="provider"
+            value={shown()?.name ?? ""}
+            onPick={(name) => setPicked({ name, on: props.model })}
+          >
+            <For each={props.model.providers}>
+              {(p) => <option value={p.name}>{p.label}</option>}
+            </For>
+          </Menu>
+        </label>
       </Show>
-      <div class="group list scroll" role="radiogroup" aria-label="Model">
-        <ModelRow
-          label="Default"
-          sub="the agent's own choice"
-          on={props.model.default}
-          pick={() => void choose(null)}
-        />
-        <For each={shown()?.models ?? []}>
-          {(m) => (
-            <ModelRow
-              label={m.label}
-              {...(m.sub === null ? {} : { sub: m.sub })}
-              on={m.chosen}
-              pick={() => void choose(m.value)}
-            />
-          )}
-        </For>
-      </div>
-      <form
-        class="inline-add"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const sent = typed();
-          void choose(sent).then((ok) => ok && typed() === sent && setTyped(""));
-        }}
-      >
-        <input
-          id="model"
-          class="field grow mono"
-          placeholder={props.model.hint}
-          aria-label="Model name"
-          autocomplete="off"
-          value={typed()}
-          onInput={(e) => setTyped(e.currentTarget.value)}
-        />
-        <button type="submit" class="btn" disabled={typed().trim() === ""}>
-          Use
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function ModelRow(props: { label: string; sub?: string; on: boolean; pick: () => void }) {
-  return (
-    <button
-      type="button"
-      class="srow choice"
-      role="radio"
-      aria-checked={props.on}
-      onClick={() => props.pick()}
-    >
-      <span class={`radio ${props.on ? "on" : ""}`} aria-hidden="true" />
-      <span class="what">
-        <span class="t">{props.label}</span>
-        <Show when={props.sub}>
-          <span class="s">{props.sub}</span>
-        </Show>
-      </span>
-    </button>
+      <label class="srow pick" for="model">
+        <span class="t">Model</span>
+        <Menu id="model" value={value()} onPick={pick}>
+          <Show when={value() === NONE}>
+            <option value={NONE} disabled>
+              Choose one
+            </option>
+          </Show>
+          <option value={DEFAULT}>Default</option>
+          <For each={shown()?.models ?? []}>
+            {(m) => <option value={m.value}>{m.label}</option>}
+          </For>
+          <option value={CUSTOM}>Custom…</option>
+        </Menu>
+      </label>
+      <Show when={typing()}>
+        <form
+          class="srow custom"
+          onSubmit={(e) => {
+            e.preventDefault();
+            // A saved name closes the field, as Rust's next view does; a refused one stays.
+            void choose(typed());
+          }}
+        >
+          <input
+            ref={(el) => queueMicrotask(() => el.focus())}
+            id="model-name"
+            class="field grow mono"
+            placeholder={props.model.hint}
+            aria-label="Model name"
+            autocomplete="off"
+            value={typed()}
+            onInput={(e) => setTyped(e.currentTarget.value)}
+          />
+          <button type="submit" class="btn" disabled={typed().trim() === ""}>
+            Use
+          </button>
+        </form>
+      </Show>
+    </>
   );
 }
 

@@ -38,8 +38,25 @@ async function rate(label: string): Promise<string | undefined> {
   return (await screen.findByText(label)).closest(".rate")?.className;
 }
 
-function pressed(): string | null | undefined {
-  return screen.getByText("Claude Code").closest("button")?.ariaChecked;
+/** The drop-down menu with this id, once the settings have loaded. */
+async function menu(id: string): Promise<HTMLSelectElement> {
+  return vi.waitFor(() => {
+    const found = document.getElementById(id);
+    if (!(found instanceof HTMLSelectElement)) {
+      throw new Error(`no menu #${id}`);
+    }
+    return found;
+  });
+}
+
+/** Picks `value` in the menu with this id. */
+async function pick(id: string, value: string): Promise<void> {
+  fireEvent.change(await menu(id), { target: { value } });
+}
+
+/** Each option of a menu: its value, its text, and whether it is disabled. */
+async function options(id: string): Promise<[string, string, boolean][]> {
+  return [...(await menu(id)).options].map((o) => [o.value, o.text, o.disabled]);
 }
 
 function open(start: Section | null = null) {
@@ -99,10 +116,6 @@ describe("the section list", () => {
     expect((await row("me/app")).querySelector(".icon.lock")).toBeTruthy();
     expect((await row("me/site")).querySelector(".icon.repo")).toBeTruthy();
     expect(screen.getByText("M").className).toBe("avatar");
-    cleanup();
-    answer({ settings_data: () => settingsView() });
-    open("agent");
-    expect((await row("Claude Code")).querySelector(".radio")?.className).toBe("radio ");
     cleanup();
     answer({ settings_data: () => settingsView() });
     open("schedule");
@@ -190,13 +203,12 @@ describe("a change", () => {
     });
     answer({ settings_data: () => settingsView(), save: () => chosen });
     open("agent");
-    fireEvent.click(await screen.findByText("Claude Code"));
-    expect(pressed()).toBe("false");
+    expect((await menu("agent")).value).toBe("-none");
+    await pick("agent", "claude");
     expect(await screen.findByText("Saved")).toBeTruthy();
-    expect(pressed()).toBe("true");
+    expect((await menu("agent")).value).toBe("claude");
     expect(invoke).toHaveBeenCalledWith("save", { setting: { kind: "agent", agent: "claude" } });
     expect(invoke.mock.calls.filter(([c]) => c === "settings_data")).toHaveLength(1);
-    expect(screen.getByText("Codex").closest("button")?.disabled).toBe(true);
   });
 
   it("shows a refused change and keeps the settings as they were", async () => {
@@ -292,15 +304,22 @@ describe("each section shows what Rust found", () => {
     expect(screen.getByText("Settings", { selector: ".navtitle" })).toBeTruthy();
   });
 
-  it("marks agents found or not, with where", async () => {
+  it("offers the agents found, and shows where the chosen one is", async () => {
     answer({ settings_data: () => settingsView() });
     open("agent");
-    const claude = (await screen.findByText("Claude Code")).closest("button") as HTMLElement;
-    expect(within(claude).getByText("/bin/claude")).toBeTruthy();
-    expect(within(claude).getByText("Found").className).toBe("state ok");
-    const codex = screen.getByText("Codex").closest("button") as HTMLElement;
-    expect(within(codex).getByText("not on your login shell's PATH")).toBeTruthy();
-    expect(within(codex).getByText("Not found").className).toBe("state no");
+    expect(await options("agent")).toEqual([
+      ["-none", "Choose one", true],
+      ["claude", "Claude Code", false],
+      ["codex", "Codex (not found)", true],
+    ]);
+    expect(screen.queryByText("Found")).toBeNull();
+    cleanup();
+    const agents = settingsView().agents.map((a) => ({ ...a, chosen: a.agent === "claude" }));
+    answer({ settings_data: () => settingsView({ agents }) });
+    open("agent");
+    expect((await options("agent")).map(([value]) => value)).toEqual(["claude", "codex"]);
+    expect(screen.getByText("/bin/claude")).toBeTruthy();
+    expect(screen.getByText("Found").className).toBe("state ok");
   });
 
   it("marks tools found or not", async () => {
@@ -474,29 +493,100 @@ describe("the model", () => {
     },
   });
 
+  it("keeps a menu on what Rust has when a pick is refused", async () => {
+    answer({ settings_data: () => opencode, save: () => Promise.reject("refused") });
+    open("agent");
+    await pick("agent", "claude");
+    await screen.findByText(/refused/);
+    expect((await menu("agent")).value).toBe("-none");
+    await pick("model", "-default");
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+    expect((await menu("model")).value).toBe("ollama/gemma4:e4b");
+  });
+
+  it("says when the chosen agent is not found", async () => {
+    const agents = settingsView().agents.map((a) => ({ ...a, chosen: a.agent === "codex" }));
+    answer({ settings_data: () => settingsView({ agents }) });
+    open("agent");
+    expect(await screen.findByText("not on your login shell's PATH")).toBeTruthy();
+    expect(screen.getByText("Not found").className).toBe("state no");
+    expect((await menu("agent")).value).toBe("codex");
+  });
+
+  it("closes Custom on another pick, and shows Rust's model if that pick is refused", async () => {
+    answer({ settings_data: () => opencode, save: () => Promise.reject("refused") });
+    open("agent");
+    await pick("model", "-custom");
+    fireEvent.input(await screen.findByPlaceholderText("Another model"), {
+      target: { value: "draft" },
+    });
+    await pick("model", "-default");
+    await screen.findByText(/refused/);
+    expect(screen.queryByPlaceholderText("Another model")).toBeNull();
+    expect((await menu("model")).value).toBe("ollama/gemma4:e4b");
+    expect(invoke).not.toHaveBeenCalledWith("save", {
+      setting: { kind: "model", agent: "opencode", model: "draft" },
+    });
+  });
+
+  it("follows the model Rust's reply marks chosen", async () => {
+    const one = opencode.model as NonNullable<SettingsView["model"]>;
+    const picked = settingsView({
+      model: {
+        ...one,
+        providers: one.providers.map((p) => ({
+          ...p,
+          chosen: p.name === "opencode",
+          models: p.models.map((m) => ({ ...m, chosen: m.value === "opencode/big-pickle" })),
+        })),
+      },
+    });
+    answer({ settings_data: () => opencode, save: () => picked });
+    open("agent");
+    await pick("provider", "opencode");
+    await pick("model", "-default");
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("save", {
+        setting: { kind: "model", agent: "opencode", model: null },
+      }),
+    );
+    await pick("model", "opencode/big-pickle");
+    await screen.findByText("Saved");
+    expect((await menu("provider")).value).toBe("opencode");
+    expect((await menu("model")).value).toBe("opencode/big-pickle");
+  });
+
   it("is offered only once an agent is chosen", async () => {
     answer({ settings_data: () => settingsView() });
     open("agent");
-    await screen.findByText("Claude Code");
-    expect(screen.queryByText("Model")).toBeNull();
+    await menu("agent");
+    expect(document.getElementById("model")).toBeNull();
   });
 
-  it("shows the chosen provider's models, and another provider's on a tap", async () => {
+  it("offers the chosen provider's models, and another provider's when picked", async () => {
     answer({ settings_data: () => opencode, save: () => opencode });
     open("agent");
-    expect((await row("gemma4:e4b")).ariaChecked).toBe("true");
-    expect(within(await row("gemma4:e4b")).getByText("ollama/gemma4:e4b")).toBeTruthy();
-    expect((await row("Default")).ariaChecked).toBe("false");
-    expect(screen.queryByText("big-pickle")).toBeNull();
-    expect(screen.getByRole("button", { name: "ollama" }).ariaPressed).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "opencode" }));
-    expect(screen.getByRole("button", { name: "opencode" }).className).toBe("chip on");
-    fireEvent.click(await screen.findByText("big-pickle"));
+    expect(await options("provider")).toEqual([
+      ["opencode", "opencode", false],
+      ["ollama", "ollama", false],
+    ]);
+    expect((await menu("provider")).value).toBe("ollama");
+    expect(await options("model")).toEqual([
+      ["-default", "Default", false],
+      ["ollama/gemma4:e4b", "gemma4:e4b", false],
+      ["-custom", "Custom…", false],
+    ]);
+    expect((await menu("model")).value).toBe("ollama/gemma4:e4b");
+    await pick("provider", "opencode");
+    expect((await menu("model")).value).toBe("-none");
+    expect((await options("model"))[0]).toEqual(["-none", "Choose one", true]);
+    expect(invoke).not.toHaveBeenCalledWith("save", expect.anything());
+    await pick("model", "opencode/big-pickle");
     await screen.findByText("Saved");
     expect(invoke).toHaveBeenCalledWith("save", {
       setting: { kind: "model", agent: "opencode", model: "opencode/big-pickle" },
     });
-    fireEvent.click(screen.getByText("Default"));
+    await pick("model", "-default");
     await vi.waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("save", {
         setting: { kind: "model", agent: "opencode", model: null },
@@ -504,39 +594,46 @@ describe("the model", () => {
     );
   });
 
-  it("shows the provider Rust marks once a save returns, whatever tab was open", async () => {
+  it("shows the provider Rust marks once a save returns, whatever was picked", async () => {
     // Rust sends a new view with every reply.
     answer({ settings_data: () => opencode, save: () => structuredClone(opencode) });
     open("agent");
-    fireEvent.click(await screen.findByRole("button", { name: "opencode" }));
-    expect(await screen.findByText("big-pickle")).toBeTruthy();
-    fireEvent.input(screen.getByPlaceholderText("Another model"), {
-      target: { value: "ollama/gemma4:e4b" },
-    });
-    fireEvent.submit(
-      screen.getByPlaceholderText("Another model").closest("form") as HTMLFormElement,
-    );
+    await pick("provider", "opencode");
+    await pick("model", "opencode/big-pickle");
     await screen.findByText("Saved");
-    expect(screen.getByRole("button", { name: "ollama" }).ariaPressed).toBe("true");
-    expect((await row("gemma4:e4b")).ariaChecked).toBe("true");
+    expect((await menu("provider")).value).toBe("ollama");
+    expect((await menu("model")).value).toBe("ollama/gemma4:e4b");
   });
 
-  it("clears a typed model when the agent changes", async () => {
-    const claude = settingsView({
-      model: { ...(opencode.model as NonNullable<SettingsView["model"]>), agent: "claude" },
-    });
-    answer({ settings_data: () => opencode, save: () => claude });
+  it("opens a field for a custom model, empty each time, closed by the next view", async () => {
+    answer({ settings_data: () => opencode, save: () => structuredClone(opencode) });
     open("agent");
+    expect(screen.queryByPlaceholderText("Another model")).toBeNull();
+    await pick("model", "-custom");
     const input = (await screen.findByPlaceholderText("Another model")) as HTMLInputElement;
-    fireEvent.input(input, { target: { value: "half typed" } });
-    fireEvent.click(screen.getByText("Claude Code"));
+    expect((await menu("model")).value).toBe("-custom");
+    await vi.waitFor(() => expect(document.activeElement).toBe(input));
+    expect(invoke).not.toHaveBeenCalledWith("save", expect.anything());
+    expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.input(input, { target: { value: "  " } });
+    expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.input(input, { target: { value: "ollama/qwen3" } });
+    fireEvent.submit(input.form as HTMLFormElement);
     await screen.findByText("Saved");
-    expect(input.value).toBe("");
+    expect(invoke).toHaveBeenCalledWith("save", {
+      setting: { kind: "model", agent: "opencode", model: "ollama/qwen3" },
+    });
+    expect(screen.queryByPlaceholderText("Another model")).toBeNull();
+    await pick("model", "-custom");
+    expect(((await screen.findByPlaceholderText("Another model")) as HTMLInputElement).value).toBe(
+      "",
+    );
   });
 
-  it("keeps a typed model that Rust refuses, to be corrected", async () => {
+  it("keeps a custom model that Rust refuses, to be corrected", async () => {
     answer({ settings_data: () => opencode, save: () => Promise.reject("models.opencode: bad") });
     open("agent");
+    await pick("model", "-custom");
     const input = (await screen.findByPlaceholderText("Another model")) as HTMLInputElement;
     fireEvent.input(input, { target: { value: "a b" } });
     fireEvent.submit(input.form as HTMLFormElement);
@@ -544,7 +641,30 @@ describe("the model", () => {
     expect(input.value).toBe("a b");
   });
 
-  it("takes a typed model, and asks for one when the agent lists none", async () => {
+  it("does not bring a refused name back once another change went through", async () => {
+    let saves = 0;
+    answer({
+      settings_data: () => opencode,
+      save: () => {
+        saves += 1;
+        return saves === 1 ? Promise.reject("refused") : structuredClone(opencode);
+      },
+    });
+    open("agent");
+    await pick("model", "-custom");
+    const input = (await screen.findByPlaceholderText("Another model")) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "a b" } });
+    fireEvent.submit(input.form as HTMLFormElement);
+    await screen.findByText(/refused/);
+    await pick("model", "-default");
+    await screen.findByText("Saved");
+    await pick("model", "-custom");
+    expect(((await screen.findByPlaceholderText("Another model")) as HTMLInputElement).value).toBe(
+      "",
+    );
+  });
+
+  it("offers Default and Custom, and a provider menu only for several providers", async () => {
     const gemini = settingsView({
       model: {
         agent: "gemini",
@@ -554,25 +674,23 @@ describe("the model", () => {
         providers: [],
       },
     });
-    answer({ settings_data: () => gemini, save: () => gemini });
+    answer({ settings_data: () => gemini });
     open("agent");
-    const input = (await screen.findByPlaceholderText(
-      "Model name, as --model takes it",
-    )) as HTMLInputElement;
-    expect(screen.queryByRole("group", { name: "Provider" })).toBeNull();
-    expect((await row("Default")).ariaChecked).toBe("true");
-    expect((screen.getByText("Use") as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.input(input, { target: { value: "gemini-3.1-pro" } });
-    fireEvent.submit(input.form as HTMLFormElement);
-    await screen.findByText("Saved");
-    expect(invoke).toHaveBeenCalledWith("save", {
-      setting: { kind: "model", agent: "gemini", model: "gemini-3.1-pro" },
-    });
-    expect(input.value).toBe("");
+    expect(await options("model")).toEqual([
+      ["-default", "Default", false],
+      ["-custom", "Custom…", false],
+    ]);
+    expect((await menu("model")).value).toBe("-default");
+    expect(document.getElementById("provider")).toBeNull();
+    await pick("model", "-custom");
+    expect(await screen.findByPlaceholderText("Model name, as --model takes it")).toBeTruthy();
     cleanup();
-    answer({ settings_data: () => opencode });
+    const one = opencode.model as NonNullable<SettingsView["model"]>;
+    const single = { ...one, providers: one.providers.slice(1) };
+    answer({ settings_data: () => settingsView({ model: single }) });
     open("agent");
-    expect(await screen.findByPlaceholderText("Another model")).toBeTruthy();
+    expect((await menu("model")).value).toBe("ollama/gemma4:e4b");
+    expect(document.getElementById("provider")).toBeNull();
   });
 });
 
@@ -587,7 +705,7 @@ describe("replies out of order", () => {
     open();
     fireEvent.click(await screen.findByText("Look again"));
     fireEvent.click(screen.getByText("Agent"));
-    fireEvent.click(await screen.findByText("Claude Code"));
+    await pick("agent", "claude");
     replies[1]?.(settingsView({ headline: "after the change" }));
     await screen.findByText("Saved");
     replies[0]?.(settingsView({ headline: "before the change" }));

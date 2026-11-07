@@ -46,7 +46,8 @@ button {
   color: inherit;
 }
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid var(--run);
   outline-offset: 2px;
 }
