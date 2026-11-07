@@ -49,6 +49,15 @@ async function menu(id: string): Promise<HTMLSelectElement> {
   });
 }
 
+/** The text of what `aria-describedby` points at, as a screen reader reads it after the name. */
+function described(element: HTMLElement): string {
+  return (element.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .filter((text) => text !== "")
+    .join(" ");
+}
+
 /** Picks `value` in the menu with this id. */
 async function pick(id: string, value: string): Promise<void> {
   fireEvent.change(await menu(id), { target: { value } });
@@ -592,6 +601,23 @@ describe("the model", () => {
         setting: { kind: "model", agent: "opencode", model: null },
       }),
     );
+  });
+
+  it("names each menu by its label, and describes it by its hint and badge", async () => {
+    const agents = opencode.agents.map((a) => ({ ...a, chosen: a.agent === "claude" }));
+    answer({ settings_data: () => ({ ...opencode, agents }) });
+    open("agent");
+    await menu("model");
+    const agent = screen.getByRole("combobox", { name: "Agent" });
+    expect(agent.id).toBe("agent");
+    expect(described(agent)).toBe("Found /bin/claude");
+    expect(described(screen.getByRole("combobox", { name: "Provider" }))).toBe(
+      "Whose models the list below offers.",
+    );
+    expect(described(screen.getByRole("combobox", { name: "Model" }))).toMatch(
+      /^Default leaves the choice to the agent\./,
+    );
+    expect(screen.getByText(/Agents are found through your login shell/)).toBeTruthy();
   });
 
   it("shows the provider Rust marks once a save returns, whatever was picked", async () => {

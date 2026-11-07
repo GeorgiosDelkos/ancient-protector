@@ -176,10 +176,7 @@ function Summary(props: { overview: Overview; now: Date; onSweep: () => void }) 
             <Show when={exploited() > 0}>
               <span class="kev-text">{exploited()} exploited in the wild</span> ·{" "}
             </Show>
-            {/* Before the first sweep the headline already says so; this line says what to do. */}
-            {swept() === null
-              ? "Sweep checks your targets against the newest advisories."
-              : `swept ${since(swept() ?? "", props.now)} ago`}
+            {props.overview.first_sweep_hint ?? `swept ${since(swept() ?? "", props.now)} ago`}
           </p>
         </div>
         <button type="button" class="pill" onClick={() => props.onSweep()}>

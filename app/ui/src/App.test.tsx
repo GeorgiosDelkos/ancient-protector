@@ -68,6 +68,7 @@ const two = () =>
     counts: { critical: 0, high: 1, medium: 1, low: 1 },
     headline: "2 findings need you",
     last_swept: "2026-11-06T11:00:00Z",
+    first_sweep_hint: null,
   });
 
 beforeEach(() => {
@@ -134,7 +135,12 @@ describe("the popover", () => {
   });
 
   it("shows all clear once a sweep found nothing", async () => {
-    shown = overview({ last_swept: "2026-11-06T11:00:00Z", dismissed: 2, all_clear: true });
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      dismissed: 2,
+      all_clear: true,
+    });
     answer();
     render(() => <App />);
     expect(await screen.findByText("All clear")).toBeTruthy();
@@ -587,7 +593,11 @@ describe("state across commands", () => {
   });
 
   it("says nothing about dismissals when there are none", async () => {
-    shown = overview({ last_swept: "2026-11-06T11:00:00Z", all_clear: true });
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      all_clear: true,
+    });
     answer();
     render(() => <App />);
     const text = (await screen.findByText(/target swept/)).textContent ?? "";

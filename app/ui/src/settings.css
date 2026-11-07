@@ -611,13 +611,13 @@ button.srow:active:not(:disabled) {
   margin: -2px 0 2px;
   font-size: 11px;
   line-height: 1.4;
-  color: var(--l3);
+  color: var(--l2);
   text-wrap: pretty;
 }
 .fld-path {
   min-width: 0;
   font: 10.5px/1.3 var(--mono);
-  color: var(--l3);
+  color: var(--l2);
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -634,11 +634,8 @@ button.srow:active:not(:disabled) {
   display: flex;
   gap: 6px;
 }
-.fld-custom .field,
 .fld-custom .btn {
   height: 30px;
-}
-.fld-custom .btn {
   padding-block: 0;
 }
 .menu-pick {
@@ -646,35 +643,41 @@ button.srow:active:not(:disabled) {
   display: flex;
   min-width: 0;
 }
-.menu-pick select {
-  appearance: none;
-  width: 100%;
-  min-width: 0;
+/* The menus and the custom-name field share one look: a 1 pixel edge at --l3, about 3:1
+   against the card as a control's edge needs (WCAG 1.4.11), and one focus ring. */
+.menu-pick select,
+.fld-custom .field {
   height: 30px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  padding: 0 28px 0 10px;
   border: 0;
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.22);
-  box-shadow: inset 0 0 0 0.5px var(--l4);
-  color: var(--l1);
-  font: 12.5px var(--ui);
-  color-scheme: dark;
+  box-shadow: inset 0 0 0 1px var(--l3);
   transition:
     box-shadow 120ms,
     background 120ms;
 }
-.menu-pick select:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.3);
-  box-shadow: inset 0 0 0 0.5px var(--l3);
-}
-.menu-pick select:focus-visible {
+.menu-pick select:focus-visible,
+.fld-custom .field:focus-visible {
   outline: none;
   box-shadow:
     inset 0 0 0 1px var(--run),
-    0 0 0 3px rgba(110, 155, 255, 0.28);
+    0 0 0 3px color-mix(in srgb, var(--run) 28%, transparent);
+}
+.menu-pick select {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 0 28px 0 10px;
+  color: var(--l1);
+  font: 12.5px var(--ui);
+  color-scheme: dark;
+}
+.menu-pick select:hover:not(:disabled, :focus-visible) {
+  background: rgba(0, 0, 0, 0.3);
+  box-shadow: inset 0 0 0 1px var(--l2);
 }
 .menu-pick .icon {
   position: absolute;

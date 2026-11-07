@@ -321,7 +321,7 @@ function Agent(props: Props) {
         aside={
           <Show when={chosen()}>
             {(agent) => (
-              <span class={`state ${agent().path === null ? "no" : "ok"}`}>
+              <span id="agent-state" class={`state ${agent().path === null ? "no" : "ok"}`}>
                 {agent().path === null ? "Not found" : "Found"}
               </span>
             )}
@@ -330,6 +330,7 @@ function Agent(props: Props) {
       >
         <Menu
           id="agent"
+          describedBy="agent-state agent-path"
           value={chosen()?.agent ?? NONE}
           onPick={(agent) => void props.save({ kind: "agent", agent })}
         >
@@ -348,7 +349,9 @@ function Agent(props: Props) {
         </Menu>
         <Show when={chosen()}>
           {(agent) => (
-            <span class="fld-path">{agent().path ?? "not on your login shell's PATH"}</span>
+            <span id="agent-path" class="fld-path">
+              {agent().path ?? "not on your login shell's PATH"}
+            </span>
           )}
         </Show>
       </Field>
@@ -361,7 +364,8 @@ function Agent(props: Props) {
 }
 
 /** One setting in a form card: its label (with an optional badge at the end of the line), an
- * optional line saying what it does, then its control across the full width. */
+ * optional line saying what it does, then its control across the full width. The hint's id is
+ * the control's id with `-hint`, for the control's `aria-describedby`. */
 function Field(props: {
   for: string;
   label: string;
@@ -376,7 +380,9 @@ function Field(props: {
         {props.aside}
       </div>
       <Show when={props.hint}>
-        <p class="fld-hint">{props.hint}</p>
+        <p class="fld-hint" id={`${props.for}-hint`}>
+          {props.hint}
+        </p>
       </Show>
       {props.children}
     </div>
@@ -386,6 +392,8 @@ function Field(props: {
 /** A native drop-down menu, drawn as a full-width field with a chevron. */
 function Menu(props: {
   id: string;
+  /** The ids of what describes the menu: its field's hint, a badge. */
+  describedBy: string;
   value: string;
   onPick: (value: string) => void;
   children: JSX.Element;
@@ -406,6 +414,7 @@ function Menu(props: {
       <select
         ref={(el) => (select = el)}
         id={props.id}
+        aria-describedby={props.describedBy}
         onChange={(e) => {
           props.onPick(e.currentTarget.value);
           // The menu shows what Rust has, not what was clicked: a pick that is saved moves it
@@ -466,6 +475,7 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
         <Field for="provider" label="Provider" hint="Whose models the list below offers.">
           <Menu
             id="provider"
+            describedBy="provider-hint"
             value={shown()?.name ?? ""}
             onPick={(name) => setPicked({ name, on: props.model })}
           >
@@ -480,7 +490,7 @@ function Model(props: { model: ModelView; save: Props["save"] }) {
         label="Model"
         hint="Default leaves the choice to the agent. Custom takes any name its --model accepts."
       >
-        <Menu id="model" value={value()} onPick={pick}>
+        <Menu id="model" describedBy="model-hint" value={value()} onPick={pick}>
           <Show when={value() === NONE}>
             <option value={NONE} disabled>
               Choose one
