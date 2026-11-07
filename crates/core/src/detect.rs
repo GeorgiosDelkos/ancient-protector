@@ -397,17 +397,16 @@ mod tests {
     #[test]
     fn models_are_listed_by_the_agents_that_list_them() {
         let dir = tempfile::tempdir().unwrap();
-        let script = |name: &str, body: &str| {
+        let at = |name: &str, body: &str| {
             let path = dir.path().join(name);
-            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            script(&path, body);
             path
         };
-        let grok = script(
+        let grok = at(
             "grok",
             r#"[ "$1" = models ] && printf 'Available models:\n  * grok-4.7 (default)\n'"#,
         );
-        let failing = script("failing", "echo 'Available models:'; echo '- x'; exit 1");
+        let failing = at("failing", "echo 'Available models:'; echo '- x'; exit 1");
         assert_eq!(
             listed_models(AgentKind::Grok, &grok),
             Some(vec!["grok-4.7".to_owned()])
@@ -415,7 +414,7 @@ mod tests {
         assert_eq!(listed_models(AgentKind::Grok, &failing), None);
         assert_eq!(listed_models(AgentKind::Claude, &grok), None);
         assert_eq!(
-            listed_models(AgentKind::Opencode, &script("oc", "echo ollama/qwen3")),
+            listed_models(AgentKind::Opencode, &at("oc", "echo ollama/qwen3")),
             Some(vec!["ollama/qwen3".to_owned()])
         );
     }

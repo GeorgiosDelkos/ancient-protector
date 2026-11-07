@@ -25,6 +25,8 @@ use crate::config::ServerName;
 use crate::config::SshConn;
 use crate::config::SshWord;
 use crate::detect::Detected;
+use crate::feeds::NVD_PER_30_SECONDS_ANONYMOUS;
+use crate::feeds::NVD_PER_30_SECONDS_WITH_KEY;
 
 /// The interval the "Every N hours" field shows while the schedule is manual. Arbitrary: four
 /// sweeps a day.
@@ -77,9 +79,12 @@ pub struct NvdRate {
     pub applies: bool,
 }
 
-/// NVD's published limits, in requests per rolling 30 seconds: 5 without a key and 50 with one
-/// (<https://nvd.nist.gov/developers/start-here>, "Rate Limits").
-const NVD_RATES: [(&str, u32); 2] = [("Without a key", 5), ("With a key", 50)];
+/// NVD's limits as the settings show them: each one's label, its rate, and whether it is the
+/// one with a key.
+const NVD_RATES: [(&str, u32, bool); 2] = [
+    ("Without a key", NVD_PER_30_SECONDS_ANONYMOUS, false),
+    ("With a key", NVD_PER_30_SECONDS_WITH_KEY, true),
+];
 
 /// A section of the settings.
 #[derive(Debug, Serialize)]
@@ -317,10 +322,10 @@ pub fn settings_view(config: &Config, detected: &Detected, home: &Path) -> Setti
         servers,
         hosts,
         nvd_key: detected.nvd_key,
-        nvd_rates: NVD_RATES.map(|(label, per_30_seconds)| NvdRate {
+        nvd_rates: NVD_RATES.map(|(label, per_30_seconds, with_key)| NvdRate {
             label,
             per_30_seconds,
-            applies: (per_30_seconds == NVD_RATES[1].1) == detected.nvd_key,
+            applies: with_key == detected.nvd_key,
         }),
     }
 }

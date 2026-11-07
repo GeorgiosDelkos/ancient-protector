@@ -978,9 +978,8 @@ fn fetch_nvd(
 pub(crate) fn locate_configured(config: &Config) -> Result<(AgentKind, Located), SweepError> {
     let agent = config.agent.ok_or(SweepError::NoAgent)?;
     let located = agent
-        .locate()?
-        .ok_or(SweepError::AgentNotFound { agent })?
-        .run_with(config.models.get(&agent));
+        .locate(config.models.get(&agent))?
+        .ok_or(SweepError::AgentNotFound { agent })?;
     Ok((agent, located))
 }
 
@@ -1478,6 +1477,12 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn no_agent_is_found_until_one_is_chosen() {
+        let err = locate_configured(&Config::default_for_tests()).unwrap_err();
+        assert!(matches!(err, SweepError::NoAgent), "{err}");
+    }
 
     #[test]
     fn target_names_list_the_mac_then_repositories_then_servers() {

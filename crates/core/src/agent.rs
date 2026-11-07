@@ -125,12 +125,13 @@ impl AgentKind {
     /// Homebrew. Returns `None` when the shell cannot find it as a file (an alias or a shell
     /// function does not count).
     ///
-    /// Runs `$SHELL -lc`, which reads the user's shell startup files.
+    /// Runs `$SHELL -lc`, which reads the user's shell startup files. The agent found runs
+    /// `model`, or its own default for `None`.
     ///
     /// # Errors
     ///
     /// Fails when the shell itself cannot be run.
-    pub(crate) fn locate(self) -> Result<Option<Located>, AgentError> {
+    pub(crate) fn locate(self, model: Option<&ModelName>) -> Result<Option<Located>, AgentError> {
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
         let script = format!(
             "printf '%s\\n' {PATH_MARK} \"$PATH\" {BINARY_MARK}; command -v {}; \
@@ -138,7 +139,10 @@ impl AgentKind {
             self.binary()
         );
         match command::run_any_status(&shell, &["-lc", &script]) {
-            Ok(Some(output)) => Ok(parse_located(&output.stdout)),
+            Ok(Some(output)) => Ok(parse_located(&output.stdout).map(|found| Located {
+                model: model.cloned(),
+                ..found
+            })),
             Ok(None) => Err(AgentError::NoShell { shell }),
             Err(source) => Err(AgentError::Locate {
                 agent: self,
@@ -316,18 +320,6 @@ pub(crate) struct Located {
     model: Option<ModelName>,
 }
 
-impl Located {
-    /// The agent, run with `model` when there is one. Only
-    /// [`locate_configured`](crate::sweep::locate_configured) calls it, so every run gets the
-    /// configured model.
-    pub(crate) fn run_with(self, model: Option<&ModelName>) -> Self {
-        Self {
-            model: model.cloned(),
-            ..self
-        }
-    }
-}
-
 #[cfg(test)]
 impl Located {
     /// An agent at `binary`, for tests of code that only passes it on.
@@ -427,7 +419,10 @@ mod tests {
     #[test]
     fn a_chosen_model_comes_before_the_prompt_in_sweeps_and_fixes() {
         let model: ModelName = "ollama/gemma4:e4b".parse().unwrap();
-        let at = located(Path::new("/bin/x")).run_with(Some(&model));
+        let at = Located {
+            model: Some(model),
+            ..located(Path::new("/bin/x"))
+        };
         let words = |command: Command| -> Vec<String> {
             command
                 .get_args()
@@ -453,7 +448,7 @@ mod tests {
                 "{kind}: {fix:?}"
             );
         }
-        let default = located(Path::new("/bin/x")).run_with(None);
+        let default = located(Path::new("/bin/x"));
         let args = words(AgentKind::Claude.sweep_command(&default, Path::new("/b"), "P"));
         assert!(!args.iter().any(|a| a == "--model"), "{args:?}");
     }
