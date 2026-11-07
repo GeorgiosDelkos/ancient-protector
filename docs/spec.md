@@ -16,7 +16,7 @@ and the user can approve a fix the agent then performs.
 
 | Area | Decision |
 |---|---|
-| Name | Vigil (2026-11-07; was Ancient Protector, which the owner found not technical enough). Mark: one spiral arm of dots growing outward, a sweep spreading from a point; sources and the script that draws them in `app/src-tauri/icons/src/`. The data folder and the Keychain service use the bundle id `io.github.georgiosdelkos.vigil`, as `vigil` alone is generic enough for another app to share |
+| Name | Vigil (2026-11-07; was Ancient Protector, which the owner found not technical enough). Mark: one spiral arm of dots growing outward, a sweep spreading from a point; its SVGs and `marks.py`, which draws them and says how the PNGs are rendered, in `app/src-tauri/icons/src/`. The data folder and the Keychain service use the bundle id `io.github.georgiosdelkos.vigil`, as `vigil` alone is generic enough for another app to share |
 | Outcome | Report, and fix on per-finding approval |
 | Who decides "affected" | The agent. The app only narrows input |
 | Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
@@ -384,7 +384,7 @@ not an OSV ecosystem, so formulae go through NVD.
   history on the first fetch, then `lastModStartDate`/`lastModEndDate` windows (120-day
   maximum; an older cache is fetched in full again). Requests are paced to the published
   limit: 5 per 30 s without a key, 50 per 30 s with an API key read from the macOS Keychain
-  (service `vigil`, account `nvd-api-key`).
+  (service `io.github.georgiosdelkos.vigil`, account `nvd-api-key`).
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
 - `history.since` drops advisories both published and last modified before that date (NVD keeps
